@@ -36,6 +36,10 @@ export interface Entity {
   accel: THREE.Vector3; // measured acceleration over the last step — drives the forces window
   bbCenter: THREE.Vector3; // local-space bounding box (center/half-extents) — for the floor clamp
   bbHalf: THREE.Vector3;
+  // exact floor-clamp support data for custom shapes: the local points that define the collider
+  // (hull cloud / slab corners / capsule segment ends), plus a radius to pad below them (the tube
+  // radius for capsule chains, 0 for hulls). Lowest world-Y over these = the body's true bottom.
+  support?: { points: Float32Array; pad: number };
   mesh?: THREE.Mesh; // present for kind === 'custom' (unique geometry → its own draw call)
   volume?: number; // m³, for custom shapes (shown in the inspector)
   label?: string; // e.g. "revolution: 1.1 + 0.55*sin(x*0.9)"
@@ -274,6 +278,7 @@ export class Sandbox {
     this.world.createCollider(colDesc, body);
 
     const e = this.finishCustomEntity(body, s.geometry, p, s.maxRadius, s.volume, `revolution: ${spec.expr}`);
+    e.support = { points: s.hull, pad: 0 }; // collider = hull of exactly these points
     return { ok: true, entity: e };
   }
 
@@ -308,14 +313,27 @@ export class Sandbox {
     }
 
     const e = this.finishCustomEntity(body, s.geometry, p, s.maxRadius, s.volume, `curve: ${spec.xt}, ${spec.yt}, ${spec.zt}`);
+    // support points = capsule segment ends; the tube radius pads below them (a segment's lowest
+    // world-Y is at an endpoint, so this is the exact capsule-chain bottom)
+    const ends = new Float32Array(s.capsules.length * 6);
+    const axis = new THREE.Vector3();
+    const q = new THREE.Quaternion();
+    s.capsules.forEach((cap, i) => {
+      q.set(cap.quat[0], cap.quat[1], cap.quat[2], cap.quat[3]);
+      axis.set(0, cap.halfHeight, 0).applyQuaternion(q);
+      ends[i * 6] = cap.center[0] + axis.x; ends[i * 6 + 1] = cap.center[1] + axis.y; ends[i * 6 + 2] = cap.center[2] + axis.z;
+      ends[i * 6 + 3] = cap.center[0] - axis.x; ends[i * 6 + 4] = cap.center[1] - axis.y; ends[i * 6 + 5] = cap.center[2] - axis.z;
+    });
+    e.support = { points: ends, pad: s.tube };
     return { ok: true, entity: e };
   }
 
   /**
    * Create a parametric surface x(u,v),y(u,v),z(u,v) — as a thin shell (any surface) or a filled
    * solid (closed surfaces). Mass/c.o.m./inertia are exact for the triangulated surface (see
-   * systems/shapes.ts); Rapier gets principal moments + frame like the curves. The collider is a
-   * convex hull — rounded outward by half the wall thickness in shell mode so the wall is solid.
+   * systems/shapes.ts); Rapier gets principal moments + frame like the curves. Collision is a
+   * slab tiling — one small convex hull per coarse grid cell — so concavity is real: a ball
+   * threads a torus's hole and a bowl cups a marble.
    */
   createParamSurface(spec: ParamSurfaceSpec): { ok: true; entity: Entity } | { ok: false; error: string } {
     if (this.entities.length >= MAX_INSTANCES) return { ok: false, error: 'Object limit reached.' };
@@ -331,22 +349,24 @@ export class Sandbox {
         .setAdditionalMassProperties(s.mass, { x: 0, y: 0, z: 0 }, s.inertia, s.inertiaFrame)
         .setCcdEnabled(true),
     );
-    let colDesc =
-      spec.mode === 'shell'
-        ? RAPIER.ColliderDesc.roundConvexHull(s.hull, Math.min(spec.thickness / 2, 0.25))
-        : RAPIER.ColliderDesc.convexHull(s.hull);
-    if (!colDesc) {
-      // hull failed (e.g. a perfectly flat sheet) → thin box around the geometry's bounds
-      s.geometry.computeBoundingBox();
-      const half = s.geometry.boundingBox!.getSize(new THREE.Vector3()).multiplyScalar(0.5);
-      colDesc = RAPIER.ColliderDesc.cuboid(Math.max(half.x, 0.03), Math.max(half.y, 0.03), Math.max(half.z, 0.03));
+    let attached = 0;
+    for (const slab of s.slabs) {
+      const colDesc = RAPIER.ColliderDesc.convexHull(slab);
+      if (!colDesc) continue; // degenerate cell (pole wedge) — its neighbors cover the gap
+      this.world.createCollider(colDesc.setFriction(0.6).setRestitution(0.3).setDensity(0), body);
+      attached++;
     }
-    this.world.createCollider(colDesc.setFriction(0.6).setRestitution(0.3).setDensity(0), body);
+    if (!attached) {
+      // pathological surface (every cell degenerate) — keep it interactable with a bounding ball
+      this.world.createCollider(
+        RAPIER.ColliderDesc.ball(s.maxRadius).setFriction(0.6).setRestitution(0.3).setDensity(0), body);
+    }
 
     const e = this.finishCustomEntity(
       body, s.geometry, p, s.maxRadius, s.volume,
       `surface (${s.mode}): ${spec.xuv}, ${spec.yuv}, ${spec.zuv}`,
     );
+    e.support = { points: s.supportPoints, pad: 0 }; // slab corners = the collider's extremes
     // open surfaces are visible from both sides (a Möbius strip has no inside)
     (e.mesh!.material as THREE.MeshStandardMaterial).side = THREE.DoubleSide;
     return { ok: true, entity: e };
@@ -655,8 +675,9 @@ export class Sandbox {
   };
 
   /**
-   * World-space Y of the body's lowest point (exact for spheres; oriented-bounding-box support
-   * point for everything else). Drives the drag clamp that keeps held objects above the floor.
+   * World-space Y of the body's lowest point — exact for spheres (radius), boxes (OBB), and custom
+   * shapes (true support point over the collider's defining points, minus its pad radius).
+   * Drives the drag clamp that keeps held objects above the floor.
    */
   private bodyBottomY(e: Entity): number {
     const t = e.body.translation();
@@ -666,6 +687,15 @@ export class Sandbox {
     const yx = 2 * (q.x * q.y + q.w * q.z);
     const yy = 1 - 2 * (q.x * q.x + q.z * q.z);
     const yz = 2 * (q.y * q.z - q.w * q.x);
+    if (e.support) {
+      const pts = e.support.points;
+      let min = Infinity;
+      for (let k = 0; k < pts.length; k += 3) {
+        const y = pts[k] * yx + pts[k + 1] * yy + pts[k + 2] * yz;
+        if (y < min) min = y;
+      }
+      return t.y + min - e.support.pad;
+    }
     const c = e.bbCenter, h = e.bbHalf;
     const centerY = t.y + c.x * yx + c.y * yy + c.z * yz;
     return centerY - (h.x * Math.abs(yx) + h.y * Math.abs(yy) + h.z * Math.abs(yz));

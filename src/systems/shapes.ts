@@ -337,9 +337,16 @@ export function buildParamCurve(spec: ParamCurveSpec): ParamCurveResult {
     const a = pts[Math.round((N * k) / chunkCount)].clone().sub(com);
     const b = pts[Math.round((N * (k + 1)) / chunkCount)].clone().sub(com);
     const seg = new THREE.Vector3().subVectors(b, a);
-    const segLen = seg.length();
+    let segLen = seg.length();
     if (segLen < 1e-6) continue;
-    const q = new THREE.Quaternion().setFromUnitVectors(yAxis, seg.divideScalar(segLen));
+    seg.divideScalar(segLen);
+    // open ends: pull the end capsules in by one tube radius, so the rounded cap lands exactly on
+    // the curve end instead of overshooting past it by r
+    if (!closed) {
+      if (k === 0) { const trim = Math.min(tube, 0.45 * segLen); a.addScaledVector(seg, trim); segLen -= trim; }
+      if (k === chunkCount - 1) { const trim = Math.min(tube, 0.45 * segLen); b.addScaledVector(seg, -trim); segLen -= trim; }
+    }
+    const q = new THREE.Quaternion().setFromUnitVectors(yAxis, seg);
     const c = new THREE.Vector3().addVectors(a, b).multiplyScalar(0.5);
     capsules.push({ center: [c.x, c.y, c.z], halfHeight: segLen / 2, quat: [q.x, q.y, q.z, q.w] });
   }
@@ -390,9 +397,13 @@ export const CURVE_PRESETS: CurvePreset[] = [
 // strip's seam matches with a flip, so it correctly reads as open.
 //
 // Like the curves, the tensor is generally non-diagonal → Jacobi → principal moments + frame.
-// Collider: convex hull — rounded outward by h/2 in shell mode so the wall has its thickness.
-// Honest limitation: the hull fills a torus's hole and a bowl's cavity (the curve creator's
-// capsule chain is the hollow-ring path; convex decomposition is the later upgrade).
+//
+// COLLIDER: a slab tiling — the 2D analogue of the curves' capsule chain. A coarse version of the
+// sampling grid is tiled with one small convex hull per cell (its 4 corners pushed along the
+// vertex normals: ±h/2 for a shell wall, a skin just inside the boundary for a solid). Neighboring
+// cells share corner points, so the tiling is watertight, and concavity is real: a ball threads a
+// torus's hole, a bowl cups a marble, a Möbius strip collides as a twisted band. All pieces are
+// convex → robust dynamic contacts (no dynamic-trimesh pitfalls).
 
 export interface ParamSurfaceSpec {
   xuv: string; yuv: string; zuv: string; // coordinates as functions of u and v
@@ -404,7 +415,8 @@ export interface ParamSurfaceSpec {
 
 export interface BuiltParamSurface {
   geometry: THREE.BufferGeometry; // centered on the center of mass
-  hull: Float32Array; // point cloud for the convex-hull collider (c.o.m.-centered)
+  slabs: Float32Array[]; // per-cell point clouds (c.o.m.-centered) — one convex collider each
+  supportPoints: Float32Array; // every slab corner, flattened — exact support-point queries
   area: number; // m² of the mid-surface
   volume: number; // m³ — shell: area × thickness · solid: enclosed volume
   mass: number;
@@ -516,6 +528,7 @@ export function buildParamSurface(spec: ParamSurfaceSpec): ParamSurfaceResult {
   }
 
   let mass: number, volume: number;
+  let outwardSgn = 1; // sign that makes (ru×rv) point out of a closed surface (solid slabs need it)
   const com = new THREE.Vector3();
   if (spec.mode === 'shell') {
     if (area < 1e-6) return { ok: false, error: 'Surface has ~zero area.' };
@@ -525,6 +538,7 @@ export function buildParamSurface(spec: ParamSurfaceSpec): ParamSurfaceResult {
     for (let r = 0; r < 3; r++) for (let c = 0; c < 3; c++) C[r][c] *= density * h;
   } else {
     const sgn = vol6 < 0 ? -1 : 1; // grid winding decides the sign — flip everything if inward
+    outwardSgn = sgn;
     volume = (sgn * vol6) / 6;
     if (volume < 1e-6) return { ok: false, error: 'Enclosed volume is ~zero — use shell.' };
     mass = density * volume;
@@ -565,24 +579,64 @@ export function buildParamSurface(spec: ParamSurfaceSpec): ParamSurfaceResult {
   geometry.setIndex(new THREE.BufferAttribute(indices, 1));
   geometry.computeVertexNormals();
 
-  // ---- convex-hull point cloud (subsampled grid) ----
-  const step = N / 16; // 17×17 cloud
-  const cloud: number[] = [];
-  for (let i = 0; i <= N; i += step) {
-    for (let j = 0; j <= N; j += step) {
-      const p = at(i, j);
-      cloud.push(p.x - com.x, p.y - com.y, p.z - com.z);
-    }
-  }
-
   let maxRadius = 0;
   for (const p of P) maxRadius = Math.max(maxRadius, p.distanceTo(com));
   if (spec.mode === 'shell') maxRadius += h / 2;
 
+  // ---- slab-tiled compound collider: one thin convex hull per coarse grid cell ----
+  const SLAB_GRID = 16; // 16×16 cells (≤256 pieces); corners land on fine-grid points (96/16 = 6)
+  const cs = N / SLAB_GRID;
+  // vertex normal from fine-grid differences — null at degenerate points (poles)
+  const cornerNormal = (i: number, j: number): THREE.Vector3 | null => {
+    const ru = new THREE.Vector3().subVectors(at(Math.min(i + 1, N), j), at(Math.max(i - 1, 0), j));
+    const rv = new THREE.Vector3().subVectors(at(i, Math.min(j + 1, N)), at(i, Math.max(j - 1, 0)));
+    const n = ru.cross(rv);
+    const len = n.length();
+    return len > 1e-9 ? n.divideScalar(len) : null;
+  };
+  // shell: wall spans ±h/2 around the mid-surface. solid: outer face ON the boundary, inner face a
+  // skin-depth inside it (contacts only ever see the boundary; CCD keeps things out of the hollow).
+  const skin = spec.mode === 'shell' ? h / 2 : Math.min(0.3, Math.max(0.05, 0.08 * maxRadius));
+  const slabs: Float32Array[] = [];
+  const support: number[] = [];
+  for (let a = 0; a < SLAB_GRID; a++) {
+    for (let b = 0; b < SLAB_GRID; b++) {
+      const corners = [
+        [a * cs, b * cs], [(a + 1) * cs, b * cs],
+        [(a + 1) * cs, (b + 1) * cs], [a * cs, (b + 1) * cs],
+      ] as const;
+      // zero-extent cell (fully collapsed at a pole) — nothing to collide with
+      const c0 = at(corners[0][0], corners[0][1]);
+      if (corners.every(([i, j]) => at(i, j).distanceTo(c0) < 1e-6)) continue;
+      const pts: number[] = [];
+      for (const [i, j] of corners) {
+        const p = at(i, j);
+        const n = cornerNormal(i, j);
+        if (!n) { pts.push(p.x - com.x, p.y - com.y, p.z - com.z); continue; } // pole corner: bare point
+        if (spec.mode === 'shell') {
+          pts.push(
+            p.x + n.x * skin - com.x, p.y + n.y * skin - com.y, p.z + n.z * skin - com.z,
+            p.x - n.x * skin - com.x, p.y - n.y * skin - com.y, p.z - n.z * skin - com.z,
+          );
+        } else {
+          n.multiplyScalar(outwardSgn);
+          pts.push(
+            p.x - com.x, p.y - com.y, p.z - com.z,
+            p.x - n.x * skin - com.x, p.y - n.y * skin - com.y, p.z - n.z * skin - com.z,
+          );
+        }
+      }
+      if (pts.length >= 12) { // ≥4 points — enough for Rapier to attempt a hull
+        slabs.push(new Float32Array(pts));
+        support.push(...pts);
+      }
+    }
+  }
+
   return {
     ok: true,
     shape: {
-      geometry, hull: new Float32Array(cloud), area, volume, mass,
+      geometry, slabs, supportPoints: new Float32Array(support), area, volume, mass,
       inertia: { x: principal[0], y: principal[1], z: principal[2] },
       inertiaFrame: { x: frame.x, y: frame.y, z: frame.z, w: frame.w },
       maxRadius, closed, mode: spec.mode,

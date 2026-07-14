@@ -36,9 +36,14 @@ and every expression renders as **live KaTeX math** (Desmos-style) under its inp
 emits LaTeX from the same parse that compiles the evaluator. Selection now has a **forces window**
 floating above the selected object (weight, measured ΣF = m·a, contact/drag decomposition, momentum,
 contacts), a **Delete object** button in the inspector, and **Delete all** below Reset scene.
-Known surface limitations: the hull collider fills a torus's hole / a bowl's cavity (use the curve
-creator for hollow rings; convex decomposition is the planned upgrade), and a perfectly flat sheet
-falls back to a thin-box collider.
+Collider fidelity (2026-07-14): surfaces use a **slab-tiled compound collider** (one small convex
+hull per coarse grid cell, corners pushed ±h/2 along vertex normals for shells / a skin inside the
+boundary for solids) — concavity is real and verified live: a marble settles inside a typed bowl, a
+ball threads a torus's hole; flat sheets tile fine (no fallback needed). Open curves trim their end
+capsules by one tube radius so caps land exactly on the curve ends. The drag floor-clamp now uses
+the exact support point for custom shapes (hull points / slab corners / capsule ends). Remaining
+honest notes: tube volume still ignores coil self-overlap (voxel path later), and V-HACD convex
+decomposition stays relevant only for the future GLTF/OBJ/STL import (no grid to exploit there).
 Next up in Phase 2: implicit/SDF surfaces (marching cubes) — or start Phase 3 materials.
 
 Stability hardening (2026-07-13): dynamic bodies now spawn with CCD enabled and reject deeply-
