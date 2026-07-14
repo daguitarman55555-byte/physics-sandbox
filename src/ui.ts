@@ -212,6 +212,8 @@ class ShapePreview {
       this.renderer = new THREE.WebGLRenderer({ canvas: this.canvas, antialias: true, alpha: true });
       this.renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
       this.renderer.setSize(this.canvas.clientWidth || 256, this.canvas.clientHeight || 200, false);
+      this.renderer.toneMapping = THREE.ACESFilmicToneMapping; // match the main view's look
+      this.renderer.toneMappingExposure = 1.2;
     }
     if (this.pending) {
       this.apply(this.pending.geometry, this.pending.caption);
@@ -842,7 +844,7 @@ function buildForcesView(sandbox: Sandbox) {
     let geo: THREE.BufferGeometry;
     if (e.kind === 'custom') { geo = e.mesh!.geometry; ownGeometry = false; }
     else if (e.kind === 'box') { geo = new THREE.BoxGeometry(e.size * 2, e.size * 2, e.size * 2); ownGeometry = true; }
-    else { geo = new THREE.SphereGeometry(e.size, 24, 16); ownGeometry = true; }
+    else { geo = new THREE.SphereGeometry(e.size, 48, 32); ownGeometry = true; }
     mesh = new THREE.Mesh(geo, new THREE.MeshStandardMaterial({
       color: e.color, metalness: 0.1, roughness: 0.6,
       side: e.kind === 'custom' ? THREE.DoubleSide : THREE.FrontSide, // open surfaces have two faces
@@ -891,6 +893,8 @@ function buildForcesView(sandbox: Sandbox) {
       renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true });
       renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
       renderer.setSize(canvas.clientWidth || 214, canvas.clientHeight || 170, false);
+      renderer.toneMapping = THREE.ACESFilmicToneMapping; // match the main view's look
+      renderer.toneMappingExposure = 1.2;
     }
     if (meshFor !== e.id) rebuildMesh(e);
     holder.quaternion.copy(e.currQuat); // live orientation — the object exactly as it sits in the world

@@ -74,7 +74,7 @@ export class Sandbox {
   // call and 100 steel spheres are still just one more. slots[i] = entity at instance i (picking).
   private pools = new Map<string, { mesh: THREE.InstancedMesh; slots: Entity[] }>();
   private unitBox = new THREE.BoxGeometry(1, 1, 1);
-  private unitSphere = new THREE.SphereGeometry(1, 24, 16);
+  private unitSphere = new THREE.SphereGeometry(1, 48, 32); // smooth silhouette; still one instanced draw
   private texCache = new Map<string, THREE.Texture>(); // loaded PBR maps, keyed by url|repeat
   private customMeshes: THREE.Mesh[] = []; // unique-geometry meshes (Phase 2 shapes), one draw call each
 
@@ -117,6 +117,10 @@ export class Sandbox {
     this.renderer.setSize(innerWidth, innerHeight);
     this.renderer.shadowMap.enabled = true;
     this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    // filmic tone mapping: soft highlight roll-off instead of clipping — the single biggest
+    // "looks like a real renderer" switch; exposure re-lifts the mids it compresses
+    this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    this.renderer.toneMappingExposure = 1.2;
 
     this.scene = new THREE.Scene();
     this.scene.background = new THREE.Color('#0a0a0f');
@@ -155,7 +159,7 @@ export class Sandbox {
     // preserve the dark blueprint look.
     const pmrem = new THREE.PMREMGenerator(this.renderer);
     this.scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
-    this.scene.environmentIntensity = 0.3;
+    this.scene.environmentIntensity = 0.45; // tuned with ACES tone mapping — flat metal faces keep a sheen
     pmrem.dispose();
 
     this.scene.add(new THREE.HemisphereLight('#aab6cc', '#20242e', 0.7));
@@ -224,7 +228,7 @@ export class Sandbox {
     t = new THREE.TextureLoader().load(url);
     t.wrapS = t.wrapT = THREE.RepeatWrapping;
     t.repeat.set(repeat[0], repeat[1]);
-    t.anisotropy = 4;
+    t.anisotropy = 8; // keeps grain crisp at glancing angles
     if (srgb) t.colorSpace = THREE.SRGBColorSpace; // albedo is color data; the rest stay linear
     this.texCache.set(key, t);
     return t;
@@ -248,8 +252,10 @@ export class Sandbox {
     const key = `${kind}:${mat.id}`;
     let pool = this.pools.get(key);
     if (pool) return pool;
+    // sphere UV wraps the whole map around 360° — twice the tiles keeps its texel aspect square
+    // and its grain scale matched to the box faces (so steel looks like the SAME steel on both)
     const material = mat.maps
-      ? this.pbrMaterial(mat, [1, 1]) // unit box/sphere ≈ one tile — human-scale grain
+      ? this.pbrMaterial(mat, kind === 'sphere' ? [2, 1] : [1, 1])
       : new THREE.MeshStandardMaterial({ metalness: 0.1, roughness: 0.65 });
     const mesh = new THREE.InstancedMesh(kind === 'box' ? this.unitBox : this.unitSphere, material, MAX_INSTANCES);
     mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);

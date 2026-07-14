@@ -8,7 +8,7 @@ source pages if we ever want them.
 | Folder    | Source asset | Page                                    | Maps |
 |-----------|--------------|-----------------------------------------|------|
 | `wood/`   | Wood092      | https://ambientcg.com/a/Wood092         | albedo · normal · roughness |
-| `steel/`  | Metal049A    | https://ambientcg.com/a/Metal049A       | albedo · normal · roughness · metalness |
+| `steel/`  | Metal009     | https://ambientcg.com/a/Metal009        | albedo · normal · roughness · metalness |
 | `rubber/` | Rubber004    | https://ambientcg.com/a/Rubber004       | albedo · normal · roughness |
 | `ice/`    | Ice003       | https://ambientcg.com/a/Ice003          | albedo · normal · roughness |
 | `stone/`  | Rock058      | https://ambientcg.com/a/Rock058         | albedo · normal · roughness |

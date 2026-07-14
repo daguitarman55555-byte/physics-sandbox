@@ -198,7 +198,40 @@ export function buildImplicit(spec: ImplicitSpec): ImplicitResult {
   }
   if (!indices.length) return { ok: false, error: 'The surface never crosses f = 0 inside the domain.' };
 
-  // center on the c.o.m., normals from topology, box-projected UVs (~2 world units per tile)
+  // ---- smooth pass: shading quality independent of the grid ----
+  // One Newton step pulls each vertex onto the true isosurface (killing voxel-grid ripple), and
+  // the field gradient replaces topology normals (killing faceting). Vertices near the domain
+  // walls are left alone — their caps are flat cuts, not level sets.
+  const evalAt = (x: number, y: number, z: number) => {
+    scope.x = x; scope.y = y; scope.z = z;
+    return compiled.eval(scope) - iso;
+  };
+  const eps = 0.35 * h;
+  const grads = new Float32Array(positions.length);
+  const wallMask = new Uint8Array(positions.length / 3);
+  for (let v = 0; v < positions.length; v += 3) {
+    let x = positions[v], y = positions[v + 1], z = positions[v + 2];
+    const gx = evalAt(x + eps, y, z) - evalAt(x - eps, y, z);
+    const gy = evalAt(x, y + eps, z) - evalAt(x, y - eps, z);
+    const gz = evalAt(x, y, z + eps) - evalAt(x, y, z - eps);
+    const len = Math.hypot(gx, gy, gz);
+    const wall = size - Math.abs(x) < 1.5 * h || size - Math.abs(y) < 1.5 * h || size - Math.abs(z) < 1.5 * h;
+    if (wall) wallMask[v / 3] = 1;
+    if (len > 1e-9) {
+      grads[v] = gx / len; grads[v + 1] = gy / len; grads[v + 2] = gz / len;
+      if (!wall) {
+        // Δ = −f·∇f/|∇f|² with the un-normalized central differences (∇f = gvec/2ε), clamped to ¾ cell
+        const k = (-evalAt(x, y, z) * 2 * eps) / (len * len);
+        const kMax = (0.75 * h) / len;
+        const kc = Math.max(-kMax, Math.min(kMax, k));
+        positions[v] = x + gx * kc;
+        positions[v + 1] = y + gy * kc;
+        positions[v + 2] = z + gz * kc;
+      }
+    }
+  }
+
+  // center on the c.o.m., box-projected UVs (~2 world units per tile)
   const posArr = new Float32Array(positions.length);
   let maxRadius = 0;
   for (let k = 0; k < positions.length; k += 3) {
@@ -210,8 +243,13 @@ export function buildImplicit(spec: ImplicitSpec): ImplicitResult {
   const geometry = new THREE.BufferGeometry();
   geometry.setAttribute('position', new THREE.BufferAttribute(posArr, 3));
   geometry.setIndex(indices);
-  geometry.computeVertexNormals();
+  geometry.computeVertexNormals(); // topology normals — kept only where the gradient isn't trusted
   const nor = geometry.getAttribute('normal');
+  for (let v = 0; v < posArr.length / 3; v++) {
+    if (wallMask[v]) continue; // wall caps keep their flat topology normals
+    const gx = grads[v * 3], gy = grads[v * 3 + 1], gz = grads[v * 3 + 2];
+    if (gx || gy || gz) nor.setXYZ(v, gx, gy, gz);
+  }
   const uvs = new Float32Array((posArr.length / 3) * 2);
   for (let v = 0; v < posArr.length / 3; v++) {
     const nx = Math.abs(nor.getX(v)), ny = Math.abs(nor.getY(v)), nz = Math.abs(nor.getZ(v));

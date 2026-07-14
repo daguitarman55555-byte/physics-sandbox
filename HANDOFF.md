@@ -62,6 +62,13 @@ the material picker works on implicits. Presets: Gyroid / Metaballs / Heart / Bl
 collider is blocky at ~size/16 (walls thinner than a collider voxel can drop out — a lowered
 occupancy threshold catches most), and balls roll far on the floor (no rolling resistance in
 Rapier — a future materials knob).
+Look pass (2026-07-14): ACES filmic tone mapping (exposure 1.2, also on the preview/forces mini-
+renderers), env intensity 0.45; implicit meshes get a **smooth pass** — one Newton step projects
+every vertex onto the exact isosurface (sphere radius spread → 0.0000) and field-gradient normals
+replace topology normals (wall-cap vertices keep flat normals) — so hearts/gyroids shade smoothly
+at any grid res; spheres at 48×32; tubes 16-sided; lathe 64 segments; texture anisotropy 8; sphere
+pools tile [2,1] so texel aspect matches boxes; steel swapped to brushed Metal009 (polished
+Metal049A read mirror-on-ball vs dark-mirror-on-flat-faces — brushed reads identical on both).
 Next: superformula or freehand-draw creators, GLTF/STL import (V-HACD), texture upload, alloy
 composer — or Phase 4 forces & fields.
 

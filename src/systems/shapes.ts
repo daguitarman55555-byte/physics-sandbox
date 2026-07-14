@@ -116,7 +116,7 @@ export function buildRevolution(spec: RevolutionSpec): RevolutionResult {
   const maxRadius = Math.max(...r);
 
   // ---- geometry: LatheGeometry from the profile, centered on the c.o.m., end-capped ----
-  const segments = spec.segments ?? 48;
+  const segments = spec.segments ?? 64;
   const pts: THREE.Vector2[] = [];
   const rStart = Math.max(f(a), 0);
   if (rStart > 1e-4) pts.push(new THREE.Vector2(0, a - xcm)); // flat cap at the bottom
@@ -328,7 +328,7 @@ export function buildParamCurve(spec: ParamCurveSpec): ParamCurveResult {
     }
   }
   const tubularSegments = Math.min(360, Math.max(96, Math.round(length * 14)));
-  const geometry = new THREE.TubeGeometry(new CenterlineCurve(), tubularSegments, tube, 12, closed);
+  const geometry = new THREE.TubeGeometry(new CenterlineCurve(), tubularSegments, tube, 16, closed);
 
   // ---- capsule chain for collision (chunked; caps overlap at joints for continuity) ----
   const chunkCount = Math.min(48, Math.max(10, Math.round(length / (1.8 * tube))));
