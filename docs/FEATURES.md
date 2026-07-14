@@ -32,7 +32,13 @@ A checklist so nothing is lost. `[x]` = in Phase 1 today · `[ ]` = planned (wit
       concavity is real: a ball threads a torus's hole, a bowl cups a marble — verified live);
       Torus / Hollow ball / Möbius / Ripple presets. Hollow vs solid = the classic 2/3·mR² vs
       2/5·mR² rolling race.
-- [ ] Implicit / SDF surfaces (gyroids, metaballs) · superformula (shells, flowers)
+- [x] **Implicit surfaces** f(x,y,z) < 0 (gyroids, metaballs, hearts, blobs — topology no other
+      creator can make) — **naive surface nets** mesh (table-free, watertight, boundary-capped to
+      the cube domain), **Module-M voxel mass** (occupancy fractions → volume/c.o.m./full tensor;
+      sphere within 0.2% of closed form), **greedy voxel-box compound collider** (concave-true:
+      a marble free-falls through a gyroid's internal voids at exactly g — measured), box-projected
+      UVs so materials work, Gyroid/Metaballs/Heart/Blob presets, debounced live preview
+- [ ] Superformula (shells, flowers)
 - [ ] Freehand draw → extrude/revolve · compound objects · boolean CSG
 - [ ] Convex-decomposition colliders · **GLTF/OBJ/STL import** · big preset catalog
 

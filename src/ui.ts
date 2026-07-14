@@ -11,6 +11,7 @@ import { MathfieldElement } from 'mathlive';
 import 'mathlive/fonts.css';
 import type { Entity, Sandbox } from './sandbox';
 import { buildRevolution, buildParamCurve, buildParamSurface, REV_PRESETS, CURVE_PRESETS, SURFACE_PRESETS } from './systems/shapes';
+import { buildImplicit, IMPLICIT_PRESETS } from './systems/implicit';
 import { exprToLatex } from './systems/expr';
 import { PLAIN, PRESETS as MATERIALS, type Material } from './systems/materials';
 
@@ -320,6 +321,7 @@ function buildPanel(sandbox: Sandbox) {
   buildShapeCreator(section(panel, 'Create · f(x) revolution', false), sandbox, materials);
   buildCurveCreator(section(panel, 'Create · parametric curve', false), sandbox, materials);
   buildSurfaceCreator(section(panel, 'Create · parametric surface', false), sandbox, materials);
+  buildImplicitCreator(section(panel, 'Create · implicit f(x,y,z)', false), sandbox, materials);
 
   // --- world ---
   const worldBody = section(panel, 'World', true);
@@ -621,6 +623,73 @@ function buildSurfaceCreator(panel: HTMLElement, sandbox: Sandbox, materials: Ma
 
   bCreate.onclick = () => {
     const res = sandbox.createParamSurface(readSpec(), materials.get());
+    if (!res.ok) { preview.className = 'preview err'; preview.textContent = res.error; }
+  };
+
+  refresh();
+}
+
+function buildImplicitCreator(panel: HTMLElement, sandbox: Sandbox, materials: MaterialsHook) {
+  // f(x,y,z) — the object is everywhere f < 0, trimmed to a cube of half-extent `size`.
+  // The heaviest creator (a 64³ field per rebuild), so edits are debounced.
+  const field = el('div', '', 'field');
+  const lab = el('label', '<b>f(x,y,z)</b> <span>&lt; 0 inside</span>');
+  const mf = mathField(IMPLICIT_PRESETS[0].fxyz);
+  field.append(lab, mf.el);
+  panel.append(field);
+
+  const nums = el('div', '', 'row nums');
+  const sizeInput = numInput(IMPLICIT_PRESETS[0].size, 'domain half-size (cube)');
+  sizeInput.min = '0.2';
+  const dInput = numInput(1, 'density');
+  dInput.min = '0.01';
+  nums.append(labeled('size', sizeInput), labeled('density', dInput));
+  panel.append(nums);
+
+  const presets = el('div', '', 'row wrap');
+  for (const p of IMPLICIT_PRESETS) {
+    const b = el('button', p.name, 'mini');
+    b.onclick = () => { mf.set(p.fxyz); sizeInput.value = String(p.size); refresh(true); };
+    presets.append(b);
+  }
+  panel.append(presets);
+
+  const preview = el('div', '', 'preview');
+  panel.append(preview);
+
+  const createRow = el('div', '', 'row');
+  const bCreate = el('button', 'Create & drop', 'primary');
+  createRow.append(bCreate);
+  panel.append(createRow);
+
+  const readSpec = () => ({
+    fxyz: mf.value(), iso: 0,
+    size: parseFloat(sizeInput.value), density: parseFloat(dInput.value),
+  });
+
+  const refresh = (fromUser = false) => {
+    const built = buildImplicit(readSpec());
+    if (built.ok) {
+      const s = built.shape;
+      preview.className = 'preview';
+      preview.innerHTML = `V ≈ <b>${s.volume.toFixed(2)}</b> m³ · m ≈ <b>${s.mass.toFixed(2)}</b> kg`;
+      bCreate.disabled = false;
+      getShapePreview().update(s.geometry, `${mf.latex()} < 0`);
+      if (fromUser) getShapePreview().show();
+    } else {
+      preview.className = 'preview err';
+      preview.textContent = built.error;
+      bCreate.disabled = true;
+    }
+  };
+  let timer = 0;
+  const refreshSoon = () => { clearTimeout(timer); timer = window.setTimeout(() => refresh(true), 140); };
+  mf.el.addEventListener('input', refreshSoon);
+  for (const i of [sizeInput, dInput]) i.oninput = refreshSoon;
+  materials.onChange((m) => { dInput.value = String(m.density / 1000); refresh(); }); // density follows the material
+
+  bCreate.onclick = () => {
+    const res = sandbox.createImplicit(readSpec(), materials.get());
     if (!res.ok) { preview.className = 'preview err'; preview.textContent = res.error; }
   };
 

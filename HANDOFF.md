@@ -52,7 +52,18 @@ tiling is per-shape (lathe wraps, tubes tile along length, surfaces tile by para
 a dim RoomEnvironment (intensity 0.3) makes metal read without brightening the dark look. The
 panel is reorganized into collapsible sections (Material / Spawn / creators / World) — drag by the
 title, creators collapsed by default; creators' density inputs auto-sync to the material.
-Next: implicit/SDF surfaces (marching cubes + voxel mass), texture upload, or the alloy composer.
+Implicit surfaces shipped (2026-07-14, `systems/implicit.ts`): f(x,y,z) < 0 in a cube domain —
+naive **surface nets** mesh (table-free marching-cubes cousin; boundary layer forced outside so
+shapes cap watertight at the walls), **Module-M voxel mass** (per-cell occupancy fraction → V /
+c.o.m. / full tensor; sphere within 0.2%, verified), collider = occupancy voxels **greedy-merged
+into compound boxes** (concave-true — a marble placed in a gyroid's void free-falls at exactly g
+through the internal labyrinth and exits the bottom; measured). Box-projected UVs (~2 m/tile) so
+the material picker works on implicits. Presets: Gyroid / Metaballs / Heart / Blob. Honest notes:
+collider is blocky at ~size/16 (walls thinner than a collider voxel can drop out — a lowered
+occupancy threshold catches most), and balls roll far on the floor (no rolling resistance in
+Rapier — a future materials knob).
+Next: superformula or freehand-draw creators, GLTF/STL import (V-HACD), texture upload, alloy
+composer — or Phase 4 forces & fields.
 
 Stability hardening (2026-07-13): dynamic bodies now spawn with CCD enabled and reject deeply-
 overlapping drop points — previously, an overlapping spawn could make Rapier's solver inject a huge

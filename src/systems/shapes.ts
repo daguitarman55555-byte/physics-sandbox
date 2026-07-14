@@ -35,7 +35,7 @@ export type ShapeSpec =
   | { type: 'revolution'; fx: string; a: number; b: number }
   | { type: 'paramCurve'; xt: string; yt: string; zt: string; t0: number; t1: number; tube: number }
   | { type: 'paramSurface'; xuv: string; yuv: string; zuv: string; u0: number; u1: number; v0: number; v1: number; mode: 'shell' | 'solid'; thickness: number }
-  | { type: 'implicit'; fxyz: string; iso: number }
+  | { type: 'implicit'; fxyz: string; iso: number; size: number }
   | { type: 'import'; url: string };
 
 export interface RevolutionSpec {
@@ -203,8 +203,9 @@ export type ParamCurveResult = { ok: true; shape: BuiltParamCurve } | { ok: fals
 
 const CURVE_SAMPLES = 600; // mass-integration resolution along t
 
-/** Jacobi eigendecomposition of a symmetric 3×3 matrix → eigenvalues + orthonormal eigenvectors. */
-function eigenSymmetric3(A: number[][]): { values: number[]; vectors: THREE.Vector3[] } {
+/** Jacobi eigendecomposition of a symmetric 3×3 matrix → eigenvalues + orthonormal eigenvectors.
+ * Exported for the other mass-property builders (implicit surfaces use it too). */
+export function eigenSymmetric3(A: number[][]): { values: number[]; vectors: THREE.Vector3[] } {
   const a = A.map((row) => row.slice());
   let v = [[1, 0, 0], [0, 1, 0], [0, 0, 1]];
   for (let sweep = 0; sweep < 50; sweep++) {

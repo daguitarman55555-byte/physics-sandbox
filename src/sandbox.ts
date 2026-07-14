@@ -20,6 +20,7 @@ import {
   buildRevolution, buildParamCurve, buildParamSurface,
   type RevolutionSpec, type ParamCurveSpec, type ParamSurfaceSpec,
 } from './systems/shapes';
+import { buildImplicit, type ImplicitSpec } from './systems/implicit';
 import { PLAIN, type Material } from './systems/materials';
 
 export type Kind = 'box' | 'sphere' | 'custom';
@@ -435,6 +436,44 @@ export class Sandbox {
     e.support = { points: s.supportPoints, pad: 0 }; // slab corners = the collider's extremes
     // open surfaces are visible from both sides (a Möbius strip has no inside)
     (e.mesh!.material as THREE.MeshStandardMaterial).side = THREE.DoubleSide;
+    return { ok: true, entity: e };
+  }
+
+  /**
+   * Create an implicit solid f(x,y,z) < 0 (gyroids, metaballs, blobs). Mass/c.o.m./inertia come
+   * from the Module-M voxel path (see systems/implicit.ts); collision is the occupancy voxels
+   * greedy-merged into a compound of boxes — concave-true, so marbles roll through gyroid tunnels.
+   */
+  createImplicit(spec: ImplicitSpec, mat: Material = PLAIN): { ok: true; entity: Entity } | { ok: false; error: string } {
+    if (this.entities.length >= MAX_INSTANCES) return { ok: false, error: 'Object limit reached.' };
+    const built = buildImplicit(spec);
+    if (!built.ok) return { ok: false, error: built.error };
+    const s = built.shape;
+
+    const p = new THREE.Vector3((Math.random() - 0.5) * 3, 8 + s.maxRadius, (Math.random() - 0.5) * 3);
+    const body = this.world.createRigidBody(
+      RAPIER.RigidBodyDesc.dynamic()
+        .setTranslation(p.x, p.y, p.z)
+        .setAngvel({ x: (Math.random() - 0.5) * 1.5, y: (Math.random() - 0.5) * 1.5, z: (Math.random() - 0.5) * 1.5 })
+        .setAdditionalMassProperties(s.mass, { x: 0, y: 0, z: 0 }, s.inertia, s.inertiaFrame)
+        .setCcdEnabled(true),
+    );
+    for (const b of s.boxes) {
+      this.world.createCollider(
+        RAPIER.ColliderDesc.cuboid(b.half[0], b.half[1], b.half[2])
+          .setTranslation(b.center[0], b.center[1], b.center[2])
+          .setFriction(mat.friction).setRestitution(mat.restitution).setDensity(0),
+        body,
+      );
+    }
+    if (!s.boxes.length) {
+      this.world.createCollider(
+        RAPIER.ColliderDesc.ball(s.maxRadius).setFriction(mat.friction).setRestitution(mat.restitution).setDensity(0), body);
+    }
+
+    // box-projected UVs are already in ~2-world-unit tiles, so repeat [1,1]
+    const e = this.finishCustomEntity(body, s.geometry, p, s.maxRadius, s.volume, `implicit: ${spec.fxyz}`, mat, [1, 1]);
+    e.support = { points: s.supportPoints, pad: 0 }; // box corners = the collider's extremes
     return { ok: true, entity: e };
   }
 
