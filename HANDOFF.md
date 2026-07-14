@@ -44,7 +44,15 @@ capsules by one tube radius so caps land exactly on the curve ends. The drag flo
 the exact support point for custom shapes (hull points / slab corners / capsule ends). Remaining
 honest notes: tube volume still ignores coil self-overlap (voxel path later), and V-HACD convex
 decomposition stays relevant only for the future GLTF/OBJ/STL import (no grid to exploit there).
-Next up in Phase 2: implicit/SDF surfaces (marching cubes) — or start Phase 3 materials.
+Phase 3 first slice shipped (2026-07-14): a **material picker** (Plain/Rubber/Steel/Ice/Wood/Stone
+chips) drives every spawn and creator — density (water-units: kg/m³÷1000) × exact volume → mass,
+friction/restitution → colliders, CC0 PBR maps (public/textures/) → appearance. Rendering scales
+via per-(shape × material) InstancedMesh pools (900 textured objects hold the frame cap); texture
+tiling is per-shape (lathe wraps, tubes tile along length, surfaces tile by parameter arc length);
+a dim RoomEnvironment (intensity 0.3) makes metal read without brightening the dark look. The
+panel is reorganized into collapsible sections (Material / Spawn / creators / World) — drag by the
+title, creators collapsed by default; creators' density inputs auto-sync to the material.
+Next: implicit/SDF surfaces (marching cubes + voxel mass), texture upload, or the alloy composer.
 
 Stability hardening (2026-07-13): dynamic bodies now spawn with CCD enabled and reject deeply-
 overlapping drop points — previously, an overlapping spawn could make Rapier's solver inject a huge

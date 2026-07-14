@@ -1,8 +1,10 @@
 /**
- * MATERIALS SYSTEM — Phase 3 + the material-composer extension. NOT YET IMPLEMENTED.
+ * MATERIALS SYSTEM — Phase 3. First slice IMPLEMENTED: preset materials with PBR texture maps,
+ * wired into every spawn/creator via the panel's material picker (one active material).
  *
- * A material is data: appearance (color + PBR texture maps you upload) and physics (density,
- * friction, restitution). Density × the shape's exact volume (Module M) → mass + inertia.
+ * A material is data: appearance (color + PBR texture maps) and physics (density, friction,
+ * restitution). Density × the shape's exact volume (Module M) → mass + inertia. Sim density
+ * unit = 1000 kg/m³ (water = 1), so a 1 m³ steel box weighs 7.8 sim-kg.
  *
  * Composer (see the "Extensions" design doc §1, §8):
  *   - element database (periodic table: density, color, crystal structure)
@@ -30,6 +32,9 @@ const maps = (id: string, metal = false) => ({
   ...(metal ? { metalness: `/textures/${id}/metalness.jpg` } : {}),
 });
 
+/** The no-material default — today's look: palette colors, the friction/bounce the sandbox shipped with. */
+export const PLAIN: Material = { id: 'plain', name: 'Plain', density: 1000, friction: 0.6, restitution: 0.35, color: '' };
+
 export const PRESETS: Material[] = [
   { id: 'rubber', name: 'Rubber', density: 1100, friction: 0.9, restitution: 0.8, color: '#d94f4f', maps: maps('rubber') },
   { id: 'steel', name: 'Steel', density: 7800, friction: 0.4, restitution: 0.2, color: '#9aa4b6', maps: maps('steel', true) },
@@ -38,4 +43,4 @@ export const PRESETS: Material[] = [
   { id: 'stone', name: 'Stone', density: 2600, friction: 0.7, restitution: 0.15, color: '#8d8f96', maps: maps('stone') },
 ];
 
-export const TODO = 'Phase 3 — see src/systems/README.md';
+export const TODO = 'Phase 3 remainder (texture upload, element/alloy composer) — see src/systems/README.md';

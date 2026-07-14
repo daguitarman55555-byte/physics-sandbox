@@ -36,6 +36,22 @@ body { background: var(--bg); color: var(--text); font-family: var(--sans); }
 #panel::-webkit-scrollbar-thumb { background: var(--border); border-radius: 8px; }
 #panel h3 { font-family: var(--mono); font-size: 10.5px; letter-spacing: .12em; text-transform: uppercase;
   color: var(--muted); font-weight: 600; }
+#panel .ptitle { color: var(--text-2); }
+
+/* collapsible sections — header toggles, chevron shows state */
+#panel .sec { display: flex; flex-direction: column; gap: 10px; }
+#panel .sec-head { display: flex; justify-content: space-between; align-items: center;
+  cursor: pointer; user-select: none; }
+#panel .sec-head:hover { color: var(--text-2); }
+#panel .sec-head .chev { font-size: 11px; transition: transform .15s; }
+#panel .sec.collapsed .chev { transform: rotate(-90deg); }
+#panel .sec.collapsed .sec-body { display: none; }
+#panel .sec-body { display: flex; flex-direction: column; gap: 10px; }
+
+/* material picker chips */
+#panel .chip { flex: 0 1 auto; display: inline-flex; align-items: center; gap: 6px; }
+#panel .chip .dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; flex: 0 0 auto; }
+#panel .chip.on { border-color: var(--accent); background: #1c2130; }
 .row { display: flex; gap: 8px; }
 .row.wrap { flex-wrap: wrap; }
 button {
@@ -125,8 +141,8 @@ button:disabled:hover { border-color: var(--border); background: var(--accent); 
 #inspector.hidden { display: none; }
 
 /* window drag handles */
-#panel h3, #inspector h3, #forces .fhead, #shape-preview header { cursor: grab; }
-#panel h3:active, #inspector h3:active, #forces .fhead:active, #shape-preview header:active { cursor: grabbing; }
+#panel .ptitle, #inspector h3, #forces .fhead, #shape-preview header { cursor: grab; }
+#panel .ptitle:active, #inspector h3:active, #forces .fhead:active, #shape-preview header:active { cursor: grabbing; }
 #inspector h3 { font-family: var(--mono); font-size: 10.5px; letter-spacing: .1em; text-transform: uppercase;
   color: var(--muted); font-weight: 600; margin-bottom: 8px; display: flex; justify-content: space-between; }
 #inspector .prop { display: flex; justify-content: space-between; padding: 3px 0; color: var(--text-2); }

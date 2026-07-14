@@ -37,7 +37,12 @@ A checklist so nothing is lost. `[x]` = in Phase 1 today · `[ ]` = planned (wit
 - [ ] Convex-decomposition colliders · **GLTF/OBJ/STL import** · big preset catalog
 
 ## Materials — `systems/materials.ts` (Phase 3)
-- [ ] Presets (wood/metal/rubber/ice/stone) · density/friction/restitution
+- [x] Presets (rubber/steel/ice/wood/stone + plain) · density/friction/restitution wired into every
+      spawn & creator via the panel's **material picker** (one active material; creators' density
+      inputs auto-sync, still editable) · CC0 PBR maps (`public/textures/`) with per-shape texture
+      tiling (lathe wraps, tubes tile along their length, surfaces tile by parameter-line arc
+      length) · per-(shape × material) InstancedMesh pools — 900 textured objects still hold the
+      frame cap · dim RoomEnvironment so metal reads as metal
 - [ ] **Texture upload** (albedo/normal/roughness/metalness PBR maps)
 - [ ] **Element database → compound builder → alloy/mixture composer** ("22% gold, 73% silver")
 - [ ] Mass from shape × density; famous alloys tabled (blending is a model, not chemistry)
@@ -66,6 +71,8 @@ A checklist so nothing is lost. `[x]` = in Phase 1 today · `[ ]` = planned (wit
 - [x] **Free-body forces view** — isolated 3D render of the selection, centered, live orientation,
       force arrows (weight / net / contact / velocity) + values
 - [x] All panels are **windows**: drag by header, resize (contents & mini-renderers reflow)
+- [x] **Collapsible panel sections** — Material / Spawn / three creators / World; creators sit
+      collapsed until needed, so the panel fits without scrolling; drag the panel by its title
 - [x] **Forces window** — floating readout tracked above the selected object: weight m·g, measured
       net force ΣF = m·a, contact/friction/drag decomposition, velocity, momentum, KE, contact count
 - [x] **Delete all** button (below Reset scene) — clears the world without respawning defaults

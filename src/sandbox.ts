@@ -14,11 +14,13 @@
  */
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
+import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment.js';
 import RAPIER from '@dimforge/rapier3d-compat';
 import {
   buildRevolution, buildParamCurve, buildParamSurface,
   type RevolutionSpec, type ParamCurveSpec, type ParamSurfaceSpec,
 } from './systems/shapes';
+import { PLAIN, type Material } from './systems/materials';
 
 export type Kind = 'box' | 'sphere' | 'custom';
 
@@ -27,6 +29,7 @@ export interface Entity {
   kind: Kind;
   body: RAPIER.RigidBody;
   size: number; // box half-extent, or sphere radius, or bounding radius for custom
+  mat: Material; // physics + appearance preset (PLAIN = the palette-colored default)
   color: THREE.Color;
   prevPos: THREE.Vector3;
   prevQuat: THREE.Quaternion;
@@ -54,6 +57,9 @@ const PICK_PIXEL_TOLERANCE = 18; // px — fallback nearest-entity radius when t
 
 const PALETTE = ['#5b8def', '#4fb89a', '#c9bb3a', '#e89948', '#dc4a4a', '#a978e0'];
 
+/** Whole texture tiles per `len` world units (~2 m per tile, matching a 1 m box at one tile). */
+const tiles = (len: number) => Math.max(1, Math.round(len / 2));
+
 export class Sandbox {
   readonly renderer: THREE.WebGLRenderer;
   readonly scene: THREE.Scene;
@@ -63,10 +69,12 @@ export class Sandbox {
 
   entities: Entity[] = [];
   private nextId = 0;
-  private boxMesh: THREE.InstancedMesh;
-  private sphereMesh: THREE.InstancedMesh;
-  private boxSlots: Entity[] = []; // instance slot -> entity, from the last render (for picking)
-  private sphereSlots: Entity[] = [];
+  // one InstancedMesh per (shape kind × material) — created lazily, so plain boxes stay one draw
+  // call and 100 steel spheres are still just one more. slots[i] = entity at instance i (picking).
+  private pools = new Map<string, { mesh: THREE.InstancedMesh; slots: Entity[] }>();
+  private unitBox = new THREE.BoxGeometry(1, 1, 1);
+  private unitSphere = new THREE.SphereGeometry(1, 24, 16);
+  private texCache = new Map<string, THREE.Texture>(); // loaded PBR maps, keyed by url|repeat
   private customMeshes: THREE.Mesh[] = []; // unique-geometry meshes (Phase 2 shapes), one draw call each
 
   // interaction. Grabbing is physical: a collider-less kinematic body follows the cursor, tied to
@@ -130,19 +138,6 @@ export class Sandbox {
     this.world.timestep = FIXED;
     this.addGroundCollider();
 
-    // --- instanced render pools ---
-    const stdMat = new THREE.MeshStandardMaterial({ metalness: 0.1, roughness: 0.65 });
-    this.boxMesh = new THREE.InstancedMesh(new THREE.BoxGeometry(1, 1, 1), stdMat, MAX_INSTANCES);
-    this.sphereMesh = new THREE.InstancedMesh(new THREE.SphereGeometry(1, 24, 16), stdMat.clone(), MAX_INSTANCES);
-    for (const m of [this.boxMesh, this.sphereMesh]) {
-      m.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
-      m.castShadow = true;
-      m.receiveShadow = true;
-      m.count = 0;
-      m.frustumCulled = false;
-      this.scene.add(m);
-    }
-
     this.buildDefaultScene();
 
     // --- events ---
@@ -154,6 +149,14 @@ export class Sandbox {
 
   // ---------------------------------------------------------------- scene setup
   private addLights() {
+    // a dim room environment so PBR materials (especially metal) have something to reflect —
+    // punctual lights alone leave metalness-1 surfaces near-black. Intensity kept low to
+    // preserve the dark blueprint look.
+    const pmrem = new THREE.PMREMGenerator(this.renderer);
+    this.scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
+    this.scene.environmentIntensity = 0.3;
+    pmrem.dispose();
+
     this.scene.add(new THREE.HemisphereLight('#aab6cc', '#20242e', 0.7));
     const sun = new THREE.DirectionalLight('#ffffff', 2.1);
     sun.position.set(18, 30, 12);
@@ -211,8 +214,57 @@ export class Sandbox {
     return best;
   }
 
+  // ---------------------------------------------------------------- materials & render pools
+  /** Load (and cache) a texture map. Repeat counts are part of the key — repeats differ per shape. */
+  private texture(url: string, srgb: boolean, repeat: [number, number]): THREE.Texture {
+    const key = `${url}|${repeat[0]}x${repeat[1]}`;
+    let t = this.texCache.get(key);
+    if (t) return t;
+    t = new THREE.TextureLoader().load(url);
+    t.wrapS = t.wrapT = THREE.RepeatWrapping;
+    t.repeat.set(repeat[0], repeat[1]);
+    t.anisotropy = 4;
+    if (srgb) t.colorSpace = THREE.SRGBColorSpace; // albedo is color data; the rest stay linear
+    this.texCache.set(key, t);
+    return t;
+  }
+
+  /** A PBR material from a preset's maps, tiled `repeat` times across the UVs. */
+  private pbrMaterial(mat: Material, repeat: [number, number]): THREE.MeshStandardMaterial {
+    const m = mat.maps!;
+    return new THREE.MeshStandardMaterial({
+      map: m.albedo ? this.texture(m.albedo, true, repeat) : undefined,
+      normalMap: m.normal ? this.texture(m.normal, false, repeat) : undefined,
+      roughnessMap: m.roughness ? this.texture(m.roughness, false, repeat) : undefined,
+      metalnessMap: m.metalness ? this.texture(m.metalness, false, repeat) : undefined,
+      roughness: 1, // factors multiply the maps — 1 lets the maps speak
+      metalness: m.metalness ? 1 : 0,
+    });
+  }
+
+  /** The InstancedMesh pool for a (shape kind, material) pair — created on first use. */
+  private getPool(kind: 'box' | 'sphere', mat: Material) {
+    const key = `${kind}:${mat.id}`;
+    let pool = this.pools.get(key);
+    if (pool) return pool;
+    const material = mat.maps
+      ? this.pbrMaterial(mat, [1, 1]) // unit box/sphere ≈ one tile — human-scale grain
+      : new THREE.MeshStandardMaterial({ metalness: 0.1, roughness: 0.65 });
+    const mesh = new THREE.InstancedMesh(kind === 'box' ? this.unitBox : this.unitSphere, material, MAX_INSTANCES);
+    mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+    mesh.castShadow = true;
+    mesh.receiveShadow = true;
+    mesh.count = 0;
+    mesh.frustumCulled = false;
+    this.scene.add(mesh);
+    pool = { mesh, slots: [] };
+    mesh.userData.pool = pool; // raycast hit → pool → slots[instanceId] → entity
+    this.pools.set(key, pool);
+    return pool;
+  }
+
   // ---------------------------------------------------------------- entities
-  spawn(kind: Kind, pos?: THREE.Vector3, size?: number): Entity {
+  spawn(kind: Kind, pos?: THREE.Vector3, size?: number, mat: Material = PLAIN): Entity {
     if (this.entities.length >= MAX_INSTANCES) return this.entities[this.entities.length - 1];
     const s = size ?? (kind === 'box' ? 0.5 : 0.5);
     const p = pos ?? this.findSpawnSpot(s);
@@ -228,11 +280,14 @@ export class Sandbox {
       kind === 'box'
         ? RAPIER.ColliderDesc.cuboid(s, s, s)
         : RAPIER.ColliderDesc.ball(s);
-    this.world.createCollider(col.setFriction(0.6).setRestitution(0.35).setDensity(1), body);
+    // material physics: density is in water-units (kg/m³ ÷ 1000), so a steel 1 m³ box is 7.8 kg
+    this.world.createCollider(
+      col.setFriction(mat.friction).setRestitution(mat.restitution).setDensity(mat.density / 1000), body);
 
+    this.getPool(kind as 'box' | 'sphere', mat); // ensure the render pool exists
     const color = new THREE.Color(PALETTE[this.nextId % PALETTE.length]);
     const e: Entity = {
-      id: this.nextId++, kind, body, size: s, color,
+      id: this.nextId++, kind, body, size: s, mat, color,
       prevPos: new THREE.Vector3(p.x, p.y, p.z), prevQuat: new THREE.Quaternion(),
       currPos: new THREE.Vector3(p.x, p.y, p.z), currQuat: new THREE.Quaternion(),
       lastVel: new THREE.Vector3(), accel: new THREE.Vector3(),
@@ -242,8 +297,8 @@ export class Sandbox {
     return e;
   }
 
-  spawnMany(n: number) {
-    for (let i = 0; i < n; i++) this.spawn(Math.random() < 0.5 ? 'box' : 'sphere');
+  spawnMany(n: number, mat: Material = PLAIN) {
+    for (let i = 0; i < n; i++) this.spawn(Math.random() < 0.5 ? 'box' : 'sphere', undefined, undefined, mat);
   }
 
   /**
@@ -252,7 +307,7 @@ export class Sandbox {
    * with correct dynamics. The collider is a convex hull of the profile; the body origin is the
    * center of mass, so the render mesh transform is the body transform with no offset.
    */
-  createRevolution(spec: RevolutionSpec): { ok: true; entity: Entity } | { ok: false; error: string } {
+  createRevolution(spec: RevolutionSpec, mat: Material = PLAIN): { ok: true; entity: Entity } | { ok: false; error: string } {
     if (this.entities.length >= MAX_INSTANCES) return { ok: false, error: 'Object limit reached.' };
     const built = buildRevolution(spec);
     if (!built.ok) return { ok: false, error: built.error };
@@ -274,10 +329,15 @@ export class Sandbox {
     );
     // convex hull collider with zero density (mass comes from the exact tensor above)
     const hullDesc = RAPIER.ColliderDesc.convexHull(s.hull);
-    const colDesc = (hullDesc ?? RAPIER.ColliderDesc.ball(s.maxRadius)).setFriction(0.6).setRestitution(0.3).setDensity(0);
+    const colDesc = (hullDesc ?? RAPIER.ColliderDesc.ball(s.maxRadius))
+      .setFriction(mat.friction).setRestitution(mat.restitution).setDensity(0);
     this.world.createCollider(colDesc, body);
 
-    const e = this.finishCustomEntity(body, s.geometry, p, s.maxRadius, s.volume, `revolution: ${spec.expr}`);
+    // LatheGeometry UV: u wraps around, v runs along the profile
+    const e = this.finishCustomEntity(
+      body, s.geometry, p, s.maxRadius, s.volume, `revolution: ${spec.expr}`,
+      mat, [tiles(2 * Math.PI * s.maxRadius), tiles(s.height)],
+    );
     e.support = { points: s.hull, pad: 0 }; // collider = hull of exactly these points
     return { ok: true, entity: e };
   }
@@ -288,7 +348,7 @@ export class Sandbox {
    * generally non-diagonal, so Rapier gets the principal moments plus the principal-frame rotation.
    * Collision is a chain of capsules, so coils stay hollow (a convex hull would fill them in).
    */
-  createParamCurve(spec: ParamCurveSpec): { ok: true; entity: Entity } | { ok: false; error: string } {
+  createParamCurve(spec: ParamCurveSpec, mat: Material = PLAIN): { ok: true; entity: Entity } | { ok: false; error: string } {
     if (this.entities.length >= MAX_INSTANCES) return { ok: false, error: 'Object limit reached.' };
     const built = buildParamCurve(spec);
     if (!built.ok) return { ok: false, error: built.error };
@@ -307,12 +367,17 @@ export class Sandbox {
         RAPIER.ColliderDesc.capsule(cap.halfHeight, s.tube)
           .setTranslation(cap.center[0], cap.center[1], cap.center[2])
           .setRotation({ x: cap.quat[0], y: cap.quat[1], z: cap.quat[2], w: cap.quat[3] })
-          .setFriction(0.6).setRestitution(0.3).setDensity(0),
+          .setFriction(mat.friction).setRestitution(mat.restitution).setDensity(0),
         body,
       );
     }
 
-    const e = this.finishCustomEntity(body, s.geometry, p, s.maxRadius, s.volume, `curve: ${spec.xt}, ${spec.yt}, ${spec.zt}`);
+    // TubeGeometry UV: u runs along the tube, v wraps the circumference (≈ 2πr world units) —
+    // tile along the length so grain doesn't stretch over a 28 m spring
+    const e = this.finishCustomEntity(
+      body, s.geometry, p, s.maxRadius, s.volume, `curve: ${spec.xt}, ${spec.yt}, ${spec.zt}`,
+      mat, [Math.max(1, Math.round(s.length / Math.max(2 * Math.PI * s.tube, 0.5))), 1],
+    );
     // support points = capsule segment ends; the tube radius pads below them (a segment's lowest
     // world-Y is at an endpoint, so this is the exact capsule-chain bottom)
     const ends = new Float32Array(s.capsules.length * 6);
@@ -335,7 +400,7 @@ export class Sandbox {
    * slab tiling — one small convex hull per coarse grid cell — so concavity is real: a ball
    * threads a torus's hole and a bowl cups a marble.
    */
-  createParamSurface(spec: ParamSurfaceSpec): { ok: true; entity: Entity } | { ok: false; error: string } {
+  createParamSurface(spec: ParamSurfaceSpec, mat: Material = PLAIN): { ok: true; entity: Entity } | { ok: false; error: string } {
     if (this.entities.length >= MAX_INSTANCES) return { ok: false, error: 'Object limit reached.' };
     const built = buildParamSurface(spec);
     if (!built.ok) return { ok: false, error: built.error };
@@ -353,18 +418,19 @@ export class Sandbox {
     for (const slab of s.slabs) {
       const colDesc = RAPIER.ColliderDesc.convexHull(slab);
       if (!colDesc) continue; // degenerate cell (pole wedge) — its neighbors cover the gap
-      this.world.createCollider(colDesc.setFriction(0.6).setRestitution(0.3).setDensity(0), body);
+      this.world.createCollider(colDesc.setFriction(mat.friction).setRestitution(mat.restitution).setDensity(0), body);
       attached++;
     }
     if (!attached) {
       // pathological surface (every cell degenerate) — keep it interactable with a bounding ball
       this.world.createCollider(
-        RAPIER.ColliderDesc.ball(s.maxRadius).setFriction(0.6).setRestitution(0.3).setDensity(0), body);
+        RAPIER.ColliderDesc.ball(s.maxRadius).setFriction(mat.friction).setRestitution(mat.restitution).setDensity(0), body);
     }
 
     const e = this.finishCustomEntity(
       body, s.geometry, p, s.maxRadius, s.volume,
       `surface (${s.mode}): ${spec.xuv}, ${spec.yuv}, ${spec.zuv}`,
+      mat, [tiles(s.uvSpan[0]), tiles(s.uvSpan[1])], // UVs follow the parameter grid
     );
     e.support = { points: s.supportPoints, pad: 0 }; // slab corners = the collider's extremes
     // open surfaces are visible from both sides (a Möbius strip has no inside)
@@ -376,10 +442,13 @@ export class Sandbox {
   private finishCustomEntity(
     body: RAPIER.RigidBody, geometry: THREE.BufferGeometry, p: THREE.Vector3,
     boundingRadius: number, volume: number, label: string,
+    mat: Material = PLAIN, repeat: [number, number] = [1, 1],
   ): Entity {
     const color = new THREE.Color(PALETTE[this.nextId % PALETTE.length]);
-    const mat = new THREE.MeshStandardMaterial({ color, metalness: 0.1, roughness: 0.6 });
-    const mesh = new THREE.Mesh(geometry, mat);
+    const meshMat = mat.maps
+      ? this.pbrMaterial(mat, repeat)
+      : new THREE.MeshStandardMaterial({ color, metalness: 0.1, roughness: 0.6 });
+    const mesh = new THREE.Mesh(geometry, meshMat);
     mesh.castShadow = true;
     mesh.receiveShadow = true;
     mesh.position.copy(p);
@@ -389,7 +458,7 @@ export class Sandbox {
     geometry.computeBoundingBox();
     const bb = geometry.boundingBox!;
     const e: Entity = {
-      id: this.nextId++, kind: 'custom', body, size: boundingRadius, color,
+      id: this.nextId++, kind: 'custom', body, size: boundingRadius, mat, color,
       prevPos: p.clone(), prevQuat: new THREE.Quaternion(),
       currPos: p.clone(), currQuat: new THREE.Quaternion(),
       lastVel: new THREE.Vector3(), accel: new THREE.Vector3(),
@@ -537,9 +606,7 @@ export class Sandbox {
   }
 
   private syncRender(alpha: number) {
-    let bi = 0, si = 0;
-    this.boxSlots.length = 0;
-    this.sphereSlots.length = 0;
+    for (const pool of this.pools.values()) pool.slots.length = 0;
     for (const e of this.entities) {
       this._p.copy(e.prevPos).lerp(e.currPos, alpha);
       this._q.copy(e.prevQuat).slerp(e.currQuat, alpha);
@@ -555,25 +622,22 @@ export class Sandbox {
       const scale = e.kind === 'box' ? e.size * 2 : e.size; // box geo is unit cube; sphere geo is unit radius
       this._s.setScalar(scale);
       this._m.compose(this._p, this._q, this._s);
-      const col = e === this.selected ? SELECT_COLOR : e.color;
-      if (e.kind === 'box') {
-        this.boxMesh.setMatrixAt(bi, this._m);
-        this.boxMesh.setColorAt(bi, col);
-        this.boxSlots[bi] = e;
-        bi++;
-      } else {
-        this.sphereMesh.setMatrixAt(si, this._m);
-        this.sphereMesh.setColorAt(si, col);
-        this.sphereSlots[si] = e;
-        si++;
-      }
+      // plain pool: palette color per instance (white when selected). Textured pool: instanceColor
+      // multiplies the map — white normally, a >1 blue-ish tint to highlight the selection.
+      const col = e.mat.maps
+        ? (e === this.selected ? SELECT_TINT : WHITE)
+        : (e === this.selected ? SELECT_COLOR : e.color);
+      const pool = this.getPool(e.kind as 'box' | 'sphere', e.mat);
+      const i = pool.slots.length;
+      pool.mesh.setMatrixAt(i, this._m);
+      pool.mesh.setColorAt(i, col);
+      pool.slots.push(e);
     }
-    this.boxMesh.count = bi;
-    this.sphereMesh.count = si;
-    this.boxMesh.instanceMatrix.needsUpdate = true;
-    this.sphereMesh.instanceMatrix.needsUpdate = true;
-    if (this.boxMesh.instanceColor) this.boxMesh.instanceColor.needsUpdate = true;
-    if (this.sphereMesh.instanceColor) this.sphereMesh.instanceColor.needsUpdate = true;
+    for (const pool of this.pools.values()) {
+      pool.mesh.count = pool.slots.length;
+      pool.mesh.instanceMatrix.needsUpdate = true;
+      if (pool.mesh.instanceColor) pool.mesh.instanceColor.needsUpdate = true;
+    }
   }
 
   // ---------------------------------------------------------------- interaction
@@ -585,14 +649,15 @@ export class Sandbox {
   }
 
   private pickTargets(): THREE.Object3D[] {
-    return [this.boxMesh, this.sphereMesh, ...this.customMeshes];
+    return [...[...this.pools.values()].map((p) => p.mesh), ...this.customMeshes];
   }
 
   private entityFromHit(h: THREE.Intersection): Entity | null {
-    if (h.object === this.boxMesh || h.object === this.sphereMesh) {
+    const pool = h.object.userData.pool as { slots: Entity[] } | undefined;
+    if (pool) {
       const id = h.instanceId;
       if (id == null) return null;
-      return (h.object === this.boxMesh ? this.boxSlots[id] : this.sphereSlots[id]) ?? null;
+      return pool.slots[id] ?? null;
     }
     return (h.object.userData.entity as Entity | undefined) ?? null;
   }
@@ -731,3 +796,5 @@ export class Sandbox {
 }
 
 const SELECT_COLOR = new THREE.Color('#ffffff');
+const WHITE = new THREE.Color(1, 1, 1);
+const SELECT_TINT = new THREE.Color(1.5, 1.6, 1.9); // >1 brightens the texture under the tint

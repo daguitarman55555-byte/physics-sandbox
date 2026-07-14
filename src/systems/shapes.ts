@@ -423,6 +423,7 @@ export interface BuiltParamSurface {
   inertia: { x: number; y: number; z: number }; // principal moments about the c.o.m.
   inertiaFrame: { x: number; y: number; z: number; w: number };
   maxRadius: number; // bounding radius (spawn height + fallback collider)
+  uvSpan: [number, number]; // world arc lengths of the mid u-/v-parameter lines — texture tiling
   closed: boolean;
   mode: 'shell' | 'solid';
 }
@@ -574,10 +575,27 @@ export function buildParamSurface(spec: ParamSurfaceSpec): ParamSurfaceResult {
       indices[w++] = a; indices[w++] = c; indices[w++] = d;
     }
   }
+  const uvs = new Float32Array((N + 1) * (N + 1) * 2);
+  for (let i = 0; i <= N; i++) {
+    for (let j = 0; j <= N; j++) {
+      const k = i * (N + 1) + j;
+      uvs[k * 2] = i / N;
+      uvs[k * 2 + 1] = j / N;
+    }
+  }
   const geometry = new THREE.BufferGeometry();
   geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+  geometry.setAttribute('uv', new THREE.BufferAttribute(uvs, 2));
   geometry.setIndex(new THREE.BufferAttribute(indices, 1));
   geometry.computeVertexNormals();
+
+  // texture-tiling spans: how long the surface is along each parameter (measured mid-line)
+  const mid = N / 2;
+  let uLen = 0, vLen = 0;
+  for (let k = 0; k < N; k++) {
+    uLen += at(k + 1, mid).distanceTo(at(k, mid));
+    vLen += at(mid, k + 1).distanceTo(at(mid, k));
+  }
 
   let maxRadius = 0;
   for (const p of P) maxRadius = Math.max(maxRadius, p.distanceTo(com));
@@ -639,7 +657,7 @@ export function buildParamSurface(spec: ParamSurfaceSpec): ParamSurfaceResult {
       geometry, slabs, supportPoints: new Float32Array(support), area, volume, mass,
       inertia: { x: principal[0], y: principal[1], z: principal[2] },
       inertiaFrame: { x: frame.x, y: frame.y, z: frame.z, w: frame.w },
-      maxRadius, closed, mode: spec.mode,
+      maxRadius, uvSpan: [uLen, vLen], closed, mode: spec.mode,
     },
   };
 }

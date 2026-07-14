@@ -12,6 +12,7 @@ import 'mathlive/fonts.css';
 import type { Entity, Sandbox } from './sandbox';
 import { buildRevolution, buildParamCurve, buildParamSurface, REV_PRESETS, CURVE_PRESETS, SURFACE_PRESETS } from './systems/shapes';
 import { exprToLatex } from './systems/expr';
+import { PLAIN, PRESETS as MATERIALS, type Material } from './systems/materials';
 
 // fonts come from the CSS import above; no sounds, no popup keyboard — it's a typed input
 MathfieldElement.fontsDirectory = null;
@@ -60,6 +61,26 @@ function el<K extends keyof HTMLElementTagNameMap>(tag: K, html = '', cls = ''):
   if (html) n.innerHTML = html;
   if (cls) n.className = cls;
   return n;
+}
+
+/**
+ * A collapsible panel section: header (click toggles, chevron shows state) + body. Keeps the main
+ * panel tidy — the three shape creators sit collapsed until needed.
+ */
+function section(panel: HTMLElement, title: string, open: boolean): HTMLElement {
+  const sec = el('div', '', 'sec' + (open ? '' : ' collapsed'));
+  const head = el('h3', `<span>${title}</span><span class="chev">▾</span>`, 'sec-head');
+  head.onclick = () => sec.classList.toggle('collapsed');
+  const body = el('div', '', 'sec-body');
+  sec.append(head, body);
+  panel.append(sec);
+  return body;
+}
+
+/** The panel-wide active material: every spawn/create call reads it; creators sync their density. */
+interface MaterialsHook {
+  get(): Material;
+  onChange(cb: (m: Material) => void): void;
 }
 
 // ============================================================ floating windows
@@ -250,30 +271,58 @@ function getShapePreview(): ShapePreview {
 
 function buildPanel(sandbox: Sandbox) {
   const panel = document.getElementById('panel')!;
-  panel.append(el('h3', 'Physics Sandbox · Phase 1'));
-  makeFloating(panel, 'h3'); // drag by any section header
+  panel.append(el('h3', 'Physics Sandbox', 'ptitle'));
+  makeFloating(panel, '.ptitle'); // drag by the title; section headers toggle collapse instead
 
-  // spawn buttons
-  const spawn = el('div', '', 'row wrap');
+  // --- material picker: ONE active material, applied to everything spawned or created ---
+  let active: Material = PLAIN;
+  const listeners: Array<(m: Material) => void> = [];
+  const materials: MaterialsHook = {
+    get: () => active,
+    onChange: (cb) => listeners.push(cb),
+  };
+  const matBody = section(panel, 'Material', true);
+  const chipRow = el('div', '', 'row wrap');
+  const matInfo = el('div', '', 'preview');
+  const describe = (m: Material) =>
+    `ρ <b>${m.density}</b> kg/m³ · μ <b>${m.friction.toFixed(2)}</b> · e <b>${m.restitution.toFixed(2)}</b>`;
+  const chips: HTMLButtonElement[] = [];
+  const paletteDot = 'linear-gradient(90deg,#5b8def,#4fb89a,#c9bb3a,#e89948)'; // "plain" = palette colors
+  for (const m of [PLAIN, ...MATERIALS]) {
+    const b = el('button', `<i class="dot" style="background:${m.color || paletteDot}"></i>${m.name}`, 'mini chip');
+    b.onclick = () => {
+      active = m;
+      for (const c of chips) c.classList.toggle('on', c === b);
+      matInfo.innerHTML = describe(m);
+      for (const cb of listeners) cb(m);
+    };
+    chips.push(b);
+    chipRow.append(b);
+  }
+  chips[0].classList.add('on');
+  matInfo.innerHTML = describe(PLAIN);
+  matBody.append(chipRow, matInfo);
+
+  // --- spawn primitives ---
+  const spawnBody = section(panel, 'Spawn', true);
+  const spawn = el('div', '', 'row');
   const bBox = el('button', 'Box');
   const bSphere = el('button', 'Sphere');
-  bBox.onclick = () => sandbox.spawn('box');
-  bSphere.onclick = () => sandbox.spawn('sphere');
-  spawn.append(bBox, bSphere);
-  panel.append(el('h3', 'Spawn'), spawn);
+  const b100 = el('button', '+100', 'primary');
+  b100.title = 'Spawn 100 objects of the active material';
+  bBox.onclick = () => sandbox.spawn('box', undefined, undefined, materials.get());
+  bSphere.onclick = () => sandbox.spawn('sphere', undefined, undefined, materials.get());
+  b100.onclick = () => sandbox.spawnMany(100, materials.get());
+  spawn.append(bBox, bSphere, b100);
+  spawnBody.append(spawn);
 
-  const spawn2 = el('div', '', 'row');
-  const b100 = el('button', '+100 objects', 'primary');
-  b100.onclick = () => sandbox.spawnMany(100);
-  spawn2.append(b100);
-  panel.append(spawn2);
+  // --- Phase 2 shape creators (collapsed until needed) ---
+  buildShapeCreator(section(panel, 'Create · f(x) revolution', false), sandbox, materials);
+  buildCurveCreator(section(panel, 'Create · parametric curve', false), sandbox, materials);
+  buildSurfaceCreator(section(panel, 'Create · parametric surface', false), sandbox, materials);
 
-  // Phase 2 — f(x) solid of revolution + parametric curves + parametric surfaces
-  buildShapeCreator(panel, sandbox);
-  buildCurveCreator(panel, sandbox);
-  buildSurfaceCreator(panel, sandbox);
-
-  // gravity slider
+  // --- world ---
+  const worldBody = section(panel, 'World', true);
   const field = el('div', '', 'field');
   const label = el('label', 'Gravity <b>-9.81</b>');
   const range = el('input');
@@ -285,9 +334,8 @@ function buildPanel(sandbox: Sandbox) {
     label.querySelector('b')!.textContent = v.toFixed(2);
   };
   field.append(label, range);
-  panel.append(el('h3', 'World'), field);
+  worldBody.append(field);
 
-  // gravity presets
   const presets = el('div', '', 'row wrap');
   const set = (v: number) => () => {
     sandbox.setGravityY(v);
@@ -298,25 +346,18 @@ function buildPanel(sandbox: Sandbox) {
   const gMoon = el('button', 'Moon'); gMoon.onclick = set(-1.62);
   const gZero = el('button', 'Zero-G'); gZero.onclick = set(0);
   presets.append(gEarth, gMoon, gZero);
-  panel.append(presets);
+  worldBody.append(presets);
 
-  // reset / delete all
-  const resetRow = el('div', '', 'row');
+  const actionsRow = el('div', '', 'row');
   const bReset = el('button', 'Reset scene');
   bReset.onclick = () => sandbox.reset();
-  resetRow.append(bReset);
-  panel.append(resetRow);
-
-  const delRow = el('div', '', 'row');
   const bDelAll = el('button', 'Delete all', 'danger');
   bDelAll.onclick = () => sandbox.clear();
-  delRow.append(bDelAll);
-  panel.append(delRow);
+  actionsRow.append(bReset, bDelAll);
+  worldBody.append(actionsRow);
 }
 
-function buildShapeCreator(panel: HTMLElement, sandbox: Sandbox) {
-  panel.append(el('h3', 'Create shape · f(x) revolution'));
-
+function buildShapeCreator(panel: HTMLElement, sandbox: Sandbox, materials: MaterialsHook) {
   // profile expression: radius as a function of x (the axis), revolved into a solid.
   // A MathLive field — math renders in place as you type, Desmos-style.
   const exprField = el('div', '', 'field');
@@ -374,18 +415,17 @@ function buildShapeCreator(panel: HTMLElement, sandbox: Sandbox) {
   };
   rev.el.addEventListener('input', () => refresh(true));
   for (const i of [aInput, bInput, dInput]) i.oninput = () => refresh(true);
+  materials.onChange((m) => { dInput.value = String(m.density / 1000); refresh(); }); // density follows the material
 
   bCreate.onclick = () => {
-    const res = sandbox.createRevolution(readSpec());
+    const res = sandbox.createRevolution(readSpec(), materials.get());
     if (!res.ok) { preview.className = 'preview err'; preview.textContent = res.error; }
   };
 
   refresh();
 }
 
-function buildCurveCreator(panel: HTMLElement, sandbox: Sandbox) {
-  panel.append(el('h3', 'Create shape · parametric curve'));
-
+function buildCurveCreator(panel: HTMLElement, sandbox: Sandbox, materials: MaterialsHook) {
   // x(t), y(t), z(t) — a tube swept along the curve (springs, knots, rings).
   // MathLive fields: math renders in place as you type, Desmos-style.
   const fields: Record<'xt' | 'yt' | 'zt', MathField> = {} as never;
@@ -461,18 +501,17 @@ function buildCurveCreator(panel: HTMLElement, sandbox: Sandbox) {
   };
   for (const f of [fields.xt, fields.yt, fields.zt]) f.el.addEventListener('input', () => refresh(true));
   for (const i of [t0Input, t1Input, tubeInput, dInput]) i.oninput = () => refresh(true);
+  materials.onChange((m) => { dInput.value = String(m.density / 1000); refresh(); }); // density follows the material
 
   bCreate.onclick = () => {
-    const res = sandbox.createParamCurve(readSpec());
+    const res = sandbox.createParamCurve(readSpec(), materials.get());
     if (!res.ok) { preview.className = 'preview err'; preview.textContent = res.error; }
   };
 
   refresh();
 }
 
-function buildSurfaceCreator(panel: HTMLElement, sandbox: Sandbox) {
-  panel.append(el('h3', 'Create shape · parametric surface'));
-
+function buildSurfaceCreator(panel: HTMLElement, sandbox: Sandbox, materials: MaterialsHook) {
   // x(u,v), y(u,v), z(u,v) — a sheet in space, dropped in as a thin shell (any surface) or a
   // filled solid (closed surfaces only — auto-detected). MathLive fields, Desmos-style.
   const fields: Record<'xuv' | 'yuv' | 'zuv', MathField> = {} as never;
@@ -578,9 +617,10 @@ function buildSurfaceCreator(panel: HTMLElement, sandbox: Sandbox) {
   };
   for (const f of [fields.xuv, fields.yuv, fields.zuv]) f.el.addEventListener('input', () => refresh(true));
   for (const i of [u0Input, u1Input, v0Input, v1Input, thickInput, dInput]) i.oninput = () => refresh(true);
+  materials.onChange((m) => { dInput.value = String(m.density / 1000); refresh(); }); // density follows the material
 
   bCreate.onclick = () => {
-    const res = sandbox.createParamSurface(readSpec());
+    const res = sandbox.createParamSurface(readSpec(), materials.get());
     if (!res.ok) { preview.className = 'preview err'; preview.textContent = res.error; }
   };
 
@@ -649,6 +689,7 @@ function buildInspector(sandbox: Sandbox) {
       prop('speed', `${speed.toFixed(2)} m/s`) +
       prop('angular vel', `${spin.toFixed(2)} rad/s`) +
       prop('mass', `${mass.toFixed(2)} kg`) +
+      prop('material', e.mat.name) +
       sizeOrShape +
       prop('kinetic E', `${ke.toFixed(1)} J`) +
       prop('state', e.body.isSleeping() ? 'asleep' : 'awake');
