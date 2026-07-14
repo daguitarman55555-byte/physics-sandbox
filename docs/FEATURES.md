@@ -6,7 +6,8 @@ A checklist so nothing is lost. `[x]` = in Phase 1 today · `[ ]` = planned (wit
 - [x] Real-time engine, 100+ objects @ 60fps (Rapier + InstancedMesh)
 - [x] Fixed timestep + render interpolation (glassy motion; catch-up clamp)
 - [x] Spawn box / sphere / +100
-- [x] Drag & throw (clamped — no teleport/fling)
+- [x] Drag & throw — physical point-grab: a ball joint at the grab point, so gravity/inertia keep
+      acting while held (lift a rod by one end and it swings); clamped anchor speed, no teleport
 - [x] Orbit / pan / zoom camera
 - [x] Gravity slider + Earth/Moon/Zero-G, reset scene
 - [x] Object inspector (live speed, angular vel, mass, energy, sleep) + FPS/count HUD
@@ -53,6 +54,9 @@ A checklist so nothing is lost. `[x]` = in Phase 1 today · `[ ]` = planned (wit
 
 ## Inspector & selection — `systems/inspector.ts`
 - [x] Single-select + live read-out (+ shape label for custom objects) + **Delete object** button
+- [x] **Free-body forces view** — isolated 3D render of the selection, centered, live orientation,
+      force arrows (weight / net / contact / velocity) + values
+- [x] All panels are **windows**: drag by header, resize (contents & mini-renderers reflow)
 - [x] **Forces window** — floating readout tracked above the selected object: weight m·g, measured
       net force ΣF = m·a, contact/friction/drag decomposition, velocity, momentum, KE, contact count
 - [x] **Delete all** button (below Reset scene) — clears the world without respawning defaults

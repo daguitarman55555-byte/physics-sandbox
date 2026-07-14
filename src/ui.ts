@@ -62,6 +62,62 @@ function el<K extends keyof HTMLElementTagNameMap>(tag: K, html = '', cls = ''):
   return n;
 }
 
+// ============================================================ floating windows
+//
+// Every panel is a window: drag it anywhere by its header, resize it by the native bottom-right
+// grip (contents reflow — canvases re-render at the new size via ResizeObserver), and pressing
+// anywhere on it brings it to the front.
+
+let topZ = 40;
+
+/**
+ * Make `root` a movable window. `handleSel` picks the drag handle(s) by delegated selector, so
+ * handles inside live-rewritten innerHTML keep working. On first drag the element is pinned as a
+ * free-floating fixed window at its current screen position (detaching it from any dock/anchor).
+ */
+function makeFloating(root: HTMLElement, handleSel: string) {
+  root.addEventListener('pointerdown', (e) => {
+    root.style.zIndex = String(++topZ); // any press raises the window
+    const t = e.target as HTMLElement;
+    if (t.closest('button, input, math-field, canvas, a')) return; // interactive bits aren't handles
+    if (!t.closest(handleSel)) return;
+    const rect = root.getBoundingClientRect();
+    root.style.position = 'fixed';
+    root.style.left = `${rect.left}px`;
+    root.style.top = `${rect.top}px`;
+    root.style.right = 'auto';
+    root.style.bottom = 'auto';
+    root.style.width = `${rect.width}px`;
+    root.style.height = `${rect.height}px`;
+    root.style.maxHeight = 'none';
+    root.style.margin = '0';
+    if (root.parentElement !== document.body) document.body.append(root);
+    const dx = e.clientX - rect.left, dy = e.clientY - rect.top;
+    const move = (ev: PointerEvent) => {
+      root.style.left = `${ev.clientX - dx}px`;
+      root.style.top = `${ev.clientY - dy}px`;
+    };
+    const up = () => { removeEventListener('pointermove', move); removeEventListener('pointerup', up); };
+    addEventListener('pointermove', move);
+    addEventListener('pointerup', up);
+    e.preventDefault();
+  });
+}
+
+/**
+ * Frame the camera so a sphere of `radius` around the origin fits entirely in view — whichever of
+ * the vertical/horizontal FOV is tighter decides the distance, so nothing hangs off any edge.
+ */
+const fitDir = new THREE.Vector3();
+function fitCamera(camera: THREE.PerspectiveCamera, radius: number, dx: number, dy: number, dz: number) {
+  const vHalf = THREE.MathUtils.degToRad(camera.fov) / 2;
+  const hHalf = Math.atan(Math.tan(vHalf) * camera.aspect);
+  const d = Math.max(radius, 0.05) / Math.sin(Math.min(vHalf, hHalf));
+  camera.position.copy(fitDir.set(dx, dy, dz)).normalize().multiplyScalar(d);
+  camera.lookAt(0, 0, 0);
+  camera.updateProjectionMatrix();
+}
+
 // ============================================================ shape preview popup
 //
 // A small floating window with its own Three.js renderer that shows the shape currently being
@@ -80,6 +136,8 @@ class ShapePreview {
   private pending: { geometry: THREE.BufferGeometry; caption: string } | null = null;
   private raf = 0;
 
+  private frameR = 1; // bounding radius of the current shape, for camera framing
+
   constructor() {
     this.root = el('div', '', 'hidden');
     this.root.id = 'shape-preview';
@@ -91,28 +149,28 @@ class ShapePreview {
     this.caption = el('div', '', 'cap');
     this.root.append(header, this.canvas, this.caption);
     document.body.append(this.root);
+    makeFloating(this.root, 'header');
 
-    // drag by the header (skip drags that start on the close button)
-    header.addEventListener('pointerdown', (e) => {
-      if (e.target === close) return;
-      const rect = this.root.getBoundingClientRect();
-      const dx = e.clientX - rect.left, dy = e.clientY - rect.top;
-      this.root.style.right = 'auto'; // switch from right-anchored to free-floating
-      const move = (ev: PointerEvent) => {
-        this.root.style.left = `${ev.clientX - dx}px`;
-        this.root.style.top = `${ev.clientY - dy}px`;
-      };
-      const up = () => { removeEventListener('pointermove', move); removeEventListener('pointerup', up); };
-      addEventListener('pointermove', move);
-      addEventListener('pointerup', up);
-      e.preventDefault();
-    });
+    // re-render at the new size whenever the window is resized
+    new ResizeObserver(() => {
+      if (!this.renderer) return;
+      const w = this.canvas.clientWidth, h = this.canvas.clientHeight;
+      if (!w || !h) return;
+      this.renderer.setSize(w, h, false);
+      this.fit();
+    }).observe(this.canvas);
 
     this.scene.add(new THREE.HemisphereLight('#aab6cc', '#20242e', 0.9));
     const sun = new THREE.DirectionalLight('#ffffff', 1.9);
     sun.position.set(4, 6, 5);
     this.scene.add(sun);
     this.scene.add(this.spin);
+  }
+
+  /** Aim the camera so the whole shape fits, at the current canvas aspect. */
+  private fit() {
+    this.camera.aspect = (this.canvas.clientWidth || 256) / (this.canvas.clientHeight || 200);
+    fitCamera(this.camera, this.frameR * 1.12, 0.35, 0.4, 1);
   }
 
   /** Swap in a new geometry (called on every valid rebuild). Does not open the popup. */
@@ -131,7 +189,7 @@ class ShapePreview {
     if (!this.renderer) {
       this.renderer = new THREE.WebGLRenderer({ canvas: this.canvas, antialias: true, alpha: true });
       this.renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
-      this.renderer.setSize(256, 200);
+      this.renderer.setSize(this.canvas.clientWidth || 256, this.canvas.clientHeight || 200, false);
     }
     if (this.pending) {
       this.apply(this.pending.geometry, this.pending.caption);
@@ -169,10 +227,13 @@ class ShapePreview {
     }
     this.mesh.geometry = geometry;
     this.spin.add(this.mesh);
+    // center the VISUAL middle (bounding-sphere center), not the center of mass — a lopsided
+    // shape's c.o.m. sits off-middle and used to push part of the shape out of frame
     geometry.computeBoundingSphere();
-    const r = geometry.boundingSphere?.radius ?? 2;
-    this.camera.position.set(0, r * 0.7, r * 2.6);
-    this.camera.lookAt(0, 0, 0);
+    const bs = geometry.boundingSphere!;
+    this.mesh.position.copy(bs.center).multiplyScalar(-1);
+    this.frameR = bs.radius || 1;
+    this.fit();
     try {
       katex.render(caption, this.caption, { displayMode: false, throwOnError: false, strict: false });
     } catch {
@@ -189,6 +250,7 @@ function getShapePreview(): ShapePreview {
 function buildPanel(sandbox: Sandbox) {
   const panel = document.getElementById('panel')!;
   panel.append(el('h3', 'Physics Sandbox · Phase 1'));
+  makeFloating(panel, 'h3'); // drag by any section header
 
   // spawn buttons
   const spawn = el('div', '', 'row wrap');
@@ -495,16 +557,34 @@ function buildForcesView(sandbox: Sandbox) {
   win.append(head, canvas, legend);
   dock.append(win, inspector);
   document.body.append(dock);
+  makeFloating(win, '.fhead');
+  makeFloating(inspector, 'h3'); // delegated — survives the inspector's innerHTML refresh
 
   // --- mini scene ---
-  const VW = 214, VH = 170;
   let renderer: THREE.WebGLRenderer | null = null;
   const scene = new THREE.Scene();
-  const camera = new THREE.PerspectiveCamera(40, VW / VH, 0.1, 500);
+  const camera = new THREE.PerspectiveCamera(40, 214 / 170, 0.1, 500);
   scene.add(new THREE.HemisphereLight('#aab6cc', '#20242e', 0.9));
   const sun = new THREE.DirectionalLight('#ffffff', 1.9);
   sun.position.set(4, 6, 5);
   scene.add(sun);
+  // holder rotates with the body; the mesh inside is offset by −(bounding center) so the shape's
+  // visual middle stays pinned to the origin — nothing drifts off-frame as it tumbles
+  const holder = new THREE.Group();
+  scene.add(holder);
+
+  let frameR = 1; // radius the camera must fit (shape + arrow reach)
+  const fit = () => {
+    camera.aspect = (canvas.clientWidth || 214) / (canvas.clientHeight || 170);
+    fitCamera(camera, frameR, 0.55, 0.42, 0.9);
+  };
+  new ResizeObserver(() => {
+    if (!renderer) return;
+    const w = canvas.clientWidth, h = canvas.clientHeight;
+    if (!w || !h) return;
+    renderer.setSize(w, h, false);
+    fit();
+  }).observe(canvas);
 
   const ARROW_DEFS = [
     { key: 'weight', color: 0xdc4a4a, label: 'weight m·g' },
@@ -526,7 +606,7 @@ function buildForcesView(sandbox: Sandbox) {
 
   const rebuildMesh = (e: Entity) => {
     if (mesh) {
-      scene.remove(mesh);
+      holder.remove(mesh);
       if (ownGeometry) mesh.geometry.dispose();
       (mesh.material as THREE.Material).dispose();
     }
@@ -535,12 +615,14 @@ function buildForcesView(sandbox: Sandbox) {
     else if (e.kind === 'box') { geo = new THREE.BoxGeometry(e.size * 2, e.size * 2, e.size * 2); ownGeometry = true; }
     else { geo = new THREE.SphereGeometry(e.size, 24, 16); ownGeometry = true; }
     mesh = new THREE.Mesh(geo, new THREE.MeshStandardMaterial({ color: e.color, metalness: 0.1, roughness: 0.6 }));
-    scene.add(mesh);
+    geo.computeBoundingSphere();
+    const bs = geo.boundingSphere!;
+    mesh.position.copy(bs.center).multiplyScalar(-1); // visual middle at the origin
+    holder.add(mesh);
     meshFor = e.id;
-    // frame the object + room for arrows sticking out ~2.2× its radius
-    const d = Math.max(e.size, 0.2) * 4.6;
-    camera.position.set(0.55, 0.42, 0.9).normalize().multiplyScalar(d);
-    camera.lookAt(0, 0, 0);
+    // fit the whole shape AND the longest possible arrow (1.2 × arrow base radius)
+    frameR = Math.max(bs.radius || 0.2, 1.2 * Math.max(e.size, 0.2)) * 1.08;
+    fit();
   };
 
   const dir = new THREE.Vector3();
@@ -548,7 +630,7 @@ function buildForcesView(sandbox: Sandbox) {
     if (mag < 1e-3 || maxMag < 1e-3) { a.visible = false; return; }
     a.visible = true;
     a.setDirection(dir.set(x / mag, y / mag, z / mag));
-    const len = R * (0.8 + 1.4 * Math.min(mag / maxMag, 1));
+    const len = R * (0.45 + 0.75 * Math.min(mag / maxMag, 1)); // ≤ 1.2·R — arrows read well without dwarfing the shape
     a.setLength(len, len * 0.22, len * 0.12);
   };
 
@@ -569,10 +651,10 @@ function buildForcesView(sandbox: Sandbox) {
     if (!renderer) {
       renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true });
       renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
-      renderer.setSize(VW, VH);
+      renderer.setSize(canvas.clientWidth || 214, canvas.clientHeight || 170, false);
     }
     if (meshFor !== e.id) rebuildMesh(e);
-    mesh!.quaternion.copy(e.currQuat); // live orientation — the object exactly as it sits in the world
+    holder.quaternion.copy(e.currQuat); // live orientation — the object exactly as it sits in the world
 
     const m = e.body.mass();
     const g = sandbox.gravityY;

@@ -60,10 +60,20 @@ export class Sandbox {
   private sphereSlots: Entity[] = [];
   private customMeshes: THREE.Mesh[] = []; // unique-geometry meshes (Phase 2 shapes), one draw call each
 
-  // interaction
+  // interaction. Grabbing is physical: a collider-less kinematic body follows the cursor, tied to
+  // the grabbed body by a spherical joint at the exact grab point — so gravity and inertia keep
+  // acting while held (lift a rod by one end and the other end swings down).
   private raycaster = new THREE.Raycaster();
   private pointer = new THREE.Vector2();
-  private grab: { entity: Entity; plane: THREE.Plane; offset: THREE.Vector3; target: THREE.Vector3 } | null = null;
+  private grab: {
+    entity: Entity;
+    plane: THREE.Plane;
+    target: THREE.Vector3;
+    kin: RAPIER.RigidBody; // cursor-driven kinematic anchor
+    joint: RAPIER.ImpulseJoint;
+    prevLinDamp: number; // body damping to restore on release
+    prevAngDamp: number;
+  } | null = null;
   selected: Entity | null = null;
   private pointerDownAt = { x: 0, y: 0 };
   private lastPointerPx = { x: 0, y: 0 };
@@ -325,6 +335,7 @@ export class Sandbox {
   deleteEntity(e: Entity) {
     const i = this.entities.indexOf(e);
     if (i < 0) return;
+    if (this.grab?.entity === e) this.releaseGrab(); // before the body goes — the joint refs it
     this.world.removeRigidBody(e.body);
     if (e.mesh) {
       this.scene.remove(e.mesh);
@@ -335,13 +346,11 @@ export class Sandbox {
     }
     this.entities.splice(i, 1);
     if (this.selected === e) this.selected = null;
-    if (this.grab?.entity === e) {
-      this.grab = null;
-      this.controls.enabled = true;
-    }
+    if (this.grab?.entity === e) this.releaseGrab();
   }
 
   clear() {
+    this.releaseGrab(); // before bodies go — the joint refs one of them
     for (const e of this.entities) {
       this.world.removeRigidBody(e.body);
       if (e.mesh) {
@@ -353,8 +362,6 @@ export class Sandbox {
     this.entities.length = 0;
     this.customMeshes.length = 0;
     this.selected = null;
-    this.grab = null;
-    if (!this.controls.enabled) this.controls.enabled = true; // a grab may have been active
   }
 
   reset() {
@@ -406,18 +413,16 @@ export class Sandbox {
     for (const e of this.entities) { e.prevPos.copy(e.currPos); e.prevQuat.copy(e.currQuat); }
     const lost: Entity[] = []; // entities that fell off the world this step — removed after the loop
 
-    // drive a grabbed body toward the cursor target with a clamped velocity (no teleport, no fling)
+    // walk the kinematic anchor toward the cursor target (clamped step — no teleporting the joint);
+    // the spherical joint transmits the pull while gravity and inertia keep acting on the body
     if (this.grab) {
-      const b = this.grab.entity.body;
-      const t = b.translation();
+      const k = this.grab.kin.translation();
       const want = this._p.set(this.grab.target.x, this.grab.target.y, this.grab.target.z)
-        .add(this.grab.offset)
-        .sub(this._s.set(t.x, t.y, t.z))
-        .multiplyScalar(1 / FIXED);
-      const max = 40;
-      if (want.length() > max) want.setLength(max);
-      b.setLinvel({ x: want.x, y: want.y, z: want.z }, true);
-      b.setAngvel({ x: 0, y: 0, z: 0 }, true);
+        .sub(this._s.set(k.x, k.y, k.z));
+      const maxStep = 40 * FIXED; // ≤ 40 m/s anchor speed
+      if (want.length() > maxStep) want.setLength(maxStep);
+      this.grab.kin.setNextKinematicTranslation({ x: k.x + want.x, y: k.y + want.y, z: k.z + want.z });
+      this.grab.entity.body.wakeUp();
     }
 
     this.world.step();
@@ -554,20 +559,52 @@ export class Sandbox {
     this.setPointer(e);
     const hit = this.pick();
     if (hit) {
+      this.releaseGrab(); // a second press mid-grab (multi-touch, missed pointerup) must not leak the joint
       this.selected = hit.entity;
       // start a drag on a camera-facing plane through the grab point
-      const t = hit.entity.body.translation();
+      const body = hit.entity.body;
+      const t = body.translation();
       const bodyPos = new THREE.Vector3(t.x, t.y, t.z);
       const hitPoint = hit.point;
       const normal = this.camera.getWorldDirection(new THREE.Vector3()).negate();
       const plane = new THREE.Plane().setFromNormalAndCoplanarPoint(normal, hitPoint);
-      this.grab = { entity: hit.entity, plane, offset: bodyPos.clone().sub(hitPoint), target: hitPoint.clone() };
-      hit.entity.body.wakeUp();
+
+      // pin a kinematic anchor to the grab point with a ball joint (anchor is body-local),
+      // so the body hangs/swings physically from where it was grabbed
+      const rq = body.rotation();
+      const local = hitPoint.clone().sub(bodyPos)
+        .applyQuaternion(new THREE.Quaternion(rq.x, rq.y, rq.z, rq.w).invert());
+      const kin = this.world.createRigidBody(
+        RAPIER.RigidBodyDesc.kinematicPositionBased().setTranslation(hitPoint.x, hitPoint.y, hitPoint.z),
+      );
+      const joint = this.world.createImpulseJoint(
+        RAPIER.JointData.spherical({ x: 0, y: 0, z: 0 }, { x: local.x, y: local.y, z: local.z }),
+        kin, body, true,
+      );
+      // hand-like damping while held: steadies the drag but leaves the swing visible
+      const prevLinDamp = body.linearDamping();
+      const prevAngDamp = body.angularDamping();
+      body.setLinearDamping(4);
+      body.setAngularDamping(0.9);
+
+      this.grab = { entity: hit.entity, plane, target: hitPoint.clone(), kin, joint, prevLinDamp, prevAngDamp };
+      body.wakeUp();
       this.controls.enabled = false; // let the drag own the mouse
     } else {
       this.selected = null; // clicked empty space → OrbitControls will orbit
     }
   };
+
+  /** Undo everything a grab set up: joint, kinematic anchor, damping, camera control. */
+  private releaseGrab() {
+    if (!this.grab) return;
+    this.world.removeImpulseJoint(this.grab.joint, true);
+    this.world.removeRigidBody(this.grab.kin);
+    this.grab.entity.body.setLinearDamping(this.grab.prevLinDamp);
+    this.grab.entity.body.setAngularDamping(this.grab.prevAngDamp);
+    this.grab = null;
+    this.controls.enabled = true;
+  }
 
   private onPointerMove = (e: PointerEvent) => {
     if (!this.grab) return;
@@ -577,10 +614,7 @@ export class Sandbox {
   };
 
   private onPointerUp = (_e: PointerEvent) => {
-    if (this.grab) {
-      this.grab = null;
-      this.controls.enabled = true;
-    }
+    this.releaseGrab();
   };
 
   private onResize = () => {
