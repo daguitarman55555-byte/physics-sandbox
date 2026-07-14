@@ -15,7 +15,12 @@ A checklist so nothing is lost. `[x]` = in Phase 1 today · `[ ]` = planned (wit
 - [x] `f(x)` solids of revolution — LatheGeometry + **exact analytic mass/inertia tensor** (Simpson
       quadrature of the profile), convex-hull collider, safe expression parser (`systems/expr.ts`),
       Vase/Egg/Top/Dome presets, live volume/mass preview
-- [ ] **Parametric curves** x(t),y(t),z(t) → swept tubes (springs, knots, DNA)
+- [x] **Parametric curves** x(t),y(t),z(t) → swept tubes (springs, knots, rings, waves) — TubeGeometry
+      render, mass/c.o.m./**full inertia tensor** integrated along the centerline (per-segment cylinder
+      terms, Jacobi-diagonalized → principal moments + frame for Rapier), **capsule-chain collider**
+      (coils stay hollow — no convex-hull cheating), Spring/Knot/Ring/Wave presets
+- [x] **3D shape preview popup** — floating draggable window with its own renderer; live-updates as
+      you edit any custom-shape creator (revolution + parametric curve)
 - [ ] **Parametric surfaces** x(u,v)… → arbitrary surfaces (torus, seashells, Möbius)
 - [ ] Implicit / SDF surfaces (gyroids, metaballs) · superformula (shells, flowers)
 - [ ] Freehand draw → extrude/revolve · compound objects · boolean CSG
@@ -47,7 +52,12 @@ A checklist so nothing is lost. `[x]` = in Phase 1 today · `[ ]` = planned (wit
 - [ ] Time: pause/step/slow-mo/**rewind** · debug overlays · undo/redo · scene library
 
 ## Inspector & selection — `systems/inspector.ts`
-- [x] Single-select + live read-out
+- [x] Single-select + live read-out (+ shape label for custom objects) + **Delete object** button
+- [x] **Forces window** — floating readout tracked above the selected object: weight m·g, measured
+      net force ΣF = m·a, contact/friction/drag decomposition, velocity, momentum, KE, contact count
+- [x] **Delete all** button (below Reset scene) — clears the world without respawning defaults
+- [x] **Live KaTeX math** — creator expressions render as pretty math (Desmos-style) under each input
+      and in the preview popup, via an AST→LaTeX emitter in `systems/expr.ts` (same parse, no drift)
 - [ ] Shift-multi-select · marquee/box select · **editable** properties (set velocity, scale, density)
 - [ ] Density-distribution heatmap (Module M) · molecular-arrangement lattice view (doorway to zoom-in)
 

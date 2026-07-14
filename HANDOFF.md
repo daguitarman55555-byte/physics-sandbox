@@ -9,11 +9,11 @@ eventually zoom from a tabletop out to a solar system or down to atoms). It is a
 from `RealisticPhysicsEngine` (a from-scratch verified Python engine) — this one is play-focused and
 built on a mature real-time engine.
 
-- **Location:** `C:\Users\rafae\OneDrive\Projects\physics-sandbox`
+- **Location:** `C:\Users\diand\Projects\physics-sandbox`
 - **Stack:** Vite + TypeScript · Three.js (rendering) · Rapier `@dimforge/rapier3d-compat` (physics, Rust→WASM)
 - **Run:** `cd` into the folder, `npm install` (first time), `npm run dev` → open the printed URL (http://localhost:5173)
 
-## Current state — Phase 1 DONE and verified
+## Current state — Phase 1 DONE and verified; Phase 2 in progress
 
 Verified working: **800+ objects holding a solid 60 fps**, real shadows, no console errors.
 
@@ -21,6 +21,23 @@ Works now: fixed-timestep loop + render interpolation · `InstancedMesh` renderi
 shape) · spawn box/sphere/+100 · drag & throw (clamped, no teleport/fling) · OrbitControls camera ·
 gravity slider + Earth/Moon/Zero-G · reset · click-to-select **object inspector** (live speed, angular
 velocity, mass, kinetic energy, sleep state) · FPS/object/awake HUD.
+
+Phase 2 (shapes) — two slices shipped: `f(x)` solids of revolution (exact analytic mass/inertia) and
+**parametric curves** x(t),y(t),z(t) → swept tubes (springs, knots, rings; centerline-integrated mass +
+full inertia tensor diagonalized to principal axes; capsule-chain colliders so coils stay hollow).
+All custom-shape creators live-update a **3D preview popup** (floating, draggable) while you design,
+and every expression renders as **live KaTeX math** (Desmos-style) under its input — `systems/expr.ts`
+emits LaTeX from the same parse that compiles the evaluator. Selection now has a **forces window**
+floating above the selected object (weight, measured ΣF = m·a, contact/drag decomposition, momentum,
+contacts), a **Delete object** button in the inspector, and **Delete all** below Reset scene.
+Next up in Phase 2: parametric surfaces.
+
+Stability hardening (2026-07-13): dynamic bodies now spawn with CCD enabled and reject deeply-
+overlapping drop points — previously, an overlapping spawn could make Rapier's solver inject a huge
+separating velocity, and without CCD that let a body tunnel straight through the floor collider and
+free-fall forever (confirmed one sphere at y ≈ -1.3M, still accelerating). There's also now a per-step
+speed cap and a below-the-world respawn safety net, plus a small screen-space pick tolerance so a
+small/fast-moving ball doesn't require pixel-perfect clicking to grab.
 
 Key files: `src/main.ts` (boot), `src/sandbox.ts` (the whole Phase 1 core), `src/ui.ts` (panel/HUD/inspector).
 
@@ -68,8 +85,9 @@ Model, quarks). Signature UX: **scale-transition zoom**. Plus: portable AI scena
 
 ## What's next
 
-Recommended next build: **Phase 2 — shape creation** (the differentiator): `f(x)` solids of revolution
-and **parametric** curves/surfaces, with correct mass/inertia. Or pick any item from `docs/FEATURES.md`.
+Recommended next build: continue **Phase 2 — shape creation** with **parametric surfaces** x(u,v),
+y(u,v), z(u,v) (torus, seashells, Möbius) — needs a closed-volume strategy for mass (Module-M voxel
+path or divergence-theorem surface integrals). Or pick any item from `docs/FEATURES.md`.
 
 ## Working loop for each task
 

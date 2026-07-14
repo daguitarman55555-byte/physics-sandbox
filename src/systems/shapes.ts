@@ -167,3 +167,203 @@ export const REV_PRESETS: RevPreset[] = [
   { name: 'Top', expr: '1.4*sqrt(max(x,0))*exp(-0.5*x)', a: 0, b: 4 },
   { name: 'Dome', expr: 'sqrt(max(4 - x^2, 0))', a: 0, b: 2 },
 ];
+
+// ============================================================ parametric curves
+//
+// x(t), y(t), z(t) swept into a tube of radius r (springs, knots, rings). Mass properties are
+// integrated numerically along the centerline: each short segment is treated as a solid cylinder
+// (its own axial/transverse inertia + parallel-axis transfer to the c.o.m.). Unlike a revolution
+// solid, the resulting tensor is NOT diagonal in body axes, so we diagonalize it (Jacobi) and hand
+// Rapier the principal moments plus the principal-frame quaternion.
+//
+// Collision: a chain of capsules along the curve — honest concave collision (a ball can pass
+// through a spring's coils), where a convex hull would dishonestly fill them in.
+
+export interface ParamCurveSpec {
+  xt: string; yt: string; zt: string; // coordinates as functions of t
+  t0: number; t1: number;
+  tube: number; // tube (cross-section) radius
+  density: number;
+}
+
+export interface BuiltParamCurve {
+  geometry: THREE.BufferGeometry; // centered on the center of mass
+  capsules: Array<{ center: [number, number, number]; halfHeight: number; quat: [number, number, number, number] }>;
+  tube: number;
+  length: number; // centerline arc length
+  volume: number;
+  mass: number;
+  inertia: { x: number; y: number; z: number }; // principal moments about the c.o.m.
+  inertiaFrame: { x: number; y: number; z: number; w: number }; // rotation into the principal frame
+  maxRadius: number; // bounding radius (for fallback collider + spawn height)
+  closed: boolean;
+}
+
+export type ParamCurveResult = { ok: true; shape: BuiltParamCurve } | { ok: false; error: string };
+
+const CURVE_SAMPLES = 600; // mass-integration resolution along t
+
+/** Jacobi eigendecomposition of a symmetric 3×3 matrix → eigenvalues + orthonormal eigenvectors. */
+function eigenSymmetric3(A: number[][]): { values: number[]; vectors: THREE.Vector3[] } {
+  const a = A.map((row) => row.slice());
+  let v = [[1, 0, 0], [0, 1, 0], [0, 0, 1]];
+  for (let sweep = 0; sweep < 50; sweep++) {
+    const off = Math.abs(a[0][1]) + Math.abs(a[0][2]) + Math.abs(a[1][2]);
+    if (off < 1e-12) break;
+    for (const [p, q] of [[0, 1], [0, 2], [1, 2]] as const) {
+      if (Math.abs(a[p][q]) < 1e-14) continue;
+      const theta = (a[q][q] - a[p][p]) / (2 * a[p][q]);
+      const t = Math.sign(theta) / (Math.abs(theta) + Math.sqrt(theta * theta + 1));
+      const c = 1 / Math.sqrt(t * t + 1);
+      const s = t * c;
+      for (let k = 0; k < 3; k++) {
+        const akp = a[k][p], akq = a[k][q];
+        a[k][p] = c * akp - s * akq;
+        a[k][q] = s * akp + c * akq;
+      }
+      for (let k = 0; k < 3; k++) {
+        const apk = a[p][k], aqk = a[q][k];
+        a[p][k] = c * apk - s * aqk;
+        a[q][k] = s * apk + c * aqk;
+      }
+      for (let k = 0; k < 3; k++) {
+        const vkp = v[k][p], vkq = v[k][q];
+        v[k][p] = c * vkp - s * vkq;
+        v[k][q] = s * vkp + c * vkq;
+      }
+    }
+  }
+  return {
+    values: [a[0][0], a[1][1], a[2][2]],
+    vectors: [
+      new THREE.Vector3(v[0][0], v[1][0], v[2][0]),
+      new THREE.Vector3(v[0][1], v[1][1], v[2][1]),
+      new THREE.Vector3(v[0][2], v[1][2], v[2][2]),
+    ],
+  };
+}
+
+export function buildParamCurve(spec: ParamCurveSpec): ParamCurveResult {
+  // compile the three coordinate expressions; only "t" may appear
+  const fns: Array<(t: number) => number> = [];
+  for (const [label, src] of [['x(t)', spec.xt], ['y(t)', spec.yt], ['z(t)', spec.zt]] as const) {
+    const parsed = parseExpression(src);
+    if (!parsed.ok) return { ok: false, error: `${label}: ${parsed.error}` };
+    const other = parsed.expr.vars.filter((v) => v !== 't');
+    if (other.length) return { ok: false, error: `${label}: only "t" is allowed (found "${other[0]}").` };
+    const compiled = parsed.expr;
+    fns.push((t: number) => compiled.eval({ t }));
+  }
+  const [fx, fy, fz] = fns;
+
+  const { t0, t1, tube } = spec;
+  if (!isFinite(t0) || !isFinite(t1)) return { ok: false, error: 'Domain must be finite numbers.' };
+  if (!(t1 > t0)) return { ok: false, error: 'Domain end must be greater than start.' };
+  if (!(tube > 0.015)) return { ok: false, error: 'Tube radius must be at least 0.02.' };
+  const density = spec.density > 0 ? spec.density : 1;
+
+  // ---- sample the centerline ----
+  const N = CURVE_SAMPLES;
+  const pts: THREE.Vector3[] = new Array(N + 1);
+  for (let i = 0; i <= N; i++) {
+    const t = t0 + ((t1 - t0) * i) / N;
+    const x = fx(t), y = fy(t), z = fz(t);
+    if (!isFinite(x) || !isFinite(y) || !isFinite(z)) {
+      return { ok: false, error: `Curve is not finite near t=${t.toFixed(2)}.` };
+    }
+    pts[i] = new THREE.Vector3(x, y, z);
+  }
+
+  // arc length + center of mass (uniform tube → mass ∝ length)
+  let length = 0;
+  const com = new THREE.Vector3();
+  for (let i = 0; i < N; i++) {
+    const ds = pts[i + 1].distanceTo(pts[i]);
+    length += ds;
+    com.addScaledVector(new THREE.Vector3().addVectors(pts[i], pts[i + 1]).multiplyScalar(0.5), ds);
+  }
+  if (length < 1e-4) return { ok: false, error: 'Curve has ~zero length (is it a single point?).' };
+  com.divideScalar(length);
+  if (tube > length / 4) return { ok: false, error: 'Tube radius is too large for this curve length.' };
+
+  const volume = Math.PI * tube * tube * length; // thin-tube approximation (ignores coil self-overlap)
+  const mass = density * volume;
+
+  // ---- inertia tensor about the c.o.m. (segments as solid cylinders) ----
+  // I_seg = Itrans·δ + (Iax − Itrans)·u⊗u  +  dm·(|d|²δ − d⊗d)      [own term + parallel axis]
+  const I = [[0, 0, 0], [0, 0, 0], [0, 0, 0]];
+  const u = new THREE.Vector3(), d = new THREE.Vector3();
+  for (let i = 0; i < N; i++) {
+    const ds = pts[i + 1].distanceTo(pts[i]);
+    if (ds < 1e-12) continue;
+    const dm = (mass * ds) / length;
+    u.subVectors(pts[i + 1], pts[i]).divideScalar(ds);
+    d.addVectors(pts[i], pts[i + 1]).multiplyScalar(0.5).sub(com);
+    const iAx = 0.5 * dm * tube * tube;
+    const iTr = dm * (tube * tube / 4 + (ds * ds) / 12);
+    const d2 = d.lengthSq();
+    const uArr = [u.x, u.y, u.z], dArr = [d.x, d.y, d.z];
+    for (let r = 0; r < 3; r++) {
+      for (let c = 0; c < 3; c++) {
+        const delta = r === c ? 1 : 0;
+        I[r][c] += iTr * delta + (iAx - iTr) * uArr[r] * uArr[c] + dm * (d2 * delta - dArr[r] * dArr[c]);
+      }
+    }
+  }
+  const eig = eigenSymmetric3(I);
+  const principal = eig.values.map((v) => Math.max(v, 1e-9));
+  // build the principal frame; enforce a right-handed basis for a valid rotation quaternion
+  const [e0, e1] = eig.vectors;
+  const e2 = new THREE.Vector3().crossVectors(e0, e1); // = ±vectors[2]; the cross guarantees det=+1
+  const frame = new THREE.Quaternion().setFromRotationMatrix(new THREE.Matrix4().makeBasis(e0, e1, e2));
+
+  // ---- render geometry: a tube swept along the (c.o.m.-centered) curve ----
+  const closed = pts[0].distanceTo(pts[N]) < Math.max(1e-3, length * 1e-3);
+  class CenterlineCurve extends THREE.Curve<THREE.Vector3> {
+    constructor() { super(); }
+    getPoint(s: number, target = new THREE.Vector3()): THREE.Vector3 {
+      const t = t0 + (t1 - t0) * Math.min(Math.max(s, 0), 1);
+      return target.set(fx(t), fy(t), fz(t)).sub(com);
+    }
+  }
+  const tubularSegments = Math.min(360, Math.max(96, Math.round(length * 14)));
+  const geometry = new THREE.TubeGeometry(new CenterlineCurve(), tubularSegments, tube, 12, closed);
+
+  // ---- capsule chain for collision (chunked; caps overlap at joints for continuity) ----
+  const chunkCount = Math.min(48, Math.max(10, Math.round(length / (1.8 * tube))));
+  const capsules: BuiltParamCurve['capsules'] = [];
+  const yAxis = new THREE.Vector3(0, 1, 0);
+  for (let k = 0; k < chunkCount; k++) {
+    const a = pts[Math.round((N * k) / chunkCount)].clone().sub(com);
+    const b = pts[Math.round((N * (k + 1)) / chunkCount)].clone().sub(com);
+    const seg = new THREE.Vector3().subVectors(b, a);
+    const segLen = seg.length();
+    if (segLen < 1e-6) continue;
+    const q = new THREE.Quaternion().setFromUnitVectors(yAxis, seg.divideScalar(segLen));
+    const c = new THREE.Vector3().addVectors(a, b).multiplyScalar(0.5);
+    capsules.push({ center: [c.x, c.y, c.z], halfHeight: segLen / 2, quat: [q.x, q.y, q.z, q.w] });
+  }
+
+  let maxRadius = 0;
+  for (const p of pts) maxRadius = Math.max(maxRadius, p.distanceTo(com));
+  maxRadius += tube;
+
+  return {
+    ok: true,
+    shape: {
+      geometry, capsules, tube, length, volume, mass,
+      inertia: { x: principal[0], y: principal[1], z: principal[2] },
+      inertiaFrame: { x: frame.x, y: frame.y, z: frame.z, w: frame.w },
+      maxRadius, closed,
+    },
+  };
+}
+
+/** Presets for the parametric-curve creator. */
+export interface CurvePreset { name: string; xt: string; yt: string; zt: string; t0: number; t1: number; tube: number; }
+export const CURVE_PRESETS: CurvePreset[] = [
+  { name: 'Spring', xt: '1.1*cos(t)', yt: '0.18*t', zt: '1.1*sin(t)', t0: 0, t1: 25.13, tube: 0.16 },
+  { name: 'Knot', xt: '0.55*(sin(t)+2*sin(2*t))', yt: '0.55*(cos(t)-2*cos(2*t))', zt: '-0.55*sin(3*t)', t0: 0, t1: 6.283, tube: 0.22 },
+  { name: 'Ring', xt: '1.6*cos(t)', yt: '0', zt: '1.6*sin(t)', t0: 0, t1: 6.283, tube: 0.3 },
+  { name: 'Wave', xt: 't-3', yt: '0.6*sin(2*t)', zt: '0', t0: 0, t1: 6, tube: 0.2 },
+];

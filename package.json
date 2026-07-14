@@ -11,6 +11,9 @@
   },
   "dependencies": {
     "@dimforge/rapier3d-compat": "^0.19.3",
+    "@types/katex": "^0.16.8",
+    "katex": "^0.17.0",
+    "mathlive": "^0.110.0",
     "three": "^0.185.1"
   },
   "devDependencies": {

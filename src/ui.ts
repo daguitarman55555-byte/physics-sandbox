@@ -4,13 +4,55 @@
  * Pure DOM (no framework yet — kept lean for Phase 1; swap in React when panels grow). Everything
  * here only reads/commands the Sandbox; it never touches physics directly.
  */
-import type { Sandbox } from './sandbox';
-import { buildRevolution, REV_PRESETS } from './systems/shapes';
+import * as THREE from 'three';
+import katex from 'katex';
+import 'katex/dist/katex.min.css';
+import { MathfieldElement } from 'mathlive';
+import 'mathlive/fonts.css';
+import type { Entity, Sandbox } from './sandbox';
+import { buildRevolution, buildParamCurve, REV_PRESETS, CURVE_PRESETS } from './systems/shapes';
+import { exprToLatex } from './systems/expr';
+
+// fonts come from the CSS import above; no sounds, no popup keyboard — it's a typed input
+MathfieldElement.fontsDirectory = null;
+MathfieldElement.soundsDirectory = null;
 
 export function buildUI(sandbox: Sandbox) {
   buildPanel(sandbox);
   buildHud(sandbox);
   buildInspector(sandbox);
+  buildForcesView(sandbox);
+}
+
+/**
+ * A Desmos-style math input: you type INTO rendered math (MathLive) — `1/2` becomes a live
+ * fraction under the caret, `sin` becomes upright, `pi` becomes π, all in place. The engine still
+ * speaks calculator syntax, so `value()` converts the field's ascii-math back to it (the parser's
+ * implicit multiplication covers juxtaposition like `2pi` or `0.18t`).
+ */
+function mathField(initial: string) {
+  const mf = new MathfieldElement();
+  mf.mathVirtualKeyboardPolicy = 'manual';
+  const set = (engine: string) => mf.setValue(exprToLatex(engine) ?? engine, { silenceNotifications: true });
+  set(initial);
+  return {
+    el: mf,
+    set,
+    value: () => asciiToEngine(mf.getValue('ascii-math')),
+    latex: () => mf.getValue(),
+  };
+}
+type MathField = ReturnType<typeof mathField>;
+
+/** MathLive's ascii-math output → engine syntax (normalize its multiplication/minus variants).
+ * Spaces are stripped entirely: it lets fast-typed `s i n(x)` (chars not yet fused to \sin) become
+ * `sin(x)`, and juxtaposition like `0.18 t` still multiplies via the parser's implicit `*`. */
+function asciiToEngine(src: string): string {
+  return src
+    .replace(/\bxx\b/g, '*') // ascii-math spelling of \times
+    .replace(/[·×⋅]/g, '*')
+    .replace(/−/g, '-')
+    .replace(/\s+/g, '');
 }
 
 function el<K extends keyof HTMLElementTagNameMap>(tag: K, html = '', cls = ''): HTMLElementTagNameMap[K] {
@@ -18,6 +60,130 @@ function el<K extends keyof HTMLElementTagNameMap>(tag: K, html = '', cls = ''):
   if (html) n.innerHTML = html;
   if (cls) n.className = cls;
   return n;
+}
+
+// ============================================================ shape preview popup
+//
+// A small floating window with its own Three.js renderer that shows the shape currently being
+// designed (any custom-shape creator), slowly spinning, live-updating as the inputs change.
+// Draggable by its header; × hides it; the next edit in a creator brings it back.
+
+class ShapePreview {
+  private root: HTMLDivElement;
+  private caption: HTMLDivElement;
+  private canvas: HTMLCanvasElement;
+  private renderer: THREE.WebGLRenderer | null = null;
+  private scene = new THREE.Scene();
+  private camera = new THREE.PerspectiveCamera(40, 256 / 200, 0.1, 200);
+  private spin = new THREE.Group(); // holds the current mesh; rotation persists across updates
+  private mesh: THREE.Mesh | null = null;
+  private pending: { geometry: THREE.BufferGeometry; caption: string } | null = null;
+  private raf = 0;
+
+  constructor() {
+    this.root = el('div', '', 'hidden');
+    this.root.id = 'shape-preview';
+    const header = el('header', '<span>Shape preview</span>');
+    const close = el('button', '×');
+    close.onclick = () => this.hide();
+    header.append(close);
+    this.canvas = document.createElement('canvas');
+    this.caption = el('div', '', 'cap');
+    this.root.append(header, this.canvas, this.caption);
+    document.body.append(this.root);
+
+    // drag by the header (skip drags that start on the close button)
+    header.addEventListener('pointerdown', (e) => {
+      if (e.target === close) return;
+      const rect = this.root.getBoundingClientRect();
+      const dx = e.clientX - rect.left, dy = e.clientY - rect.top;
+      this.root.style.right = 'auto'; // switch from right-anchored to free-floating
+      const move = (ev: PointerEvent) => {
+        this.root.style.left = `${ev.clientX - dx}px`;
+        this.root.style.top = `${ev.clientY - dy}px`;
+      };
+      const up = () => { removeEventListener('pointermove', move); removeEventListener('pointerup', up); };
+      addEventListener('pointermove', move);
+      addEventListener('pointerup', up);
+      e.preventDefault();
+    });
+
+    this.scene.add(new THREE.HemisphereLight('#aab6cc', '#20242e', 0.9));
+    const sun = new THREE.DirectionalLight('#ffffff', 1.9);
+    sun.position.set(4, 6, 5);
+    this.scene.add(sun);
+    this.scene.add(this.spin);
+  }
+
+  /** Swap in a new geometry (called on every valid rebuild). Does not open the popup. */
+  update(geometry: THREE.BufferGeometry, caption: string) {
+    if (this.isOpen()) {
+      this.apply(geometry, caption);
+    } else {
+      this.pending?.geometry.dispose(); // replaced before ever shown
+      this.pending = { geometry, caption };
+    }
+  }
+
+  /** Open the popup (creates the GL context on first use) and show the latest shape. */
+  show() {
+    this.root.classList.remove('hidden');
+    if (!this.renderer) {
+      this.renderer = new THREE.WebGLRenderer({ canvas: this.canvas, antialias: true, alpha: true });
+      this.renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+      this.renderer.setSize(256, 200);
+    }
+    if (this.pending) {
+      this.apply(this.pending.geometry, this.pending.caption);
+      this.pending = null;
+    }
+    if (!this.raf) {
+      const loop = () => {
+        this.raf = requestAnimationFrame(loop);
+        this.spin.rotation.y += 0.01;
+        this.renderer!.render(this.scene, this.camera);
+      };
+      loop();
+    }
+  }
+
+  hide() {
+    this.root.classList.add('hidden');
+    cancelAnimationFrame(this.raf);
+    this.raf = 0;
+  }
+
+  private isOpen(): boolean {
+    return !this.root.classList.contains('hidden');
+  }
+
+  private apply(geometry: THREE.BufferGeometry, caption: string) {
+    if (this.mesh) {
+      this.spin.remove(this.mesh);
+      this.mesh.geometry.dispose();
+    } else {
+      this.mesh = new THREE.Mesh(
+        geometry,
+        new THREE.MeshStandardMaterial({ color: '#5b8def', metalness: 0.1, roughness: 0.55 }),
+      );
+    }
+    this.mesh.geometry = geometry;
+    this.spin.add(this.mesh);
+    geometry.computeBoundingSphere();
+    const r = geometry.boundingSphere?.radius ?? 2;
+    this.camera.position.set(0, r * 0.7, r * 2.6);
+    this.camera.lookAt(0, 0, 0);
+    try {
+      katex.render(caption, this.caption, { displayMode: false, throwOnError: false, strict: false });
+    } catch {
+      this.caption.textContent = caption;
+    }
+  }
+}
+
+let shapePreview: ShapePreview | null = null;
+function getShapePreview(): ShapePreview {
+  return (shapePreview ??= new ShapePreview());
 }
 
 function buildPanel(sandbox: Sandbox) {
@@ -39,8 +205,9 @@ function buildPanel(sandbox: Sandbox) {
   spawn2.append(b100);
   panel.append(spawn2);
 
-  // Phase 2 — f(x) solid of revolution
+  // Phase 2 — f(x) solid of revolution + parametric curves
   buildShapeCreator(panel, sandbox);
+  buildCurveCreator(panel, sandbox);
 
   // gravity slider
   const field = el('div', '', 'field');
@@ -69,30 +236,29 @@ function buildPanel(sandbox: Sandbox) {
   presets.append(gEarth, gMoon, gZero);
   panel.append(presets);
 
-  // reset
+  // reset / delete all
   const resetRow = el('div', '', 'row');
   const bReset = el('button', 'Reset scene');
   bReset.onclick = () => sandbox.reset();
   resetRow.append(bReset);
   panel.append(resetRow);
+
+  const delRow = el('div', '', 'row');
+  const bDelAll = el('button', 'Delete all', 'danger');
+  bDelAll.onclick = () => sandbox.clear();
+  delRow.append(bDelAll);
+  panel.append(delRow);
 }
 
 function buildShapeCreator(panel: HTMLElement, sandbox: Sandbox) {
   panel.append(el('h3', 'Create shape · f(x) revolution'));
 
-  // profile expression: radius as a function of x (the axis), revolved into a solid
+  // profile expression: radius as a function of x (the axis), revolved into a solid.
+  // A MathLive field — math renders in place as you type, Desmos-style.
   const exprField = el('div', '', 'field');
   const exprLabel = el('label', 'radius <b>r(x)</b>');
-  const exprInput = el('input') as HTMLInputElement;
-  exprInput.type = 'text';
-  exprInput.className = 'expr';
-  exprInput.spellcheck = false;
-  // stop the browser from autofilling LaTeX/history into the math field
-  exprInput.autocomplete = 'off';
-  exprInput.setAttribute('autocapitalize', 'off');
-  exprInput.setAttribute('autocorrect', 'off');
-  exprInput.value = REV_PRESETS[0].expr;
-  exprField.append(exprLabel, exprInput);
+  const rev = mathField(REV_PRESETS[0].expr);
+  exprField.append(exprLabel, rev.el);
   panel.append(exprField);
 
   // domain [a, b] + density
@@ -108,7 +274,7 @@ function buildShapeCreator(panel: HTMLElement, sandbox: Sandbox) {
   const presets = el('div', '', 'row wrap');
   for (const p of REV_PRESETS) {
     const b = el('button', p.name, 'mini');
-    b.onclick = () => { exprInput.value = p.expr; aInput.value = String(p.a); bInput.value = String(p.b); refresh(); };
+    b.onclick = () => { rev.set(p.expr); aInput.value = String(p.a); bInput.value = String(p.b); refresh(true); };
     presets.append(b);
   }
   panel.append(presets);
@@ -123,28 +289,117 @@ function buildShapeCreator(panel: HTMLElement, sandbox: Sandbox) {
   panel.append(createRow);
 
   const readSpec = () => ({
-    expr: exprInput.value, a: parseFloat(aInput.value), b: parseFloat(bInput.value),
+    expr: rev.value(), a: parseFloat(aInput.value), b: parseFloat(bInput.value),
     density: parseFloat(dInput.value),
   });
 
-  const refresh = () => {
+  const refresh = (fromUser = false) => {
     const built = buildRevolution(readSpec());
     if (built.ok) {
       const s = built.shape;
       preview.className = 'preview';
       preview.innerHTML = `V ≈ <b>${s.volume.toFixed(2)}</b> m³ · m ≈ <b>${s.mass.toFixed(2)}</b> kg`;
       bCreate.disabled = false;
+      getShapePreview().update(s.geometry, `r(x) = ${rev.latex()}`);
+      if (fromUser) getShapePreview().show(); // popup opens while designing, not on page load
     } else {
       preview.className = 'preview err';
       preview.textContent = built.error;
       bCreate.disabled = true;
     }
   };
-  exprInput.oninput = refresh;
-  for (const i of [aInput, bInput, dInput]) i.oninput = refresh;
+  rev.el.addEventListener('input', () => refresh(true));
+  for (const i of [aInput, bInput, dInput]) i.oninput = () => refresh(true);
 
   bCreate.onclick = () => {
     const res = sandbox.createRevolution(readSpec());
+    if (!res.ok) { preview.className = 'preview err'; preview.textContent = res.error; }
+  };
+
+  refresh();
+}
+
+function buildCurveCreator(panel: HTMLElement, sandbox: Sandbox) {
+  panel.append(el('h3', 'Create shape · parametric curve'));
+
+  // x(t), y(t), z(t) — a tube swept along the curve (springs, knots, rings).
+  // MathLive fields: math renders in place as you type, Desmos-style.
+  const fields: Record<'xt' | 'yt' | 'zt', MathField> = {} as never;
+  for (const [key, label] of [['xt', 'x(t)'], ['yt', 'y(t)'], ['zt', 'z(t)']] as const) {
+    const field = el('div', '', 'field');
+    const lab = el('label', `<b>${label}</b>`);
+    const mf = mathField('0');
+    field.append(lab, mf.el);
+    panel.append(field);
+    fields[key] = mf;
+  }
+
+  const nums = el('div', '', 'row nums');
+  const t0Input = numInput(CURVE_PRESETS[0].t0, 'from t');
+  const t1Input = numInput(CURVE_PRESETS[0].t1, 'to t');
+  const tubeInput = numInput(CURVE_PRESETS[0].tube, 'tube radius');
+  tubeInput.min = '0.02';
+  const dInput = numInput(1, 'density');
+  dInput.min = '0.01';
+  nums.append(labeled('from', t0Input), labeled('to', t1Input), labeled('tube', tubeInput), labeled('density', dInput));
+  panel.append(nums);
+
+  const applyPreset = (p: (typeof CURVE_PRESETS)[number]) => {
+    fields.xt.set(p.xt);
+    fields.yt.set(p.yt);
+    fields.zt.set(p.zt);
+    t0Input.value = String(p.t0);
+    t1Input.value = String(p.t1);
+    tubeInput.value = String(p.tube);
+  };
+  applyPreset(CURVE_PRESETS[0]);
+
+  const presets = el('div', '', 'row wrap');
+  for (const p of CURVE_PRESETS) {
+    const b = el('button', p.name, 'mini');
+    b.onclick = () => { applyPreset(p); refresh(true); };
+    presets.append(b);
+  }
+  panel.append(presets);
+
+  const preview = el('div', '', 'preview');
+  panel.append(preview);
+
+  const createRow = el('div', '', 'row');
+  const bCreate = el('button', 'Create & drop', 'primary');
+  createRow.append(bCreate);
+  panel.append(createRow);
+
+  const readSpec = () => ({
+    xt: fields.xt.value(), yt: fields.yt.value(), zt: fields.zt.value(),
+    t0: parseFloat(t0Input.value), t1: parseFloat(t1Input.value),
+    tube: parseFloat(tubeInput.value), density: parseFloat(dInput.value),
+  });
+
+  const refresh = (fromUser = false) => {
+    const built = buildParamCurve(readSpec());
+    if (built.ok) {
+      const s = built.shape;
+      preview.className = 'preview';
+      preview.innerHTML =
+        `V ≈ <b>${s.volume.toFixed(2)}</b> m³ · m ≈ <b>${s.mass.toFixed(2)}</b> kg · L ≈ <b>${s.length.toFixed(1)}</b> m`;
+      bCreate.disabled = false;
+      getShapePreview().update(
+        s.geometry,
+        `\\left(${fields.xt.latex()},\\; ${fields.yt.latex()},\\; ${fields.zt.latex()}\\right)`,
+      );
+      if (fromUser) getShapePreview().show();
+    } else {
+      preview.className = 'preview err';
+      preview.textContent = built.error;
+      bCreate.disabled = true;
+    }
+  };
+  for (const f of [fields.xt, fields.yt, fields.zt]) f.el.addEventListener('input', () => refresh(true));
+  for (const i of [t0Input, t1Input, tubeInput, dInput]) i.oninput = () => refresh(true);
+
+  bCreate.onclick = () => {
+    const res = sandbox.createParamCurve(readSpec());
     if (!res.ok) { preview.className = 'preview err'; preview.textContent = res.error; }
   };
 
@@ -181,6 +436,16 @@ function buildHud(sandbox: Sandbox) {
 
 function buildInspector(sandbox: Sandbox) {
   const box = document.getElementById('inspector')!;
+  // static skeleton: live-rewritten content + a persistent action row (so the button keeps its handler)
+  const content = el('div');
+  const actions = el('div', '', 'row');
+  const bDelete = el('button', 'Delete object', 'danger');
+  bDelete.onclick = () => {
+    if (sandbox.selected) sandbox.deleteEntity(sandbox.selected);
+  };
+  actions.append(bDelete);
+  box.append(content, actions);
+
   const render = () => {
     const e = sandbox.selected;
     if (!e) { box.classList.add('hidden'); return; }
@@ -195,9 +460,10 @@ function buildInspector(sandbox: Sandbox) {
     const sizeOrShape = e.kind === 'custom'
       ? prop('volume', `${(e.volume ?? 0).toFixed(2)} m³`)
       : prop('size', `${(e.size * 2).toFixed(2)} m`);
-    box.innerHTML =
+    content.innerHTML =
       `<h3><span>Inspector</span><span class="swatch" style="background:#${e.color.getHexString()}"></span></h3>` +
       prop('id', `#${e.id} · ${e.kind}`) +
+      (e.label ? prop('shape', e.label) : '') +
       prop('position', `${t.x.toFixed(1)}, ${t.y.toFixed(1)}, ${t.z.toFixed(1)}`) +
       prop('speed', `${speed.toFixed(2)} m/s`) +
       prop('angular vel', `${spin.toFixed(2)} rad/s`) +
@@ -207,6 +473,142 @@ function buildInspector(sandbox: Sandbox) {
       prop('state', e.body.isSleeping() ? 'asleep' : 'awake');
   };
   setInterval(render, 100);
+}
+
+/**
+ * Free-body diagram view, docked directly above the inspector. Shows the selected object ISOLATED
+ * in its own mini 3D scene — always centered, mirroring the body's live orientation — with the
+ * forces acting on it drawn as arrows from its center: weight (red), measured net ΣF = m·a (blue),
+ * contact/friction/drag = net − weight (green), and velocity (yellow) for context. Arrow lengths
+ * scale with magnitude relative to the strongest current force.
+ */
+function buildForcesView(sandbox: Sandbox) {
+  // dock: a fixed bottom-left column — forces view on top, inspector (moved in) below
+  const inspector = document.getElementById('inspector')!;
+  const dock = el('div');
+  dock.id = 'dock';
+  const win = el('div', '', 'hidden');
+  win.id = 'forces';
+  const head = el('div', 'forces', 'fhead');
+  const canvas = document.createElement('canvas');
+  const legend = el('div', '', 'flegend');
+  win.append(head, canvas, legend);
+  dock.append(win, inspector);
+  document.body.append(dock);
+
+  // --- mini scene ---
+  const VW = 214, VH = 170;
+  let renderer: THREE.WebGLRenderer | null = null;
+  const scene = new THREE.Scene();
+  const camera = new THREE.PerspectiveCamera(40, VW / VH, 0.1, 500);
+  scene.add(new THREE.HemisphereLight('#aab6cc', '#20242e', 0.9));
+  const sun = new THREE.DirectionalLight('#ffffff', 1.9);
+  sun.position.set(4, 6, 5);
+  scene.add(sun);
+
+  const ARROW_DEFS = [
+    { key: 'weight', color: 0xdc4a4a, label: 'weight m·g' },
+    { key: 'net', color: 0x5b8def, label: 'net ΣF = m·a' },
+    { key: 'contact', color: 0x4fb89a, label: 'contact/drag' },
+    { key: 'velocity', color: 0xc9bb3a, label: 'velocity' },
+  ] as const;
+  const arrows: Record<string, THREE.ArrowHelper> = {};
+  for (const d of ARROW_DEFS) {
+    const a = new THREE.ArrowHelper(new THREE.Vector3(0, 1, 0), new THREE.Vector3(), 1, d.color);
+    a.visible = false;
+    scene.add(a);
+    arrows[d.key] = a;
+  }
+
+  let mesh: THREE.Mesh | null = null;
+  let meshFor = -1; // entity id the display mesh was built for
+  let ownGeometry = false; // custom shapes share the world mesh's geometry — never dispose those
+
+  const rebuildMesh = (e: Entity) => {
+    if (mesh) {
+      scene.remove(mesh);
+      if (ownGeometry) mesh.geometry.dispose();
+      (mesh.material as THREE.Material).dispose();
+    }
+    let geo: THREE.BufferGeometry;
+    if (e.kind === 'custom') { geo = e.mesh!.geometry; ownGeometry = false; }
+    else if (e.kind === 'box') { geo = new THREE.BoxGeometry(e.size * 2, e.size * 2, e.size * 2); ownGeometry = true; }
+    else { geo = new THREE.SphereGeometry(e.size, 24, 16); ownGeometry = true; }
+    mesh = new THREE.Mesh(geo, new THREE.MeshStandardMaterial({ color: e.color, metalness: 0.1, roughness: 0.6 }));
+    scene.add(mesh);
+    meshFor = e.id;
+    // frame the object + room for arrows sticking out ~2.2× its radius
+    const d = Math.max(e.size, 0.2) * 4.6;
+    camera.position.set(0.55, 0.42, 0.9).normalize().multiplyScalar(d);
+    camera.lookAt(0, 0, 0);
+  };
+
+  const dir = new THREE.Vector3();
+  const setArrow = (a: THREE.ArrowHelper, x: number, y: number, z: number, mag: number, maxMag: number, R: number) => {
+    if (mag < 1e-3 || maxMag < 1e-3) { a.visible = false; return; }
+    a.visible = true;
+    a.setDirection(dir.set(x / mag, y / mag, z / mag));
+    const len = R * (0.8 + 1.4 * Math.min(mag / maxMag, 1));
+    a.setLength(len, len * 0.22, len * 0.12);
+  };
+
+  const countContacts = (e: Entity): number => {
+    let n = 0;
+    for (let i = 0; i < e.body.numColliders(); i++) {
+      sandbox.world.contactPairsWith(e.body.collider(i), () => n++);
+    }
+    return n;
+  };
+
+  let lastText = 0;
+  const frame = () => {
+    requestAnimationFrame(frame);
+    const e = sandbox.selected;
+    if (!e) { win.classList.add('hidden'); meshFor = -1; return; }
+    win.classList.remove('hidden');
+    if (!renderer) {
+      renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true });
+      renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+      renderer.setSize(VW, VH);
+    }
+    if (meshFor !== e.id) rebuildMesh(e);
+    mesh!.quaternion.copy(e.currQuat); // live orientation — the object exactly as it sits in the world
+
+    const m = e.body.mass();
+    const g = sandbox.gravityY;
+    const Wv = { x: 0, y: m * g, z: 0 };
+    const F = { x: m * e.accel.x, y: m * e.accel.y, z: m * e.accel.z };
+    const C = { x: F.x - Wv.x, y: F.y - Wv.y, z: F.z - Wv.z }; // net − weight = contact + friction + drag
+    const v = e.body.linvel();
+    const wMag = Math.abs(Wv.y);
+    const fMag = Math.hypot(F.x, F.y, F.z);
+    const cMag = Math.hypot(C.x, C.y, C.z);
+    const speed = Math.hypot(v.x, v.y, v.z);
+    const maxF = Math.max(wMag, fMag, cMag);
+    const R = Math.max(e.size, 0.2);
+
+    setArrow(arrows.weight, Wv.x, Wv.y, Wv.z, wMag, maxF, R);
+    setArrow(arrows.net, F.x, F.y, F.z, fMag, maxF, R);
+    setArrow(arrows.contact, C.x, C.y, C.z, cMag, maxF, R);
+    setArrow(arrows.velocity, v.x, v.y, v.z, speed, Math.max(speed, 8), R); // own scale — different unit
+
+    renderer.render(scene, camera);
+
+    const now = performance.now();
+    if (now - lastText < 100) return;
+    lastText = now;
+    head.textContent = `forces · #${e.id} ${e.kind}`;
+    const vals = [`${wMag.toFixed(1)} N`, `${fMag.toFixed(1)} N`, `${cMag.toFixed(1)} N`, `${speed.toFixed(2)} m/s`];
+    legend.innerHTML =
+      ARROW_DEFS.map((d, i) => fleg(d.color, d.label, vals[i])).join('') +
+      `<div class="frow"><span>contacts</span><b>${countContacts(e)}${e.body.isSleeping() ? ' · asleep' : ''}</b></div>`;
+  };
+  frame();
+}
+
+function fleg(color: number, label: string, value: string): string {
+  const hex = `#${color.toString(16).padStart(6, '0')}`;
+  return `<div class="frow"><span><i class="dot" style="background:${hex}"></i>${label}</span><b>${value}</b></div>`;
 }
 
 function prop(k: string, v: string): string {
