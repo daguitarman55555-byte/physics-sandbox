@@ -31,6 +31,8 @@ export interface Entity {
   currQuat: THREE.Quaternion;
   lastVel: THREE.Vector3; // velocity after the previous physics step (for acceleration readout)
   accel: THREE.Vector3; // measured acceleration over the last step — drives the forces window
+  bbCenter: THREE.Vector3; // local-space bounding box (center/half-extents) — for the floor clamp
+  bbHalf: THREE.Vector3;
   mesh?: THREE.Mesh; // present for kind === 'custom' (unique geometry → its own draw call)
   volume?: number; // m³, for custom shapes (shown in the inspector)
   label?: string; // e.g. "revolution: 1.1 + 0.55*sin(x*0.9)"
@@ -227,6 +229,7 @@ export class Sandbox {
       prevPos: new THREE.Vector3(p.x, p.y, p.z), prevQuat: new THREE.Quaternion(),
       currPos: new THREE.Vector3(p.x, p.y, p.z), currQuat: new THREE.Quaternion(),
       lastVel: new THREE.Vector3(), accel: new THREE.Vector3(),
+      bbCenter: new THREE.Vector3(), bbHalf: new THREE.Vector3(s, s, s),
     };
     this.entities.push(e);
     return e;
@@ -319,11 +322,14 @@ export class Sandbox {
     this.scene.add(mesh);
     this.customMeshes.push(mesh);
 
+    geometry.computeBoundingBox();
+    const bb = geometry.boundingBox!;
     const e: Entity = {
       id: this.nextId++, kind: 'custom', body, size: boundingRadius, color,
       prevPos: p.clone(), prevQuat: new THREE.Quaternion(),
       currPos: p.clone(), currQuat: new THREE.Quaternion(),
       lastVel: new THREE.Vector3(), accel: new THREE.Vector3(),
+      bbCenter: bb.getCenter(new THREE.Vector3()), bbHalf: bb.getSize(new THREE.Vector3()).multiplyScalar(0.5),
       mesh, volume, label,
     };
     mesh.userData.entity = e;
@@ -416,8 +422,17 @@ export class Sandbox {
     // walk the kinematic anchor toward the cursor target (clamped step — no teleporting the joint);
     // the spherical joint transmits the pull while gravity and inertia keep acting on the body
     if (this.grab) {
+      // the anchor never leaves the floor area, and its height is clamped so the OBJECT can't be
+      // pushed under the map: the object hangs some distance below the grab anchor (a ball grabbed
+      // by its front hangs half a diameter below; a dangling rod hangs its whole length), so the
+      // anchor's floor is that distance — recomputed live as the body swings and tilts
       const k = this.grab.kin.translation();
-      const want = this._p.set(this.grab.target.x, this.grab.target.y, this.grab.target.z)
+      const hangBelow = Math.max(0, k.y - this.bodyBottomY(this.grab.entity));
+      const tgt = this.grab.target;
+      tgt.x = THREE.MathUtils.clamp(tgt.x, -245, 245);
+      tgt.y = Math.max(tgt.y, hangBelow + 0.02);
+      tgt.z = THREE.MathUtils.clamp(tgt.z, -245, 245);
+      const want = this._p.set(tgt.x, tgt.y, tgt.z)
         .sub(this._s.set(k.x, k.y, k.z));
       const maxStep = 40 * FIXED; // ≤ 40 m/s anchor speed
       if (want.length() > maxStep) want.setLength(maxStep);
@@ -594,6 +609,23 @@ export class Sandbox {
       this.selected = null; // clicked empty space → OrbitControls will orbit
     }
   };
+
+  /**
+   * World-space Y of the body's lowest point (exact for spheres; oriented-bounding-box support
+   * point for everything else). Drives the drag clamp that keeps held objects above the floor.
+   */
+  private bodyBottomY(e: Entity): number {
+    const t = e.body.translation();
+    if (e.kind === 'sphere') return t.y - e.size;
+    const q = e.body.rotation();
+    // y-components of the world-rotated local basis vectors (middle row of the rotation matrix)
+    const yx = 2 * (q.x * q.y + q.w * q.z);
+    const yy = 1 - 2 * (q.x * q.x + q.z * q.z);
+    const yz = 2 * (q.y * q.z - q.w * q.x);
+    const c = e.bbCenter, h = e.bbHalf;
+    const centerY = t.y + c.x * yx + c.y * yy + c.z * yz;
+    return centerY - (h.x * Math.abs(yx) + h.y * Math.abs(yy) + h.z * Math.abs(yz));
+  }
 
   /** Undo everything a grab set up: joint, kinematic anchor, damping, camera control. */
   private releaseGrab() {

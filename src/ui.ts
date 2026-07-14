@@ -635,9 +635,16 @@ function buildForcesView(sandbox: Sandbox) {
   };
 
   const countContacts = (e: Entity): number => {
+    // contactPairsWith yields broad-phase pairs (AABBs overlap), which counts near-misses — an
+    // airborne body could show dozens. Only count pairs whose manifold has real contact points.
     let n = 0;
     for (let i = 0; i < e.body.numColliders(); i++) {
-      sandbox.world.contactPairsWith(e.body.collider(i), () => n++);
+      const c = e.body.collider(i);
+      sandbox.world.contactPairsWith(c, (other) => {
+        let touching = false;
+        sandbox.world.contactPair(c, other, (manifold) => { if (manifold.numContacts() > 0) touching = true; });
+        if (touching) n++;
+      });
     }
     return n;
   };
