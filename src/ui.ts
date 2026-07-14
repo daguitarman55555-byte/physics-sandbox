@@ -10,7 +10,7 @@ import 'katex/dist/katex.min.css';
 import { MathfieldElement } from 'mathlive';
 import 'mathlive/fonts.css';
 import type { Entity, Sandbox } from './sandbox';
-import { buildRevolution, buildParamCurve, REV_PRESETS, CURVE_PRESETS } from './systems/shapes';
+import { buildRevolution, buildParamCurve, buildParamSurface, REV_PRESETS, CURVE_PRESETS, SURFACE_PRESETS } from './systems/shapes';
 import { exprToLatex } from './systems/expr';
 
 // fonts come from the CSS import above; no sounds, no popup keyboard — it's a typed input
@@ -222,7 +222,8 @@ class ShapePreview {
     } else {
       this.mesh = new THREE.Mesh(
         geometry,
-        new THREE.MeshStandardMaterial({ color: '#5b8def', metalness: 0.1, roughness: 0.55 }),
+        // DoubleSide: open surfaces (Möbius, sheets) are visible from both sides
+        new THREE.MeshStandardMaterial({ color: '#5b8def', metalness: 0.1, roughness: 0.55, side: THREE.DoubleSide }),
       );
     }
     this.mesh.geometry = geometry;
@@ -267,9 +268,10 @@ function buildPanel(sandbox: Sandbox) {
   spawn2.append(b100);
   panel.append(spawn2);
 
-  // Phase 2 — f(x) solid of revolution + parametric curves
+  // Phase 2 — f(x) solid of revolution + parametric curves + parametric surfaces
   buildShapeCreator(panel, sandbox);
   buildCurveCreator(panel, sandbox);
+  buildSurfaceCreator(panel, sandbox);
 
   // gravity slider
   const field = el('div', '', 'field');
@@ -468,6 +470,123 @@ function buildCurveCreator(panel: HTMLElement, sandbox: Sandbox) {
   refresh();
 }
 
+function buildSurfaceCreator(panel: HTMLElement, sandbox: Sandbox) {
+  panel.append(el('h3', 'Create shape · parametric surface'));
+
+  // x(u,v), y(u,v), z(u,v) — a sheet in space, dropped in as a thin shell (any surface) or a
+  // filled solid (closed surfaces only — auto-detected). MathLive fields, Desmos-style.
+  const fields: Record<'xuv' | 'yuv' | 'zuv', MathField> = {} as never;
+  for (const [key, label] of [['xuv', 'x(u,v)'], ['yuv', 'y(u,v)'], ['zuv', 'z(u,v)']] as const) {
+    const field = el('div', '', 'field');
+    const lab = el('label', `<b>${label}</b>`);
+    const mf = mathField('0');
+    field.append(lab, mf.el);
+    panel.append(field);
+    fields[key] = mf;
+  }
+
+  const domains = el('div', '', 'row nums');
+  const u0Input = numInput(0, 'u domain start');
+  const u1Input = numInput(6.2832, 'u domain end');
+  const v0Input = numInput(0, 'v domain start');
+  const v1Input = numInput(6.2832, 'v domain end');
+  domains.append(labeled('u from', u0Input), labeled('u to', u1Input), labeled('v from', v0Input), labeled('v to', v1Input));
+  panel.append(domains);
+
+  const nums = el('div', '', 'row nums');
+  const thickInput = numInput(0.1, 'shell wall thickness');
+  thickInput.min = '0.01';
+  const dInput = numInput(1, 'density');
+  dInput.min = '0.01';
+  nums.append(labeled('wall', thickInput), labeled('density', dInput));
+  panel.append(nums);
+
+  // shell/solid segmented toggle — hollow vs filled is real physics (2/3·mR² vs 2/5·mR²),
+  // so it's a user decision, not an implementation detail
+  let mode: 'shell' | 'solid' = 'solid';
+  const modeRow = el('div', '', 'row');
+  const bShell = el('button', 'Shell (hollow)', 'mini');
+  bShell.title = 'A thin wall — works for any surface, open or closed';
+  const bSolid = el('button', 'Solid (filled)', 'mini');
+  bSolid.title = 'Filled to the brim — needs a closed surface';
+  const setMode = (m: 'shell' | 'solid') => {
+    mode = m;
+    bShell.classList.toggle('primary', m === 'shell');
+    bSolid.classList.toggle('primary', m === 'solid');
+    thickInput.disabled = m === 'solid'; // wall thickness only means something for a shell
+  };
+  bShell.onclick = () => { setMode('shell'); refresh(true); };
+  bSolid.onclick = () => { setMode('solid'); refresh(true); };
+  modeRow.append(bShell, bSolid);
+  panel.append(modeRow);
+
+  const applyPreset = (p: (typeof SURFACE_PRESETS)[number]) => {
+    fields.xuv.set(p.xuv);
+    fields.yuv.set(p.yuv);
+    fields.zuv.set(p.zuv);
+    u0Input.value = String(p.u0);
+    u1Input.value = String(p.u1);
+    v0Input.value = String(p.v0);
+    v1Input.value = String(p.v1);
+    thickInput.value = String(p.thickness);
+    setMode(p.mode);
+  };
+  applyPreset(SURFACE_PRESETS[0]);
+
+  const presets = el('div', '', 'row wrap');
+  for (const p of SURFACE_PRESETS) {
+    const b = el('button', p.name, 'mini');
+    b.onclick = () => { applyPreset(p); refresh(true); };
+    presets.append(b);
+  }
+  panel.append(presets);
+
+  const preview = el('div', '', 'preview');
+  panel.append(preview);
+
+  const createRow = el('div', '', 'row');
+  const bCreate = el('button', 'Create & drop', 'primary');
+  createRow.append(bCreate);
+  panel.append(createRow);
+
+  const readSpec = () => ({
+    xuv: fields.xuv.value(), yuv: fields.yuv.value(), zuv: fields.zuv.value(),
+    u0: parseFloat(u0Input.value), u1: parseFloat(u1Input.value),
+    v0: parseFloat(v0Input.value), v1: parseFloat(v1Input.value),
+    mode, thickness: parseFloat(thickInput.value), density: parseFloat(dInput.value),
+  });
+
+  const refresh = (fromUser = false) => {
+    const built = buildParamSurface(readSpec());
+    if (built.ok) {
+      const s = built.shape;
+      preview.className = 'preview';
+      preview.innerHTML =
+        `A ≈ <b>${s.area.toFixed(2)}</b> m² · V ≈ <b>${s.volume.toFixed(2)}</b> m³ · ` +
+        `m ≈ <b>${s.mass.toFixed(2)}</b> kg · ${s.closed ? 'closed' : 'open'}`;
+      bCreate.disabled = false;
+      getShapePreview().update(
+        s.geometry,
+        `\\left(${fields.xuv.latex()},\\; ${fields.yuv.latex()},\\; ${fields.zuv.latex()}\\right)`,
+      );
+      if (fromUser) getShapePreview().show();
+    } else {
+      preview.className = 'preview err';
+      preview.textContent = built.error;
+      bCreate.disabled = true;
+    }
+  };
+  for (const f of [fields.xuv, fields.yuv, fields.zuv]) f.el.addEventListener('input', () => refresh(true));
+  for (const i of [u0Input, u1Input, v0Input, v1Input, thickInput, dInput]) i.oninput = () => refresh(true);
+
+  bCreate.onclick = () => {
+    const res = sandbox.createParamSurface(readSpec());
+    if (!res.ok) { preview.className = 'preview err'; preview.textContent = res.error; }
+  };
+
+  refresh();
+}
+
 function numInput(value: number, title: string): HTMLInputElement {
   const i = document.createElement('input');
   i.type = 'number';
@@ -614,7 +733,10 @@ function buildForcesView(sandbox: Sandbox) {
     if (e.kind === 'custom') { geo = e.mesh!.geometry; ownGeometry = false; }
     else if (e.kind === 'box') { geo = new THREE.BoxGeometry(e.size * 2, e.size * 2, e.size * 2); ownGeometry = true; }
     else { geo = new THREE.SphereGeometry(e.size, 24, 16); ownGeometry = true; }
-    mesh = new THREE.Mesh(geo, new THREE.MeshStandardMaterial({ color: e.color, metalness: 0.1, roughness: 0.6 }));
+    mesh = new THREE.Mesh(geo, new THREE.MeshStandardMaterial({
+      color: e.color, metalness: 0.1, roughness: 0.6,
+      side: e.kind === 'custom' ? THREE.DoubleSide : THREE.FrontSide, // open surfaces have two faces
+    }));
     geo.computeBoundingSphere();
     const bs = geo.boundingSphere!;
     mesh.position.copy(bs.center).multiplyScalar(-1); // visual middle at the origin

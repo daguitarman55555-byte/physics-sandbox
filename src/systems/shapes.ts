@@ -34,7 +34,7 @@ export type ShapeSpec =
   | { type: 'sphere'; radius: number }
   | { type: 'revolution'; fx: string; a: number; b: number }
   | { type: 'paramCurve'; xt: string; yt: string; zt: string; t0: number; t1: number; tube: number }
-  | { type: 'paramSurface'; xuv: string; yuv: string; zuv: string }
+  | { type: 'paramSurface'; xuv: string; yuv: string; zuv: string; u0: number; u1: number; v0: number; v1: number; mode: 'shell' | 'solid'; thickness: number }
   | { type: 'implicit'; fxyz: string; iso: number }
   | { type: 'import'; url: string };
 
@@ -366,4 +366,238 @@ export const CURVE_PRESETS: CurvePreset[] = [
   { name: 'Knot', xt: '0.55*(sin(t)+2*sin(2*t))', yt: '0.55*(cos(t)-2*cos(2*t))', zt: '-0.55*sin(3*t)', t0: 0, t1: 6.283, tube: 0.22 },
   { name: 'Ring', xt: '1.6*cos(t)', yt: '0', zt: '1.6*sin(t)', t0: 0, t1: 6.283, tube: 0.3 },
   { name: 'Wave', xt: 't-3', yt: '0.6*sin(2*t)', zt: '0', t0: 0, t1: 6, tube: 0.2 },
+];
+
+// ============================================================ parametric surfaces
+//
+// x(u,v), y(u,v), z(u,v) over [u0,u1]×[v0,v1] — torus, Möbius strips, hollow balls, rippled
+// sheets. The surface is sampled on a grid, triangulated, and the mass comes from the triangles,
+// in one of two physical readings the user picks:
+//
+//   shell — the surface is a thin sheet of wall thickness h (sheet metal). Works for ANY surface,
+//           open or closed. Each triangle is an exact lamina: ∫ r⊗r dA over a triangle is
+//           (A/3)·Σ mᵢ⊗mᵢ (edge-midpoint quadrature — exact for quadratics), plus dm·h²/12·n⊗n
+//           for the through-thickness spread.
+//   solid — the surface is the boundary of a filled body (requires a closed surface). Divergence
+//           theorem over signed tetrahedra (origin,p0,p1,p2): the exact polyhedron volume, c.o.m.,
+//           and second moments (canonical-tet map, the Mirtich/Eberly construction).
+//
+// A hollow ball vs. a filled one is the classic rolling-race demo (2/3·mR² vs 2/5·mR²) — that's
+// why the mode is user-facing and not an implementation detail.
+//
+// Closure is auto-detected: closed ⟺ each boundary pair (u=u0/u1, v=v0/v1) is either a seam
+// (matches its opposite pointwise — torus) or both edges collapse to poles (sphere). A Möbius
+// strip's seam matches with a flip, so it correctly reads as open.
+//
+// Like the curves, the tensor is generally non-diagonal → Jacobi → principal moments + frame.
+// Collider: convex hull — rounded outward by h/2 in shell mode so the wall has its thickness.
+// Honest limitation: the hull fills a torus's hole and a bowl's cavity (the curve creator's
+// capsule chain is the hollow-ring path; convex decomposition is the later upgrade).
+
+export interface ParamSurfaceSpec {
+  xuv: string; yuv: string; zuv: string; // coordinates as functions of u and v
+  u0: number; u1: number; v0: number; v1: number;
+  mode: 'shell' | 'solid';
+  thickness: number; // shell wall thickness (ignored in solid mode)
+  density: number;
+}
+
+export interface BuiltParamSurface {
+  geometry: THREE.BufferGeometry; // centered on the center of mass
+  hull: Float32Array; // point cloud for the convex-hull collider (c.o.m.-centered)
+  area: number; // m² of the mid-surface
+  volume: number; // m³ — shell: area × thickness · solid: enclosed volume
+  mass: number;
+  inertia: { x: number; y: number; z: number }; // principal moments about the c.o.m.
+  inertiaFrame: { x: number; y: number; z: number; w: number };
+  maxRadius: number; // bounding radius (spawn height + fallback collider)
+  closed: boolean;
+  mode: 'shell' | 'solid';
+}
+
+export type ParamSurfaceResult = { ok: true; shape: BuiltParamSurface } | { ok: false; error: string };
+
+const SURF_GRID = 96; // cells per axis — one grid drives mass integration AND the render mesh
+
+export function buildParamSurface(spec: ParamSurfaceSpec): ParamSurfaceResult {
+  // compile the three coordinate expressions; only "u" and "v" may appear
+  const fns: Array<(u: number, v: number) => number> = [];
+  for (const [label, src] of [['x(u,v)', spec.xuv], ['y(u,v)', spec.yuv], ['z(u,v)', spec.zuv]] as const) {
+    const parsed = parseExpression(src);
+    if (!parsed.ok) return { ok: false, error: `${label}: ${parsed.error}` };
+    const other = parsed.expr.vars.filter((n) => n !== 'u' && n !== 'v');
+    if (other.length) return { ok: false, error: `${label}: only "u" and "v" are allowed (found "${other[0]}").` };
+    const compiled = parsed.expr;
+    fns.push((u, v) => compiled.eval({ u, v }));
+  }
+  const [fx, fy, fz] = fns;
+
+  const { u0, u1, v0, v1 } = spec;
+  if (![u0, u1, v0, v1].every(isFinite)) return { ok: false, error: 'Domain must be finite numbers.' };
+  if (!(u1 > u0) || !(v1 > v0)) return { ok: false, error: 'Domain end must be greater than start.' };
+  const density = spec.density > 0 ? spec.density : 1;
+  const h = spec.thickness;
+  if (spec.mode === 'shell' && !(h >= 0.01)) return { ok: false, error: 'Shell thickness must be at least 0.01.' };
+
+  // ---- sample the grid (i along u, j along v) ----
+  const N = SURF_GRID;
+  const P: THREE.Vector3[] = new Array((N + 1) * (N + 1));
+  for (let i = 0; i <= N; i++) {
+    const u = u0 + ((u1 - u0) * i) / N;
+    for (let j = 0; j <= N; j++) {
+      const v = v0 + ((v1 - v0) * j) / N;
+      const x = fx(u, v), y = fy(u, v), z = fz(u, v);
+      if (!isFinite(x) || !isFinite(y) || !isFinite(z)) {
+        return { ok: false, error: `Surface is not finite near (u,v) = (${u.toFixed(2)}, ${v.toFixed(2)}).` };
+      }
+      P[i * (N + 1) + j] = new THREE.Vector3(x, y, z);
+    }
+  }
+  const at = (i: number, j: number) => P[i * (N + 1) + j];
+
+  // ---- closed? each boundary pair is a seam, or both of its edges are poles ----
+  const bbMin = P[0].clone(), bbMax = P[0].clone();
+  for (const p of P) { bbMin.min(p); bbMax.max(p); }
+  const tol = Math.max(1e-5, 1e-3 * bbMin.distanceTo(bbMax));
+  let uSeam = true, uPole0 = true, uPole1 = true, vSeam = true, vPole0 = true, vPole1 = true;
+  for (let k = 0; k <= N; k++) {
+    if (at(0, k).distanceTo(at(N, k)) > tol) uSeam = false;
+    if (at(0, k).distanceTo(at(0, 0)) > tol) uPole0 = false;
+    if (at(N, k).distanceTo(at(N, 0)) > tol) uPole1 = false;
+    if (at(k, 0).distanceTo(at(k, N)) > tol) vSeam = false;
+    if (at(k, 0).distanceTo(at(0, 0)) > tol) vPole0 = false;
+    if (at(k, N).distanceTo(at(0, N)) > tol) vPole1 = false;
+  }
+  const closed = (uSeam || (uPole0 && uPole1)) && (vSeam || (vPole0 && vPole1));
+  if (spec.mode === 'solid' && !closed) {
+    return { ok: false, error: 'Surface is open (has free edges) — use shell, or close the seams.' };
+  }
+
+  // ---- mass properties over the triangulation ----
+  // Everything reduces to M, S1 = ∫r dm, C = ∫ r⊗r dm; then I = tr(C)δ − C about the c.o.m.
+  const C = [[0, 0, 0], [0, 0, 0], [0, 0, 0]];
+  const S1 = new THREE.Vector3();
+  let area = 0;
+  let vol6 = 0; // 6 × signed enclosed volume (solid mode)
+  const outerAdd = (p: THREE.Vector3, w: number) => {
+    C[0][0] += w * p.x * p.x; C[1][1] += w * p.y * p.y; C[2][2] += w * p.z * p.z;
+    const xy = w * p.x * p.y, xz = w * p.x * p.z, yz = w * p.y * p.z;
+    C[0][1] += xy; C[1][0] += xy;
+    C[0][2] += xz; C[2][0] += xz;
+    C[1][2] += yz; C[2][1] += yz;
+  };
+  const e1 = new THREE.Vector3(), e2 = new THREE.Vector3(), cross = new THREE.Vector3(), tmp = new THREE.Vector3();
+  const tri = (p0: THREE.Vector3, p1: THREE.Vector3, p2: THREE.Vector3) => {
+    cross.crossVectors(e1.subVectors(p1, p0), e2.subVectors(p2, p0));
+    const A = cross.length() / 2;
+    area += A;
+    if (spec.mode === 'shell') {
+      if (A < 1e-12) return; // degenerate (pole) triangle
+      S1.addScaledVector(tmp.addVectors(p0, p1).add(p2), A / 3); // A · centroid
+      outerAdd(tmp.addVectors(p0, p1).multiplyScalar(0.5), A / 3); // exact lamina: (A/3)·Σ mᵢ⊗mᵢ
+      outerAdd(tmp.addVectors(p1, p2).multiplyScalar(0.5), A / 3);
+      outerAdd(tmp.addVectors(p2, p0).multiplyScalar(0.5), A / 3);
+      outerAdd(cross.divideScalar(2 * A), A * h * h / 12); // through-thickness spread along n̂
+    } else {
+      // signed tet (origin, p0, p1, p2):  V=det/6 · ∫r = det·s/24 · ∫r⊗r = det·(Σpᵢ⊗pᵢ + s⊗s)/120
+      const det = p0.dot(cross.crossVectors(p1, p2));
+      vol6 += det;
+      S1.addScaledVector(tmp.addVectors(p0, p1).add(p2), det);
+      outerAdd(p0, det); outerAdd(p1, det); outerAdd(p2, det);
+      outerAdd(tmp, det); // tmp still holds s = p0+p1+p2
+    }
+  };
+  for (let i = 0; i < N; i++) {
+    for (let j = 0; j < N; j++) {
+      const p00 = at(i, j), p10 = at(i + 1, j), p01 = at(i, j + 1), p11 = at(i + 1, j + 1);
+      tri(p00, p10, p11);
+      tri(p00, p11, p01);
+    }
+  }
+
+  let mass: number, volume: number;
+  const com = new THREE.Vector3();
+  if (spec.mode === 'shell') {
+    if (area < 1e-6) return { ok: false, error: 'Surface has ~zero area.' };
+    volume = area * h;
+    mass = density * volume;
+    com.copy(S1).divideScalar(area);
+    for (let r = 0; r < 3; r++) for (let c = 0; c < 3; c++) C[r][c] *= density * h;
+  } else {
+    const sgn = vol6 < 0 ? -1 : 1; // grid winding decides the sign — flip everything if inward
+    volume = (sgn * vol6) / 6;
+    if (volume < 1e-6) return { ok: false, error: 'Enclosed volume is ~zero — use shell.' };
+    mass = density * volume;
+    com.copy(S1).multiplyScalar(sgn / 24).divideScalar(volume);
+    for (let r = 0; r < 3; r++) for (let c = 0; c < 3; c++) C[r][c] *= (sgn * density) / 120;
+  }
+  outerAdd(com, -mass); // parallel-axis: C about the c.o.m.
+  const trC = C[0][0] + C[1][1] + C[2][2];
+  const I = [
+    [trC - C[0][0], -C[0][1], -C[0][2]],
+    [-C[1][0], trC - C[1][1], -C[1][2]],
+    [-C[2][0], -C[2][1], trC - C[2][2]],
+  ];
+  const eig = eigenSymmetric3(I);
+  const principal = eig.values.map((x) => Math.max(x, 1e-9));
+  const [b0, b1] = eig.vectors;
+  const b2 = new THREE.Vector3().crossVectors(b0, b1); // right-handed basis → valid rotation
+  const frame = new THREE.Quaternion().setFromRotationMatrix(new THREE.Matrix4().makeBasis(b0, b1, b2));
+
+  // ---- render geometry: the same grid, c.o.m.-centered, indexed + averaged normals ----
+  const positions = new Float32Array((N + 1) * (N + 1) * 3);
+  for (let k = 0; k < P.length; k++) {
+    positions[k * 3] = P[k].x - com.x;
+    positions[k * 3 + 1] = P[k].y - com.y;
+    positions[k * 3 + 2] = P[k].z - com.z;
+  }
+  const indices = new Uint32Array(N * N * 6);
+  let w = 0;
+  for (let i = 0; i < N; i++) {
+    for (let j = 0; j < N; j++) {
+      const a = i * (N + 1) + j, b = (i + 1) * (N + 1) + j, c = (i + 1) * (N + 1) + j + 1, d = i * (N + 1) + j + 1;
+      indices[w++] = a; indices[w++] = b; indices[w++] = c;
+      indices[w++] = a; indices[w++] = c; indices[w++] = d;
+    }
+  }
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+  geometry.setIndex(new THREE.BufferAttribute(indices, 1));
+  geometry.computeVertexNormals();
+
+  // ---- convex-hull point cloud (subsampled grid) ----
+  const step = N / 16; // 17×17 cloud
+  const cloud: number[] = [];
+  for (let i = 0; i <= N; i += step) {
+    for (let j = 0; j <= N; j += step) {
+      const p = at(i, j);
+      cloud.push(p.x - com.x, p.y - com.y, p.z - com.z);
+    }
+  }
+
+  let maxRadius = 0;
+  for (const p of P) maxRadius = Math.max(maxRadius, p.distanceTo(com));
+  if (spec.mode === 'shell') maxRadius += h / 2;
+
+  return {
+    ok: true,
+    shape: {
+      geometry, hull: new Float32Array(cloud), area, volume, mass,
+      inertia: { x: principal[0], y: principal[1], z: principal[2] },
+      inertiaFrame: { x: frame.x, y: frame.y, z: frame.z, w: frame.w },
+      maxRadius, closed, mode: spec.mode,
+    },
+  };
+}
+
+/** Presets for the parametric-surface creator. */
+export interface SurfacePreset {
+  name: string; xuv: string; yuv: string; zuv: string;
+  u0: number; u1: number; v0: number; v1: number; mode: 'shell' | 'solid'; thickness: number;
+}
+export const SURFACE_PRESETS: SurfacePreset[] = [
+  { name: 'Torus', xuv: '(1.3+0.55*cos(v))*cos(u)', yuv: '0.55*sin(v)', zuv: '(1.3+0.55*cos(v))*sin(u)', u0: 0, u1: 6.2832, v0: 0, v1: 6.2832, mode: 'solid', thickness: 0.1 },
+  { name: 'Hollow ball', xuv: '1.3*sin(v)*cos(u)', yuv: '1.3*cos(v)', zuv: '1.3*sin(v)*sin(u)', u0: 0, u1: 6.2832, v0: 0, v1: 3.1416, mode: 'shell', thickness: 0.12 },
+  { name: 'Möbius', xuv: '(1.2+v*cos(u/2))*cos(u)', yuv: 'v*sin(u/2)', zuv: '(1.2+v*cos(u/2))*sin(u)', u0: 0, u1: 6.2832, v0: -0.45, v1: 0.45, mode: 'shell', thickness: 0.08 },
+  { name: 'Ripple', xuv: 'u', yuv: '0.35*sin(1.5*u)*cos(1.5*v)', zuv: 'v', u0: -1.8, u1: 1.8, v0: -1.8, v1: 1.8, mode: 'shell', thickness: 0.1 },
 ];

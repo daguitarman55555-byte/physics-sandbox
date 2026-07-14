@@ -22,15 +22,24 @@ shape) · spawn box/sphere/+100 · drag & throw (clamped, no teleport/fling) · 
 gravity slider + Earth/Moon/Zero-G · reset · click-to-select **object inspector** (live speed, angular
 velocity, mass, kinetic energy, sleep state) · FPS/object/awake HUD.
 
-Phase 2 (shapes) — two slices shipped: `f(x)` solids of revolution (exact analytic mass/inertia) and
+Phase 2 (shapes) — three slices shipped: `f(x)` solids of revolution (exact analytic mass/inertia),
 **parametric curves** x(t),y(t),z(t) → swept tubes (springs, knots, rings; centerline-integrated mass +
-full inertia tensor diagonalized to principal axes; capsule-chain colliders so coils stay hollow).
+full inertia tensor diagonalized to principal axes; capsule-chain colliders so coils stay hollow), and
+**parametric surfaces** x(u,v),y(u,v),z(u,v) (grid-sampled + triangulated; **shell mode** = thin wall of
+thickness h, works for any surface, exact triangle-lamina second moments; **solid mode** = filled body
+via divergence-theorem signed tets, exact polyhedron mass — verified against closed forms to <0.15%;
+closure auto-detected from seams/poles so a Möbius correctly reads open and refuses solid; convex-hull
+collider, rounded outward by h/2 in shell mode; Torus / Hollow ball / Möbius / Ripple presets — hollow
+vs solid ball is the 2/3·mR² vs 2/5·mR² rolling-race demo).
 All custom-shape creators live-update a **3D preview popup** (floating, draggable) while you design,
 and every expression renders as **live KaTeX math** (Desmos-style) under its input — `systems/expr.ts`
 emits LaTeX from the same parse that compiles the evaluator. Selection now has a **forces window**
 floating above the selected object (weight, measured ΣF = m·a, contact/drag decomposition, momentum,
 contacts), a **Delete object** button in the inspector, and **Delete all** below Reset scene.
-Next up in Phase 2: parametric surfaces.
+Known surface limitations: the hull collider fills a torus's hole / a bowl's cavity (use the curve
+creator for hollow rings; convex decomposition is the planned upgrade), and a perfectly flat sheet
+falls back to a thin-box collider.
+Next up in Phase 2: implicit/SDF surfaces (marching cubes) — or start Phase 3 materials.
 
 Stability hardening (2026-07-13): dynamic bodies now spawn with CCD enabled and reject deeply-
 overlapping drop points — previously, an overlapping spawn could make Rapier's solver inject a huge
@@ -85,9 +94,10 @@ Model, quarks). Signature UX: **scale-transition zoom**. Plus: portable AI scena
 
 ## What's next
 
-Recommended next build: continue **Phase 2 — shape creation** with **parametric surfaces** x(u,v),
-y(u,v), z(u,v) (torus, seashells, Möbius) — needs a closed-volume strategy for mass (Module-M voxel
-path or divergence-theorem surface integrals). Or pick any item from `docs/FEATURES.md`.
+Recommended next build: continue **Phase 2 — shape creation** with **implicit/SDF surfaces** (gyroids,
+metaballs) via marching cubes + the Module-M voxel mass path — or start **Phase 3 materials**
+(`systems/materials.ts` already has the preset table; wire density/friction/restitution presets into
+all four creators). Or pick any item from `docs/FEATURES.md`.
 
 ## Working loop for each task
 

@@ -15,7 +15,10 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import RAPIER from '@dimforge/rapier3d-compat';
-import { buildRevolution, buildParamCurve, type RevolutionSpec, type ParamCurveSpec } from './systems/shapes';
+import {
+  buildRevolution, buildParamCurve, buildParamSurface,
+  type RevolutionSpec, type ParamCurveSpec, type ParamSurfaceSpec,
+} from './systems/shapes';
 
 export type Kind = 'box' | 'sphere' | 'custom';
 
@@ -305,6 +308,47 @@ export class Sandbox {
     }
 
     const e = this.finishCustomEntity(body, s.geometry, p, s.maxRadius, s.volume, `curve: ${spec.xt}, ${spec.yt}, ${spec.zt}`);
+    return { ok: true, entity: e };
+  }
+
+  /**
+   * Create a parametric surface x(u,v),y(u,v),z(u,v) — as a thin shell (any surface) or a filled
+   * solid (closed surfaces). Mass/c.o.m./inertia are exact for the triangulated surface (see
+   * systems/shapes.ts); Rapier gets principal moments + frame like the curves. The collider is a
+   * convex hull — rounded outward by half the wall thickness in shell mode so the wall is solid.
+   */
+  createParamSurface(spec: ParamSurfaceSpec): { ok: true; entity: Entity } | { ok: false; error: string } {
+    if (this.entities.length >= MAX_INSTANCES) return { ok: false, error: 'Object limit reached.' };
+    const built = buildParamSurface(spec);
+    if (!built.ok) return { ok: false, error: built.error };
+    const s = built.shape;
+
+    const p = new THREE.Vector3((Math.random() - 0.5) * 3, 8 + s.maxRadius, (Math.random() - 0.5) * 3);
+    const body = this.world.createRigidBody(
+      RAPIER.RigidBodyDesc.dynamic()
+        .setTranslation(p.x, p.y, p.z)
+        .setAngvel({ x: (Math.random() - 0.5) * 1.5, y: (Math.random() - 0.5) * 1.5, z: (Math.random() - 0.5) * 1.5 })
+        .setAdditionalMassProperties(s.mass, { x: 0, y: 0, z: 0 }, s.inertia, s.inertiaFrame)
+        .setCcdEnabled(true),
+    );
+    let colDesc =
+      spec.mode === 'shell'
+        ? RAPIER.ColliderDesc.roundConvexHull(s.hull, Math.min(spec.thickness / 2, 0.25))
+        : RAPIER.ColliderDesc.convexHull(s.hull);
+    if (!colDesc) {
+      // hull failed (e.g. a perfectly flat sheet) → thin box around the geometry's bounds
+      s.geometry.computeBoundingBox();
+      const half = s.geometry.boundingBox!.getSize(new THREE.Vector3()).multiplyScalar(0.5);
+      colDesc = RAPIER.ColliderDesc.cuboid(Math.max(half.x, 0.03), Math.max(half.y, 0.03), Math.max(half.z, 0.03));
+    }
+    this.world.createCollider(colDesc.setFriction(0.6).setRestitution(0.3).setDensity(0), body);
+
+    const e = this.finishCustomEntity(
+      body, s.geometry, p, s.maxRadius, s.volume,
+      `surface (${s.mode}): ${spec.xuv}, ${spec.yuv}, ${spec.zuv}`,
+    );
+    // open surfaces are visible from both sides (a Möbius strip has no inside)
+    (e.mesh!.material as THREE.MeshStandardMaterial).side = THREE.DoubleSide;
     return { ok: true, entity: e };
   }
 

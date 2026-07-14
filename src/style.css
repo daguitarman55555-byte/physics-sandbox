@@ -67,6 +67,7 @@ label.numcol input {
   background: var(--panel-2); border: 1px solid var(--border); border-radius: 7px; padding: 5px 6px;
 }
 label.numcol input:focus { outline: none; border-color: var(--accent); }
+label.numcol input:disabled { opacity: .4; cursor: not-allowed; }
 .preview { font-family: var(--mono); font-size: 11.5px; color: var(--text-2); min-height: 16px; }
 .preview b { color: var(--accent-ink); font-variant-numeric: tabular-nums; }
 .preview.err { color: #e2795a; }

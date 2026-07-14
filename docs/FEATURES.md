@@ -21,8 +21,13 @@ A checklist so nothing is lost. `[x]` = in Phase 1 today · `[ ]` = planned (wit
       terms, Jacobi-diagonalized → principal moments + frame for Rapier), **capsule-chain collider**
       (coils stay hollow — no convex-hull cheating), Spring/Knot/Ring/Wave presets
 - [x] **3D shape preview popup** — floating draggable window with its own renderer; live-updates as
-      you edit any custom-shape creator (revolution + parametric curve)
-- [ ] **Parametric surfaces** x(u,v)… → arbitrary surfaces (torus, seashells, Möbius)
+      you edit any custom-shape creator (revolution + parametric curve + parametric surface)
+- [x] **Parametric surfaces** x(u,v),y(u,v),z(u,v) — grid-sampled + triangulated; **shell mode**
+      (thin wall of thickness h, any surface — exact triangle-lamina second moments + h²/12 term)
+      or **solid mode** (closed surfaces — exact polyhedron mass via divergence theorem / signed
+      tets); closure auto-detected (seams + poles; a Möbius correctly reads open); full tensor →
+      principal frame; convex-hull collider rounded by h/2 in shell mode; Torus / Hollow ball /
+      Möbius / Ripple presets. Hollow vs solid = the classic 2/3·mR² vs 2/5·mR² rolling race.
 - [ ] Implicit / SDF surfaces (gyroids, metaballs) · superformula (shells, flowers)
 - [ ] Freehand draw → extrude/revolve · compound objects · boolean CSG
 - [ ] Convex-decomposition colliders · **GLTF/OBJ/STL import** · big preset catalog
