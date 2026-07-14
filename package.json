@@ -1,0 +1,21 @@
+{
+  "name": "physics-sandbox",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "A real-time, browser-based physics sandbox. Phase 1: the real-time core.",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@dimforge/rapier3d-compat": "^0.19.3",
+    "three": "^0.185.1"
+  },
+  "devDependencies": {
+    "@types/three": "^0.185.1",
+    "typescript": "^7.0.2",
+    "vite": "^8.1.4"
+  }
+}
