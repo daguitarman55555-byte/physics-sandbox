@@ -39,12 +39,21 @@ export function buildUI(sandbox: Sandbox) {
 function mathField(initial: string) {
   const mf = new MathfieldElement();
   mf.mathVirtualKeyboardPolicy = 'manual';
-  const set = (engine: string) => mf.setValue(exprToLatex(engine) ?? engine, { silenceNotifications: true });
+  // Programmatic sets (presets, the shape library) keep the ORIGINAL engine string authoritative:
+  // the LaTeX→ascii-math read-back has no inverse for some notations (|x| for abs, sgn, quoted
+  // operator names), so round-tripping a set value could break formulas that are known-good.
+  // The moment the user edits the field, the read-back becomes the source of truth again.
+  let raw: string | null = null;
+  const set = (engine: string) => {
+    raw = engine;
+    mf.setValue(exprToLatex(engine) ?? engine, { silenceNotifications: true });
+  };
+  mf.addEventListener('input', () => { raw = null; }); // registered first — runs before any refresh
   set(initial);
   return {
     el: mf,
     set,
-    value: () => asciiToEngine(mf.getValue('ascii-math')),
+    value: () => raw ?? asciiToEngine(mf.getValue('ascii-math')),
     latex: () => mf.getValue(),
   };
 }
@@ -54,11 +63,16 @@ type MathField = ReturnType<typeof mathField>;
  * Spaces are stripped entirely: it lets fast-typed `s i n(x)` (chars not yet fused to \sin) become
  * `sin(x)`, and juxtaposition like `0.18 t` still multiplies via the parser's implicit `*`. */
 function asciiToEngine(src: string): string {
-  return src
+  let out = src
     .replace(/\bxx\b/g, '*') // ascii-math spelling of \times
     .replace(/[·×⋅]/g, '*')
     .replace(/−/g, '-')
-    .replace(/\s+/g, '');
+    .replace(/"/g, '') // MathLive quotes some \operatorname names
+    .replace(/\s+/g, ''); // MathLive spells operator names "s g n" — strip BEFORE renaming
+  out = out.replace(/\bsgn\b/g, 'sign'); // our sign() renders as \operatorname{sgn}
+  // |…| → abs(…): handles sequential (and, via repetition, once-nested) absolute values
+  for (let i = 0; i < 4 && out.includes('|'); i++) out = out.replace(/\|([^|]+)\|/g, 'abs($1)');
+  return out;
 }
 
 function el<K extends keyof HTMLElementTagNameMap>(tag: K, html = '', cls = ''): HTMLElementTagNameMap[K] {
