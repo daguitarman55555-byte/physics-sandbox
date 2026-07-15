@@ -238,7 +238,6 @@ export const IMPLICIT_CATALOG: ImpEntry[] = [
   // classic algebraic surfaces
   { name: 'Heart', group: 'Algebraic', fxyz: '(x^2+9/4*z^2+y^2-1)^3 - x^2*y^3 - 9/80*z^2*y^3', size: 1.4 },
   { name: 'Tangle cube', group: 'Algebraic', fxyz: 'x^4-5*x^2+y^4-5*y^2+z^4-5*z^2+11.8', size: 2.9 },
-  { name: 'Peanut', group: 'Algebraic', fxyz: '(x^2+y^2+z^2)^2 - 2.2*(x^2-y^2-z^2) + 0.15', size: 1.9 },
   { name: 'Pretzel', group: 'Algebraic', fxyz: '(x^2*(1.21-x^2)-y^2)^2 + 0.5*z^2 - 0.02', size: 1.5 },
   { name: 'Chair', group: 'Algebraic', fxyz: '(x^2+y^2+z^2-2.5)^2 - 0.8*((z-1.4)^2-2*x^2)*((z+1.4)^2-2*y^2)', size: 2.4 },
   { name: 'Orthocircles', group: 'Algebraic', fxyz: '((x^2+y^2-1)^2+z^2)*((y^2+z^2-1)^2+x^2)*((z^2+x^2-1)^2+y^2)-0.038', size: 1.6 },

@@ -177,6 +177,7 @@ class ShapePreview {
   private raf = 0;
 
   private frameR = 1; // bounding radius of the current shape, for camera framing
+  private captionSrc = ''; // latest caption LaTeX, so we can re-render it on font-load / resize
 
   constructor() {
     this.root = el('div', '', 'hidden');
@@ -199,6 +200,11 @@ class ShapePreview {
       this.renderer.setSize(w, h, false);
       this.fit();
     }).observe(this.canvas);
+
+    // KaTeX measures from font metrics, so an equation rendered before its web fonts finish
+    // loading collapses to zero height (invisible until a later reflow). Re-render the caption
+    // once fonts are ready — this is the automatic version of the "stretch the tab" workaround.
+    document.fonts?.ready.then(() => this.renderCaption());
 
     this.scene.add(new THREE.HemisphereLight('#aab6cc', '#20242e', 0.9));
     const sun = new THREE.DirectionalLight('#ffffff', 1.9);
@@ -284,10 +290,19 @@ class ShapePreview {
     this.mesh.position.copy(bs.center).multiplyScalar(-1);
     this.frameR = bs.radius || 1;
     this.fit();
+    this.captionSrc = caption;
+    // defer past this frame's layout: apply() is often called straight after show() un-hides the
+    // popup, so the element isn't laid out yet — rendering now would measure against a zero box
+    requestAnimationFrame(() => this.renderCaption());
+  }
+
+  /** (Re)render the stored caption. Safe to call repeatedly — on font-load, resize, or update. */
+  private renderCaption() {
+    if (!this.captionSrc) return;
     try {
-      katex.render(caption, this.caption, { displayMode: false, throwOnError: false, strict: false });
+      katex.render(this.captionSrc, this.caption, { displayMode: false, throwOnError: false, strict: false });
     } catch {
-      this.caption.textContent = caption;
+      this.caption.textContent = this.captionSrc;
     }
   }
 }
