@@ -40,6 +40,7 @@ export interface Entity {
   accel: THREE.Vector3; // measured acceleration over the last step — drives the forces window
   bbCenter: THREE.Vector3; // local-space bounding box (center/half-extents) — for the floor clamp
   bbHalf: THREE.Vector3;
+  texRepeat?: [number, number]; // texture tiling of the world mesh — mini-views reuse it
   // exact floor-clamp support data for custom shapes: the local points that define the collider
   // (hull cloud / slab corners / capsule segment ends), plus a radius to pad below them (the tube
   // radius for capsule chains, 0 for hulls). Lowest world-Y over these = the body's true bottom.
@@ -235,16 +236,31 @@ export class Sandbox {
   }
 
   /** A PBR material from a preset's maps, tiled `repeat` times across the UVs. */
-  private pbrMaterial(mat: Material, repeat: [number, number]): THREE.MeshStandardMaterial {
+  pbrMaterial(mat: Material, repeat: [number, number]): THREE.MeshStandardMaterial {
     const m = mat.maps!;
     return new THREE.MeshStandardMaterial({
       map: m.albedo ? this.texture(m.albedo, true, repeat) : undefined,
       normalMap: m.normal ? this.texture(m.normal, false, repeat) : undefined,
       roughnessMap: m.roughness ? this.texture(m.roughness, false, repeat) : undefined,
       metalnessMap: m.metalness ? this.texture(m.metalness, false, repeat) : undefined,
-      roughness: 1, // factors multiply the maps — 1 lets the maps speak
-      metalness: m.metalness ? 1 : 0,
+      roughness: mat.roughnessScale ?? 1, // factors multiply the maps — < 1 shines it up
+      // 0.85, not 1: the last 15% lets diffuse light give flat metal faces a base sheen instead
+      // of them being pure mirrors of a mostly-dark room
+      metalness: m.metalness ? 0.85 : 0,
+      envMapIntensity: mat.envBoost ?? 1, // flat metal faces need brighter reflections to read
     });
+  }
+
+  /** A fresh render material matching an entity — the same maps and tiling its world mesh uses. */
+  materialFor(e: Entity): THREE.MeshStandardMaterial {
+    if (e.mat.maps) return this.pbrMaterial(e.mat, e.texRepeat ?? [1, 1]);
+    return new THREE.MeshStandardMaterial({ color: e.color, metalness: 0.1, roughness: 0.6 });
+  }
+
+  /** A material for design-time previews of the given preset (plain = the classic preview blue). */
+  previewMaterial(mat: Material): THREE.MeshStandardMaterial {
+    if (mat.maps) return this.pbrMaterial(mat, [1, 1]);
+    return new THREE.MeshStandardMaterial({ color: '#5b8def', metalness: 0.1, roughness: 0.55 });
   }
 
   /** The InstancedMesh pool for a (shape kind, material) pair — created on first use. */
@@ -295,6 +311,7 @@ export class Sandbox {
     const color = new THREE.Color(PALETTE[this.nextId % PALETTE.length]);
     const e: Entity = {
       id: this.nextId++, kind, body, size: s, mat, color,
+      texRepeat: kind === 'sphere' ? [2, 1] : [1, 1], // must match the pool's tiling above
       prevPos: new THREE.Vector3(p.x, p.y, p.z), prevQuat: new THREE.Quaternion(),
       currPos: new THREE.Vector3(p.x, p.y, p.z), currQuat: new THREE.Quaternion(),
       lastVel: new THREE.Vector3(), accel: new THREE.Vector3(),
@@ -504,6 +521,7 @@ export class Sandbox {
     const bb = geometry.boundingBox!;
     const e: Entity = {
       id: this.nextId++, kind: 'custom', body, size: boundingRadius, mat, color,
+      texRepeat: repeat,
       prevPos: p.clone(), prevQuat: new THREE.Quaternion(),
       currPos: p.clone(), currQuat: new THREE.Quaternion(),
       lastVel: new THREE.Vector3(), accel: new THREE.Vector3(),

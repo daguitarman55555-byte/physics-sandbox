@@ -69,6 +69,17 @@ replace topology normals (wall-cap vertices keep flat normals) — so hearts/gyr
 at any grid res; spheres at 48×32; tubes 16-sided; lathe 64 segments; texture anisotropy 8; sphere
 pools tile [2,1] so texel aspect matches boxes; steel swapped to brushed Metal009 (polished
 Metal049A read mirror-on-ball vs dark-mirror-on-flat-faces — brushed reads identical on both).
+Catalog + polish (2026-07-15): a **shape library** window (floating, tabbed, draggable) browses
+~200 machine-validated formulas in `systems/catalog.ts` (51 revolutions / 51 curves / 47 surfaces
+/ 47 implicits, incl. torus-knot, Lissajous, TPMS and CSG families); each creator's "More…" opens
+it, clicking an entry fills that creator and pops its section open. Implicit UVs are now
+per-FACE box projections with duplicated seam vertices (per-vertex axes smeared a visible band
+across e.g. the heart). All mini-views are material-true: preview popup uses the active material,
+forces view + inspector swatch (albedo thumb) use the selected object's material + tiling
+(sandbox.materialFor / previewMaterial; Entity.texRepeat). Steel = roughnessScale 0.62 +
+envBoost 2.4 + metalness 0.85 (pure metalness-1 flat faces read as dark mirrors of the dim room).
+Note: Rapier's body.mass() reads 0 in the same JS tick a body is created — it finalizes on the
+next step; not a bug.
 Next: superformula or freehand-draw creators, GLTF/STL import (V-HACD), texture upload, alloy
 composer — or Phase 4 forces & fields.
 

@@ -131,6 +131,35 @@ button:disabled:hover { border-color: var(--border); background: var(--accent); 
   flex: 0 0 auto;
 }
 
+/* shape library (floating, tabbed catalog browser) */
+#shape-library {
+  /* left side — the shape-preview popup owns the panel's left flank on the right side */
+  position: fixed; top: 90px; left: 16px; width: 292px; height: min(600px, 78vh);
+  background: var(--panel); border: 1px solid var(--border); border-radius: 12px;
+  box-shadow: 0 12px 34px rgba(0,0,0,.5); z-index: 30; display: flex; flex-direction: column;
+  resize: both; overflow: hidden; min-width: 224px; min-height: 220px; font-size: 13px;
+}
+#shape-library.hidden { display: none; }
+#shape-library header {
+  display: flex; justify-content: space-between; align-items: center; padding: 8px 8px 6px 12px;
+  user-select: none; touch-action: none; font-family: var(--mono); font-size: 10.5px;
+  letter-spacing: .12em; text-transform: uppercase; color: var(--muted); font-weight: 600;
+  flex: 0 0 auto; cursor: grab;
+}
+#shape-library header:active { cursor: grabbing; }
+#shape-library header button { flex: 0 0 auto; padding: 0 8px; font-size: 15px; line-height: 20px; border-radius: 6px; }
+#shape-library .libtabs { padding: 0 12px 8px; flex: 0 0 auto; }
+#shape-library .libbody { overflow-y: auto; padding: 2px 12px 12px; flex: 1 1 auto; }
+#shape-library .libbody::-webkit-scrollbar { width: 8px; }
+#shape-library .libbody::-webkit-scrollbar-thumb { background: var(--border); border-radius: 8px; }
+#shape-library .libpage { display: flex; flex-direction: column; gap: 8px; }
+#shape-library .libpage.hidden { display: none; }
+#shape-library .libpage h4 {
+  font-family: var(--mono); font-size: 10px; letter-spacing: .1em; text-transform: uppercase;
+  color: var(--muted); font-weight: 600; margin-top: 6px;
+}
+button.more { color: var(--accent-ink); }
+
 /* inspector (bottom-left) */
 #inspector {
   position: fixed; bottom: 44px; left: 16px; width: 240px; background: var(--panel);

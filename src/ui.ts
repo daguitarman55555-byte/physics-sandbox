@@ -12,6 +12,10 @@ import 'mathlive/fonts.css';
 import type { Entity, Sandbox } from './sandbox';
 import { buildRevolution, buildParamCurve, buildParamSurface, REV_PRESETS, CURVE_PRESETS, SURFACE_PRESETS } from './systems/shapes';
 import { buildImplicit, IMPLICIT_PRESETS } from './systems/implicit';
+import {
+  REV_CATALOG, CURVE_CATALOG, SURFACE_CATALOG, IMPLICIT_CATALOG,
+  type RevEntry, type CurveEntry, type SurfEntry, type ImpEntry,
+} from './systems/catalog';
 import { exprToLatex } from './systems/expr';
 import { PLAIN, PRESETS as MATERIALS, type Material } from './systems/materials';
 
@@ -239,16 +243,23 @@ class ShapePreview {
     return !this.root.classList.contains('hidden');
   }
 
+  // starts as the classic preview blue; the material picker swaps in the active preset's PBR maps
+  private material = new THREE.MeshStandardMaterial({ color: '#5b8def', metalness: 0.1, roughness: 0.55, side: THREE.DoubleSide });
+
+  /** Preview shapes in this material from now on (called when the active material changes). */
+  setMaterial(m: THREE.MeshStandardMaterial) {
+    m.side = THREE.DoubleSide; // open surfaces (Möbius, sheets) are visible from both sides
+    this.material.dispose(); // textures live in the sandbox cache — disposing the material is safe
+    this.material = m;
+    if (this.mesh) this.mesh.material = m;
+  }
+
   private apply(geometry: THREE.BufferGeometry, caption: string) {
     if (this.mesh) {
       this.spin.remove(this.mesh);
       this.mesh.geometry.dispose();
     } else {
-      this.mesh = new THREE.Mesh(
-        geometry,
-        // DoubleSide: open surfaces (Möbius, sheets) are visible from both sides
-        new THREE.MeshStandardMaterial({ color: '#5b8def', metalness: 0.1, roughness: 0.55, side: THREE.DoubleSide }),
-      );
+      this.mesh = new THREE.Mesh(geometry, this.material);
     }
     this.mesh.geometry = geometry;
     this.spin.add(this.mesh);
@@ -270,6 +281,88 @@ class ShapePreview {
 let shapePreview: ShapePreview | null = null;
 function getShapePreview(): ShapePreview {
   return (shapePreview ??= new ShapePreview());
+}
+
+// ============================================================ shape library
+//
+// A floating, tabbed window over the ~200-formula catalog (systems/catalog.ts). Clicking an entry
+// fills the matching creator's fields, pops its section open, and live-updates the 3D preview —
+// so you can flip through shapes like a picture book. Draggable by its header; × hides it.
+
+type LibTab = 'rev' | 'curve' | 'surface' | 'implicit';
+interface LibAppliers {
+  rev: (e: RevEntry) => void;
+  curve: (e: CurveEntry) => void;
+  surface: (e: SurfEntry) => void;
+  implicit: (e: ImpEntry) => void;
+}
+
+class ShapeLibrary {
+  private root = el('div', '', 'hidden');
+  private bodyEl = el('div', '', 'libbody');
+  private tabs = new Map<LibTab, HTMLButtonElement>();
+  private pages = new Map<LibTab, HTMLElement>();
+
+  constructor(private appliers: LibAppliers) {
+    this.root.id = 'shape-library';
+    const header = el('header', '<span>Shape library</span>');
+    const close = el('button', '×');
+    close.onclick = () => this.root.classList.add('hidden');
+    header.append(close);
+    const tabRow = el('div', '', 'row libtabs');
+    const defs: Array<[LibTab, string]> = [['rev', 'f(x)'], ['curve', 'Curves'], ['surface', 'Surfaces'], ['implicit', 'Implicit']];
+    for (const [tab, label] of defs) {
+      const b = el('button', label, 'mini');
+      b.onclick = () => this.select(tab);
+      this.tabs.set(tab, b);
+      tabRow.append(b);
+    }
+    this.root.append(header, tabRow, this.bodyEl);
+    document.body.append(this.root);
+    makeFloating(this.root, 'header');
+  }
+
+  open(tab: LibTab) {
+    this.root.classList.remove('hidden');
+    this.select(tab);
+  }
+
+  private select(tab: LibTab) {
+    for (const [t, b] of this.tabs) b.classList.toggle('primary', t === tab);
+    for (const [t, p] of this.pages) p.classList.toggle('hidden', t !== tab);
+    if (!this.pages.has(tab)) {
+      const page = this.buildPage(tab); // built on first visit
+      this.pages.set(tab, page);
+      this.bodyEl.append(page);
+    }
+  }
+
+  private buildPage(tab: LibTab): HTMLElement {
+    const page = el('div', '', 'libpage');
+    const add = <T extends { name: string; group: string }>(entries: T[], apply: (e: T) => void) => {
+      const groups = new Map<string, T[]>();
+      for (const e of entries) {
+        let g = groups.get(e.group);
+        if (!g) { g = []; groups.set(e.group, g); }
+        g.push(e);
+      }
+      for (const [group, list] of groups) {
+        page.append(el('h4', group));
+        const row = el('div', '', 'row wrap');
+        for (const e of list) {
+          const b = el('button', e.name, 'mini');
+          b.onclick = () => apply(e);
+          row.append(b);
+        }
+        page.append(row);
+      }
+    };
+    if (tab === 'rev') add(REV_CATALOG, this.appliers.rev);
+    else if (tab === 'curve') add(CURVE_CATALOG, this.appliers.curve);
+    else if (tab === 'surface') add(SURFACE_CATALOG, this.appliers.surface);
+    else add(IMPLICIT_CATALOG, this.appliers.implicit);
+    return page;
+  }
 }
 
 function buildPanel(sandbox: Sandbox) {
@@ -305,6 +398,8 @@ function buildPanel(sandbox: Sandbox) {
   chips[0].classList.add('on');
   matInfo.innerHTML = describe(PLAIN);
   matBody.append(chipRow, matInfo);
+  // the design-time shape preview renders in the active material too
+  materials.onChange((m) => getShapePreview().setMaterial(sandbox.previewMaterial(m)));
 
   // --- spawn primitives ---
   const spawnBody = section(panel, 'Spawn', true);
@@ -320,10 +415,15 @@ function buildPanel(sandbox: Sandbox) {
   spawnBody.append(spawn);
 
   // --- Phase 2 shape creators (collapsed until needed) ---
-  buildShapeCreator(section(panel, 'Create · f(x) revolution', false), sandbox, materials);
-  buildCurveCreator(section(panel, 'Create · parametric curve', false), sandbox, materials);
-  buildSurfaceCreator(section(panel, 'Create · parametric surface', false), sandbox, materials);
-  buildImplicitCreator(section(panel, 'Create · implicit f(x,y,z)', false), sandbox, materials);
+  // each creator returns its "apply a catalog entry" function; the shape library dispatches to them
+  let library: ShapeLibrary | null = null;
+  const openLib = (tab: LibTab) => { (library ??= new ShapeLibrary(appliers)).open(tab); };
+  const appliers: LibAppliers = {
+    rev: buildShapeCreator(section(panel, 'Create · f(x) revolution', false), sandbox, materials, () => openLib('rev')),
+    curve: buildCurveCreator(section(panel, 'Create · parametric curve', false), sandbox, materials, () => openLib('curve')),
+    surface: buildSurfaceCreator(section(panel, 'Create · parametric surface', false), sandbox, materials, () => openLib('surface')),
+    implicit: buildImplicitCreator(section(panel, 'Create · implicit f(x,y,z)', false), sandbox, materials, () => openLib('implicit')),
+  };
 
   // --- world ---
   const worldBody = section(panel, 'World', true);
@@ -361,7 +461,9 @@ function buildPanel(sandbox: Sandbox) {
   worldBody.append(actionsRow);
 }
 
-function buildShapeCreator(panel: HTMLElement, sandbox: Sandbox, materials: MaterialsHook) {
+function buildShapeCreator(
+  panel: HTMLElement, sandbox: Sandbox, materials: MaterialsHook, onLibrary: () => void,
+): (e: RevEntry) => void {
   // profile expression: radius as a function of x (the axis), revolved into a solid.
   // A MathLive field — math renders in place as you type, Desmos-style.
   const exprField = el('div', '', 'field');
@@ -379,13 +481,16 @@ function buildShapeCreator(panel: HTMLElement, sandbox: Sandbox, materials: Mate
   nums.append(labeled('from', aInput), labeled('to', bInput), labeled('density', dInput));
   panel.append(nums);
 
-  // preset buttons
+  // preset buttons + the full catalog behind "More…"
   const presets = el('div', '', 'row wrap');
   for (const p of REV_PRESETS) {
     const b = el('button', p.name, 'mini');
     b.onclick = () => { rev.set(p.expr); aInput.value = String(p.a); bInput.value = String(p.b); refresh(true); };
     presets.append(b);
   }
+  const bMore = el('button', 'More…', 'mini more');
+  bMore.onclick = onLibrary;
+  presets.append(bMore);
   panel.append(presets);
 
   // live mass/volume preview (this is the differentiator — exact analytic mass before you drop it)
@@ -427,9 +532,19 @@ function buildShapeCreator(panel: HTMLElement, sandbox: Sandbox, materials: Mate
   };
 
   refresh();
+
+  return (e) => {
+    panel.parentElement?.classList.remove('collapsed'); // pop the section open so the fields show
+    rev.set(e.expr);
+    aInput.value = String(e.a);
+    bInput.value = String(e.b);
+    refresh(true);
+  };
 }
 
-function buildCurveCreator(panel: HTMLElement, sandbox: Sandbox, materials: MaterialsHook) {
+function buildCurveCreator(
+  panel: HTMLElement, sandbox: Sandbox, materials: MaterialsHook, onLibrary: () => void,
+): (e: CurveEntry) => void {
   // x(t), y(t), z(t) — a tube swept along the curve (springs, knots, rings).
   // MathLive fields: math renders in place as you type, Desmos-style.
   const fields: Record<'xt' | 'yt' | 'zt', MathField> = {} as never;
@@ -468,6 +583,9 @@ function buildCurveCreator(panel: HTMLElement, sandbox: Sandbox, materials: Mate
     b.onclick = () => { applyPreset(p); refresh(true); };
     presets.append(b);
   }
+  const bMore = el('button', 'More…', 'mini more');
+  bMore.onclick = onLibrary;
+  presets.append(bMore);
   panel.append(presets);
 
   const preview = el('div', '', 'preview');
@@ -513,9 +631,17 @@ function buildCurveCreator(panel: HTMLElement, sandbox: Sandbox, materials: Mate
   };
 
   refresh();
+
+  return (e) => {
+    panel.parentElement?.classList.remove('collapsed');
+    applyPreset(e);
+    refresh(true);
+  };
 }
 
-function buildSurfaceCreator(panel: HTMLElement, sandbox: Sandbox, materials: MaterialsHook) {
+function buildSurfaceCreator(
+  panel: HTMLElement, sandbox: Sandbox, materials: MaterialsHook, onLibrary: () => void,
+): (e: SurfEntry) => void {
   // x(u,v), y(u,v), z(u,v) — a sheet in space, dropped in as a thin shell (any surface) or a
   // filled solid (closed surfaces only — auto-detected). MathLive fields, Desmos-style.
   const fields: Record<'xuv' | 'yuv' | 'zuv', MathField> = {} as never;
@@ -582,6 +708,9 @@ function buildSurfaceCreator(panel: HTMLElement, sandbox: Sandbox, materials: Ma
     b.onclick = () => { applyPreset(p); refresh(true); };
     presets.append(b);
   }
+  const bMore = el('button', 'More…', 'mini more');
+  bMore.onclick = onLibrary;
+  presets.append(bMore);
   panel.append(presets);
 
   const preview = el('div', '', 'preview');
@@ -629,9 +758,17 @@ function buildSurfaceCreator(panel: HTMLElement, sandbox: Sandbox, materials: Ma
   };
 
   refresh();
+
+  return (e) => {
+    panel.parentElement?.classList.remove('collapsed');
+    applyPreset(e);
+    refresh(true);
+  };
 }
 
-function buildImplicitCreator(panel: HTMLElement, sandbox: Sandbox, materials: MaterialsHook) {
+function buildImplicitCreator(
+  panel: HTMLElement, sandbox: Sandbox, materials: MaterialsHook, onLibrary: () => void,
+): (e: ImpEntry) => void {
   // f(x,y,z) — the object is everywhere f < 0, trimmed to a cube of half-extent `size`.
   // The heaviest creator (a 64³ field per rebuild), so edits are debounced.
   const field = el('div', '', 'field');
@@ -654,6 +791,9 @@ function buildImplicitCreator(panel: HTMLElement, sandbox: Sandbox, materials: M
     b.onclick = () => { mf.set(p.fxyz); sizeInput.value = String(p.size); refresh(true); };
     presets.append(b);
   }
+  const bMore = el('button', 'More…', 'mini more');
+  bMore.onclick = onLibrary;
+  presets.append(bMore);
   panel.append(presets);
 
   const preview = el('div', '', 'preview');
@@ -696,6 +836,13 @@ function buildImplicitCreator(panel: HTMLElement, sandbox: Sandbox, materials: M
   };
 
   refresh();
+
+  return (e) => {
+    panel.parentElement?.classList.remove('collapsed');
+    mf.set(e.fxyz);
+    sizeInput.value = String(e.size);
+    refresh(true);
+  };
 }
 
 function numInput(value: number, title: string): HTMLInputElement {
@@ -752,8 +899,12 @@ function buildInspector(sandbox: Sandbox) {
     const sizeOrShape = e.kind === 'custom'
       ? prop('volume', `${(e.volume ?? 0).toFixed(2)} m³`)
       : prop('size', `${(e.size * 2).toFixed(2)} m`);
+    // swatch shows the material itself: albedo thumbnail for textured presets, color for plain
+    const sw = e.mat.maps?.albedo
+      ? `background-image:url('${e.mat.maps.albedo}');background-size:cover`
+      : `background:#${e.color.getHexString()}`;
     content.innerHTML =
-      `<h3><span>Inspector</span><span class="swatch" style="background:#${e.color.getHexString()}"></span></h3>` +
+      `<h3><span>Inspector</span><span class="swatch" style="${sw}"></span></h3>` +
       prop('id', `#${e.id} · ${e.kind}`) +
       (e.label ? prop('shape', e.label) : '') +
       prop('position', `${t.x.toFixed(1)}, ${t.y.toFixed(1)}, ${t.z.toFixed(1)}`) +
@@ -845,10 +996,10 @@ function buildForcesView(sandbox: Sandbox) {
     if (e.kind === 'custom') { geo = e.mesh!.geometry; ownGeometry = false; }
     else if (e.kind === 'box') { geo = new THREE.BoxGeometry(e.size * 2, e.size * 2, e.size * 2); ownGeometry = true; }
     else { geo = new THREE.SphereGeometry(e.size, 48, 32); ownGeometry = true; }
-    mesh = new THREE.Mesh(geo, new THREE.MeshStandardMaterial({
-      color: e.color, metalness: 0.1, roughness: 0.6,
-      side: e.kind === 'custom' ? THREE.DoubleSide : THREE.FrontSide, // open surfaces have two faces
-    }));
+    // the isolated object wears its real material — same maps and tiling as the world mesh
+    const mat = sandbox.materialFor(e);
+    mat.side = e.kind === 'custom' ? THREE.DoubleSide : THREE.FrontSide; // open surfaces have two faces
+    mesh = new THREE.Mesh(geo, mat);
     geo.computeBoundingSphere();
     const bs = geo.boundingSphere!;
     mesh.position.copy(bs.center).multiplyScalar(-1); // visual middle at the origin

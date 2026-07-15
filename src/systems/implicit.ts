@@ -240,25 +240,58 @@ export function buildImplicit(spec: ImplicitSpec): ImplicitResult {
     posArr[k + 2] = positions[k + 2] - com.z;
     maxRadius = Math.max(maxRadius, Math.hypot(posArr[k], posArr[k + 1], posArr[k + 2]));
   }
+  // normals: topology where the gradient isn't trusted (wall caps), field gradient elsewhere
+  const temp = new THREE.BufferGeometry();
+  temp.setAttribute('position', new THREE.BufferAttribute(posArr, 3));
+  temp.setIndex(indices);
+  temp.computeVertexNormals();
+  const tnor = temp.getAttribute('normal');
+  const normArr = new Float32Array(posArr.length);
+  for (let v = 0; v < posArr.length / 3; v++) {
+    const useGrad = !wallMask[v] && (grads[v * 3] !== 0 || grads[v * 3 + 1] !== 0 || grads[v * 3 + 2] !== 0);
+    normArr[v * 3] = useGrad ? grads[v * 3] : tnor.getX(v);
+    normArr[v * 3 + 1] = useGrad ? grads[v * 3 + 1] : tnor.getY(v);
+    normArr[v * 3 + 2] = useGrad ? grads[v * 3 + 2] : tnor.getZ(v);
+  }
+  temp.dispose();
+
+  // UV: box projection with the axis chosen PER FACE (dominant direction of the face's normals).
+  // A per-vertex choice smears every triangle whose corners straddle two projections into a
+  // visible seam band (the "line through the heart") — so seam vertices are duplicated instead,
+  // giving each face one consistent projection. Normals are copied, so shading stays smooth.
+  const remap = new Map<number, number>(); // vertex*3 + axis → rebuilt vertex index
+  const outPos: number[] = [], outNor: number[] = [], outUv: number[] = [];
+  const outIdx: number[] = [];
+  for (let t = 0; t < indices.length; t += 3) {
+    let sx = 0, sy = 0, sz = 0;
+    for (let c = 0; c < 3; c++) {
+      const v = indices[t + c];
+      sx += normArr[v * 3]; sy += normArr[v * 3 + 1]; sz += normArr[v * 3 + 2];
+    }
+    const ax = Math.abs(sx), ay = Math.abs(sy), az = Math.abs(sz);
+    const axis = ax >= ay && ax >= az ? 0 : ay >= az ? 1 : 2;
+    for (let c = 0; c < 3; c++) {
+      const v = indices[t + c];
+      const key = v * 3 + axis;
+      let ni = remap.get(key);
+      if (ni === undefined) {
+        ni = outPos.length / 3;
+        remap.set(key, ni);
+        const px = posArr[v * 3], py = posArr[v * 3 + 1], pz = posArr[v * 3 + 2];
+        outPos.push(px, py, pz);
+        outNor.push(normArr[v * 3], normArr[v * 3 + 1], normArr[v * 3 + 2]);
+        if (axis === 0) outUv.push(pz / 2, py / 2);
+        else if (axis === 1) outUv.push(px / 2, pz / 2);
+        else outUv.push(px / 2, py / 2);
+      }
+      outIdx.push(ni);
+    }
+  }
   const geometry = new THREE.BufferGeometry();
-  geometry.setAttribute('position', new THREE.BufferAttribute(posArr, 3));
-  geometry.setIndex(indices);
-  geometry.computeVertexNormals(); // topology normals — kept only where the gradient isn't trusted
-  const nor = geometry.getAttribute('normal');
-  for (let v = 0; v < posArr.length / 3; v++) {
-    if (wallMask[v]) continue; // wall caps keep their flat topology normals
-    const gx = grads[v * 3], gy = grads[v * 3 + 1], gz = grads[v * 3 + 2];
-    if (gx || gy || gz) nor.setXYZ(v, gx, gy, gz);
-  }
-  const uvs = new Float32Array((posArr.length / 3) * 2);
-  for (let v = 0; v < posArr.length / 3; v++) {
-    const nx = Math.abs(nor.getX(v)), ny = Math.abs(nor.getY(v)), nz = Math.abs(nor.getZ(v));
-    const px = posArr[v * 3], py = posArr[v * 3 + 1], pz = posArr[v * 3 + 2];
-    if (nx >= ny && nx >= nz) { uvs[v * 2] = pz / 2; uvs[v * 2 + 1] = py / 2; }
-    else if (ny >= nz) { uvs[v * 2] = px / 2; uvs[v * 2 + 1] = pz / 2; }
-    else { uvs[v * 2] = px / 2; uvs[v * 2 + 1] = py / 2; }
-  }
-  geometry.setAttribute('uv', new THREE.BufferAttribute(uvs, 2));
+  geometry.setAttribute('position', new THREE.BufferAttribute(new Float32Array(outPos), 3));
+  geometry.setAttribute('normal', new THREE.BufferAttribute(new Float32Array(outNor), 3));
+  geometry.setAttribute('uv', new THREE.BufferAttribute(new Float32Array(outUv), 2));
+  geometry.setIndex(outIdx);
 
   // ---- collider: occupancy voxels greedy-merged into boxes ----
   let boxes = greedyBoxes(frac, N, BOX_N, size, com);

@@ -39,6 +39,10 @@ A checklist so nothing is lost. `[x]` = in Phase 1 today · `[ ]` = planned (wit
       a marble free-falls through a gyroid's internal voids at exactly g — measured), box-projected
       UVs so materials work, Gyroid/Metaballs/Heart/Blob presets, debounced live preview
 - [ ] Superformula (shells, flowers)
+- [x] **Shape library** — a floating, tabbed catalog window over ~200 machine-validated formulas
+      (`systems/catalog.ts`: 51 revolutions, 51 curves incl. torus-knot & Lissajous families,
+      47 surfaces incl. seashells & superellipsoids, 47 implicits incl. TPMS lattices & CSG);
+      clicking an entry fills the matching creator, pops its section open, live-updates the preview
 - [ ] Freehand draw → extrude/revolve · compound objects · boolean CSG
 - [ ] Convex-decomposition colliders · **GLTF/OBJ/STL import** · big preset catalog
 
@@ -77,8 +81,11 @@ A checklist so nothing is lost. `[x]` = in Phase 1 today · `[ ]` = planned (wit
 - [x] **Free-body forces view** — isolated 3D render of the selection, centered, live orientation,
       force arrows (weight / net / contact / velocity) + values
 - [x] All panels are **windows**: drag by header, resize (contents & mini-renderers reflow)
-- [x] **Collapsible panel sections** — Material / Spawn / three creators / World; creators sit
+- [x] **Collapsible panel sections** — Material / Spawn / creators / World; creators sit
       collapsed until needed, so the panel fits without scrolling; drag the panel by its title
+- [x] **Material-true mini-views** — the shape-preview popup renders in the active material, the
+      free-body view and inspector swatch (albedo thumbnail) render the selected object's own
+      material with its world tiling
 - [x] **Forces window** — floating readout tracked above the selected object: weight m·g, measured
       net force ΣF = m·a, contact/friction/drag decomposition, velocity, momentum, KE, contact count
 - [x] **Delete all** button (below Reset scene) — clears the world without respawning defaults
