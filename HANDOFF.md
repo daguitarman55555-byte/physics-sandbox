@@ -80,8 +80,35 @@ forces view + inspector swatch (albedo thumb) use the selected object's material
 envBoost 2.4 + metalness 0.85 (pure metalness-1 flat faces read as dark mirrors of the dim room).
 Note: Rapier's body.mass() reads 0 in the same JS tick a body is created — it finalizes on the
 next step; not a bug.
-Next: superformula or freehand-draw creators, GLTF/STL import (V-HACD), texture upload, alloy
-composer — or Phase 4 forces & fields.
+Also removed the Peanut implicit preset (its Cassini surface sat in the two-lobe regime: two blobs,
+one body) and fixed the shape-preview KaTeX caption going invisible until the tab was resized (it
+rendered before web fonts loaded → zero-height glyphs; now deferred past layout + re-rendered on
+document.fonts.ready).
+Phase 4 first slice shipped (2026-07-15) — the sandbox becomes playable:
+  • **Force fields** (`systems/fields.ts`) — attractor / repeller / wind / vortex, added at the
+    camera focus (controls.target) with translucent markers; a live global strength slider
+    (sandbox.setFieldStrength) and Clear. Applied as impulse = F·dt each fixed step, before
+    world.step(); frozen bodies are skipped. Radial ∝ mass w/ smooth radius cutoff; wind = constant
+    directional force (not mass-scaled, so light things blow faster); **vortex steers toward a
+    swirl+inward TARGET velocity** (needs the body's current velocity, passed into fieldForce) so
+    objects orbit stably instead of a pure-tangential force flinging them out. Verified: attractor
+    pulled spread 6.0→0.7, vortex holds 8 spheres in a ring.
+  • **Joints** (`systems/joints.ts`) — the **connect tool** clicks two bodies to link them: weld
+    (fixed, frame math preserves current relative pose so no snap), hinge (revolute about world-X),
+    spring (JointData.spring, center-to-center), rope (JointData.rope, center-to-center). NB:
+    spring/rope anchor at each body CENTER (localA=localB=0) so two boxes 2 apart stay ~2 apart;
+    fixed/hinge share a midpoint pivot. Live connector lines updated each frame from anchorWorld();
+    joints auto-removed when either body is deleted (removeJointsFor in deleteEntity + clearJoints
+    in clear).
+  • **Tools** — a left-click mode on the Sandbox (`tool`: grab | connect | freeze | push),
+    intercepted in onPointerDown. Freeze switches a body Dynamic↔Fixed (icy emissive/tint via
+    e.frozen in syncRender); Push applies a camera-forward impulse (mass-scaled ~9 m/s kick).
+  • UI: new collapsible **Tools** and **Fields & Forces** sections (buildToolsSection /
+    buildFieldsSection in ui.ts); joint-type chips show only in Connect mode. All four tools + four
+    fields verified through real UI-button + canvas-pointer clicks.
+Next: joint MOTORS (spin a hinge) + more tools (blow, duplicate), per-object gravity, or buoyancy;
+then Phase 7 save/load + time controls (pause/step/rewind). Also still open: superformula /
+freehand creators, GLTF/STL import (V-HACD), texture upload, alloy composer.
 
 Stability hardening (2026-07-13): dynamic bodies now spawn with CCD enabled and reject deeply-
 overlapping drop points — previously, an overlapping spawn could make Rapier's solver inject a huge

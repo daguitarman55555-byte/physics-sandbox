@@ -22,6 +22,8 @@ import {
 } from './systems/shapes';
 import { buildImplicit, type ImplicitSpec } from './systems/implicit';
 import { PLAIN, type Material } from './systems/materials';
+import { fieldForce, FIELD_INFO, type Field, type FieldKind } from './systems/fields';
+import { buildJoint, anchorWorld, JOINT_INFO, type JointKind } from './systems/joints';
 
 export type Kind = 'box' | 'sphere' | 'custom';
 
@@ -48,7 +50,18 @@ export interface Entity {
   mesh?: THREE.Mesh; // present for kind === 'custom' (unique geometry → its own draw call)
   volume?: number; // m³, for custom shapes (shown in the inspector)
   label?: string; // e.g. "revolution: 1.1 + 0.55*sin(x*0.9)"
+  frozen?: boolean; // Phase 4 freeze tool: body switched to Fixed (held in place until unfrozen)
 }
+
+export type Tool = 'grab' | 'connect' | 'freeze' | 'push';
+
+interface JointRec {
+  id: number; kind: JointKind; a: Entity; b: Entity;
+  joint: RAPIER.ImpulseJoint;
+  localA: THREE.Vector3; localB: THREE.Vector3;
+  line: THREE.Line;
+}
+interface FieldRec { field: Field; marker: THREE.Object3D; }
 
 const FIXED = 1 / 60; // physics timestep — never varies
 const MAX_INSTANCES = 4000;
@@ -78,6 +91,18 @@ export class Sandbox {
   private unitSphere = new THREE.SphereGeometry(1, 48, 32); // smooth silhouette; still one instanced draw
   private texCache = new Map<string, THREE.Texture>(); // loaded PBR maps, keyed by url|repeat
   private customMeshes: THREE.Mesh[] = []; // unique-geometry meshes (Phase 2 shapes), one draw call each
+
+  // Phase 4 — force fields, joints, and interaction tools
+  private fields: FieldRec[] = [];
+  private fieldStrength = 1; // live global multiplier over every field's base strength
+  private fieldGroup = new THREE.Group(); // holds the translucent field markers
+  private joints: JointRec[] = [];
+  private jointGroup = new THREE.Group(); // holds the connector lines
+  private nextFieldId = 0;
+  private nextJointId = 0;
+  tool: Tool = 'grab';
+  jointKind: JointKind = 'hinge';
+  private connectA: Entity | null = null; // first object picked by the connect tool
 
   // interaction. Grabbing is physical: a collider-less kinematic body follows the cursor, tied to
   // the grabbed body by a spherical joint at the exact grab point — so gravity and inertia keep
@@ -110,6 +135,8 @@ export class Sandbox {
   private _p = new THREE.Vector3();
   private _q = new THREE.Quaternion();
   private _s = new THREE.Vector3();
+  private _fieldF = new THREE.Vector3(); // one field's force, summed into _s each step
+  private _fieldV = new THREE.Vector3(); // body velocity handed to fields (the vortex needs it)
 
   constructor(canvas: HTMLCanvasElement) {
     // --- renderer / scene / camera ---
@@ -143,6 +170,8 @@ export class Sandbox {
     this.world = new RAPIER.World({ x: 0, y: this.gravityY, z: 0 });
     this.world.timestep = FIXED;
     this.addGroundCollider();
+
+    this.scene.add(this.fieldGroup, this.jointGroup); // Phase 4 visuals live here
 
     this.buildDefaultScene();
 
@@ -533,11 +562,157 @@ export class Sandbox {
     return e;
   }
 
+  // ---------------------------------------------------------------- Phase 4: tools, fields, joints
+  /** Switch the active left-click tool. Leaving "connect" cancels a half-made connection. */
+  setTool(tool: Tool) {
+    if (tool !== 'connect') this.connectA = null;
+    this.releaseGrab();
+    this.tool = tool;
+  }
+
+  setJointKind(kind: JointKind) { this.jointKind = kind; }
+
+  /** Freeze pins a body in place (switches it to a fixed body); calling again thaws it. */
+  toggleFreeze(e: Entity) {
+    e.frozen = !e.frozen;
+    e.body.setBodyType(e.frozen ? RAPIER.RigidBodyType.Fixed : RAPIER.RigidBodyType.Dynamic, true);
+    if (!e.frozen) e.body.wakeUp();
+  }
+
+  /** Shove a body away from the camera (a quick impulse), scaled by mass for a uniform kick speed. */
+  pushEntity(e: Entity) {
+    if (e.frozen) return;
+    const dir = this.camera.getWorldDirection(this._p).clone();
+    dir.y += 0.15; // a touch upward so things pop up rather than plow straight into the floor
+    dir.normalize();
+    const mass = e.body.mass() || 1;
+    const speed = 9; // m/s
+    e.body.applyImpulse({ x: dir.x * mass * speed, y: dir.y * mass * speed, z: dir.z * mass * speed }, true);
+  }
+
+  /** Connect-tool click handler: first pick selects A, second creates a joint; empty click cancels. */
+  private connectPick(entity: Entity | null) {
+    if (!entity) { this.connectA = null; return; }
+    if (!this.connectA) { this.connectA = entity; this.selected = entity; return; }
+    if (entity === this.connectA) { this.connectA = null; return; }
+    this.createJoint(this.connectA, entity);
+    this.connectA = null;
+  }
+
+  /** Join two bodies with the active joint kind, anchored at the midpoint of their centers. */
+  createJoint(a: Entity, b: Entity) {
+    const ta = a.body.translation(), tb = b.body.translation();
+    const mid = new THREE.Vector3((ta.x + tb.x) / 2, (ta.y + tb.y) / 2, (ta.z + tb.z) / 2);
+    const built = buildJoint(this.jointKind, a.body, b.body, mid);
+    if (!built) return;
+    const joint = this.world.createImpulseJoint(built.data, a.body, b.body, true);
+    a.body.wakeUp(); b.body.wakeUp();
+    const geom = new THREE.BufferGeometry();
+    geom.setAttribute('position', new THREE.BufferAttribute(new Float32Array(6), 3));
+    const line = new THREE.Line(geom, new THREE.LineBasicMaterial({ color: JOINT_INFO[this.jointKind].color }));
+    line.frustumCulled = false;
+    this.jointGroup.add(line);
+    this.joints.push({
+      id: this.nextJointId++, kind: this.jointKind, a, b,
+      joint: joint as RAPIER.ImpulseJoint, localA: built.localA, localB: built.localB, line,
+    });
+  }
+
+  private removeJointRec(rec: JointRec) {
+    this.world.removeImpulseJoint(rec.joint, true);
+    this.jointGroup.remove(rec.line);
+    rec.line.geometry.dispose();
+    (rec.line.material as THREE.Material).dispose();
+  }
+
+  private removeJointsFor(e: Entity) {
+    for (let i = this.joints.length - 1; i >= 0; i--) {
+      if (this.joints[i].a === e || this.joints[i].b === e) {
+        this.removeJointRec(this.joints[i]);
+        this.joints.splice(i, 1);
+      }
+    }
+  }
+
+  clearJoints() {
+    for (const j of this.joints) this.removeJointRec(j);
+    this.joints.length = 0;
+    this.connectA = null;
+  }
+
+  get jointCount(): number { return this.joints.length; }
+
+  /** Add a force field at the current camera look-at point (wind is a global directional force). */
+  addField(kind: FieldKind) {
+    const info = FIELD_INFO[kind];
+    const c = this.controls.target;
+    const field: Field = {
+      id: this.nextFieldId++, kind,
+      pos: new THREE.Vector3(c.x, Math.max(c.y, 2), c.z),
+      dir: new THREE.Vector3(1, 0, 0), // wind blows +X by default
+      strength: info.strength, radius: info.radius,
+    };
+    const marker = this.makeFieldMarker(field);
+    this.fieldGroup.add(marker);
+    this.fields.push({ field, marker });
+    for (const e of this.entities) e.body.wakeUp();
+  }
+
+  clearFields() {
+    for (const f of this.fields) this.disposeMarker(f.marker);
+    this.fieldGroup.clear();
+    this.fields.length = 0;
+  }
+
+  setFieldStrength(v: number) {
+    this.fieldStrength = v;
+    for (const e of this.entities) e.body.wakeUp();
+  }
+
+  get fieldCount(): number { return this.fields.length; }
+
+  private makeFieldMarker(field: Field): THREE.Object3D {
+    const info = FIELD_INFO[field.kind];
+    const g = new THREE.Group();
+    g.position.copy(field.pos);
+    if (field.kind === 'wind') {
+      g.add(new THREE.ArrowHelper(field.dir, new THREE.Vector3(), 3.2, info.color, 1, 0.7));
+      return g;
+    }
+    g.add(new THREE.Mesh(
+      new THREE.SphereGeometry(field.radius, 24, 16),
+      new THREE.MeshBasicMaterial({ color: info.color, transparent: true, opacity: 0.07, depthWrite: false }),
+    ));
+    g.add(new THREE.Mesh(
+      new THREE.SphereGeometry(0.32, 16, 12),
+      new THREE.MeshBasicMaterial({ color: info.color, transparent: true, opacity: 0.75 }),
+    ));
+    if (field.kind === 'vortex') {
+      const ring = new THREE.Mesh(
+        new THREE.TorusGeometry(field.radius * 0.62, 0.05, 8, 44),
+        new THREE.MeshBasicMaterial({ color: info.color, transparent: true, opacity: 0.5 }),
+      );
+      ring.rotation.x = Math.PI / 2;
+      g.add(ring);
+    }
+    return g;
+  }
+
+  private disposeMarker(m: THREE.Object3D) {
+    m.traverse((o) => {
+      const mesh = o as THREE.Mesh;
+      if (mesh.geometry) mesh.geometry.dispose();
+      if (mesh.material) (mesh.material as THREE.Material).dispose();
+    });
+  }
+
   /** Remove a single entity: physics body (+ colliders), render mesh, registry, selection/grab. */
   deleteEntity(e: Entity) {
     const i = this.entities.indexOf(e);
     if (i < 0) return;
     if (this.grab?.entity === e) this.releaseGrab(); // before the body goes — the joint refs it
+    this.removeJointsFor(e); // joints reference the body — drop them before it's gone
+    if (this.connectA === e) this.connectA = null;
     this.world.removeRigidBody(e.body);
     if (e.mesh) {
       this.scene.remove(e.mesh);
@@ -553,6 +728,7 @@ export class Sandbox {
 
   clear() {
     this.releaseGrab(); // before bodies go — the joint refs one of them
+    this.clearJoints(); // joints reference bodies — remove them before the bodies
     for (const e of this.entities) {
       this.world.removeRigidBody(e.body);
       if (e.mesh) {
@@ -636,6 +812,26 @@ export class Sandbox {
       this.grab.entity.body.wakeUp();
     }
 
+    // force fields: sum each field's force on every awake dynamic body, apply as impulse = F·dt
+    if (this.fields.length) {
+      for (const e of this.entities) {
+        if (e.frozen) continue;
+        const t = e.body.translation();
+        this._p.set(t.x, t.y, t.z);
+        const v = e.body.linvel();
+        this._fieldV.set(v.x, v.y, v.z);
+        const mass = e.body.mass();
+        this._s.set(0, 0, 0);
+        for (const { field } of this.fields) {
+          fieldForce(field, this._p, this._fieldV, mass, this.fieldStrength, this._fieldF);
+          this._s.add(this._fieldF);
+        }
+        if (this._s.x || this._s.y || this._s.z) {
+          e.body.applyImpulse({ x: this._s.x * FIXED, y: this._s.y * FIXED, z: this._s.z * FIXED }, true);
+        }
+      }
+    }
+
     this.world.step();
 
     for (const e of this.entities) {
@@ -679,17 +875,20 @@ export class Sandbox {
         mesh.position.copy(this._p);
         mesh.quaternion.copy(this._q);
         const selMat = mesh.material as THREE.MeshStandardMaterial;
-        selMat.emissive.setHex(e === this.selected ? 0x3a4152 : 0x000000);
+        // frozen reads as an icy glow; selection as a warm-grey lift; else no emissive
+        selMat.emissive.setHex(e.frozen ? 0x1c4a7a : e === this.selected ? 0x3a4152 : 0x000000);
         continue;
       }
       const scale = e.kind === 'box' ? e.size * 2 : e.size; // box geo is unit cube; sphere geo is unit radius
       this._s.setScalar(scale);
       this._m.compose(this._p, this._q, this._s);
-      // plain pool: palette color per instance (white when selected). Textured pool: instanceColor
-      // multiplies the map — white normally, a >1 blue-ish tint to highlight the selection.
-      const col = e.mat.maps
-        ? (e === this.selected ? SELECT_TINT : WHITE)
-        : (e === this.selected ? SELECT_COLOR : e.color);
+      // frozen → icy tint (takes priority so you can see what's held); else selected → highlight;
+      // else the base look. Textured pools tint via instanceColor (multiplies the map).
+      const col = e.frozen
+        ? (e.mat.maps ? FROZEN_TINT : FROZEN_COLOR)
+        : e.mat.maps
+          ? (e === this.selected ? SELECT_TINT : WHITE)
+          : (e === this.selected ? SELECT_COLOR : e.color);
       const pool = this.getPool(e.kind as 'box' | 'sphere', e.mat);
       const i = pool.slots.length;
       pool.mesh.setMatrixAt(i, this._m);
@@ -700,6 +899,16 @@ export class Sandbox {
       pool.mesh.count = pool.slots.length;
       pool.mesh.instanceMatrix.needsUpdate = true;
       if (pool.mesh.instanceColor) pool.mesh.instanceColor.needsUpdate = true;
+    }
+
+    // redraw each joint's connector line between its two live anchor points
+    for (const j of this.joints) {
+      anchorWorld(j.a.body, j.localA, this._p);
+      anchorWorld(j.b.body, j.localB, this._s);
+      const pos = j.line.geometry.getAttribute('position') as THREE.BufferAttribute;
+      pos.setXYZ(0, this._p.x, this._p.y, this._p.z);
+      pos.setXYZ(1, this._s.x, this._s.y, this._s.z);
+      pos.needsUpdate = true;
     }
   }
 
@@ -764,9 +973,21 @@ export class Sandbox {
     if (e.button !== 0) return; // left button = pick/drag; right/middle handled by OrbitControls
     this.pointerDownAt = { x: e.clientX, y: e.clientY };
     this.setPointer(e);
+
+    // non-grab tools act on the picked object (or empty space) and never start a drag
+    if (this.tool !== 'grab') {
+      const picked = this.pick();
+      if (picked) this.selected = picked.entity;
+      if (this.tool === 'freeze' && picked) this.toggleFreeze(picked.entity);
+      else if (this.tool === 'push' && picked) this.pushEntity(picked.entity);
+      else if (this.tool === 'connect') this.connectPick(picked?.entity ?? null);
+      return; // let OrbitControls keep the drag for camera moves
+    }
+
     const hit = this.pick();
     if (hit) {
       this.releaseGrab(); // a second press mid-grab (multi-touch, missed pointerup) must not leak the joint
+      if (hit.entity.frozen) { this.selected = hit.entity; return; } // frozen bodies don't grab
       this.selected = hit.entity;
       // start a drag on a camera-facing plane through the grab point
       const body = hit.entity.body;
@@ -861,3 +1082,5 @@ export class Sandbox {
 const SELECT_COLOR = new THREE.Color('#ffffff');
 const WHITE = new THREE.Color(1, 1, 1);
 const SELECT_TINT = new THREE.Color(1.5, 1.6, 1.9); // >1 brightens the texture under the tint
+const FROZEN_COLOR = new THREE.Color('#8fc4ff'); // plain frozen bodies: icy blue
+const FROZEN_TINT = new THREE.Color(0.7, 0.95, 1.6); // textured frozen bodies: cool tint over the map

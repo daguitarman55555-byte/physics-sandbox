@@ -18,6 +18,9 @@ import {
 } from './systems/catalog';
 import { exprToLatex } from './systems/expr';
 import { PLAIN, PRESETS as MATERIALS, type Material } from './systems/materials';
+import { FIELD_INFO, type FieldKind } from './systems/fields';
+import { JOINT_INFO, type JointKind } from './systems/joints';
+import type { Tool } from './sandbox';
 
 // fonts come from the CSS import above; no sounds, no popup keyboard — it's a typed input
 MathfieldElement.fontsDirectory = null;
@@ -454,6 +457,12 @@ function buildPanel(sandbox: Sandbox) {
     implicit: buildImplicitCreator(section(panel, 'Create · implicit f(x,y,z)', false), sandbox, materials, () => openLib('implicit')),
   };
 
+  // --- Phase 4: interaction tools ---
+  buildToolsSection(section(panel, 'Tools', false), sandbox);
+
+  // --- Phase 4: force fields ---
+  buildFieldsSection(section(panel, 'Fields & Forces', false), sandbox);
+
   // --- world ---
   const worldBody = section(panel, 'World', true);
   const field = el('div', '', 'field');
@@ -872,6 +881,88 @@ function buildImplicitCreator(
     sizeInput.value = String(e.size);
     refresh(true);
   };
+}
+
+/** Tools section: the left-click mode (Grab / Connect / Freeze / Push) + the joint-type picker. */
+function buildToolsSection(panel: HTMLElement, sandbox: Sandbox) {
+  const toolDefs: Array<[Tool, string]> = [['grab', 'Grab'], ['connect', 'Connect'], ['freeze', 'Freeze'], ['push', 'Push']];
+  const toolHints: Record<Tool, string> = {
+    grab: 'Left-drag an object to move & throw it.',
+    connect: 'Click two objects to link them, using the joint below.',
+    freeze: 'Click an object to pin it in place; click again to release.',
+    push: 'Click an object to shove it away from the camera.',
+  };
+  const hint = el('div', '', 'preview');
+  const jointRow = el('div', '', 'row wrap');
+  const toolBtns = {} as Record<Tool, HTMLButtonElement>;
+
+  const setTool = (t: Tool) => {
+    sandbox.setTool(t);
+    for (const k of Object.keys(toolBtns) as Tool[]) toolBtns[k].classList.toggle('primary', k === t);
+    hint.textContent = toolHints[t];
+    jointRow.style.display = t === 'connect' ? '' : 'none'; // joint picker only matters for Connect
+  };
+
+  const toolRow = el('div', '', 'row wrap');
+  for (const [t, label] of toolDefs) {
+    const b = el('button', label, 'mini');
+    b.onclick = () => setTool(t);
+    toolBtns[t] = b;
+    toolRow.append(b);
+  }
+  panel.append(toolRow);
+
+  const jointBtns = {} as Record<JointKind, HTMLButtonElement>;
+  const setJoint = (k: JointKind) => {
+    sandbox.setJointKind(k);
+    for (const kk of Object.keys(jointBtns) as JointKind[]) jointBtns[kk].classList.toggle('on', kk === k);
+  };
+  for (const k of Object.keys(JOINT_INFO) as JointKind[]) {
+    const b = el('button', JOINT_INFO[k].label, 'mini chip');
+    b.onclick = () => setJoint(k);
+    jointBtns[k] = b;
+    jointRow.append(b);
+  }
+  panel.append(jointRow, hint);
+  setJoint(sandbox.jointKind);
+  setTool('grab');
+}
+
+/** Fields section: add attractor/repeller/wind/vortex at the camera focus, a strength slider, clear. */
+function buildFieldsSection(panel: HTMLElement, sandbox: Sandbox) {
+  const info = el('div', '', 'preview');
+  const updateInfo = () => {
+    info.textContent = sandbox.fieldCount
+      ? `${sandbox.fieldCount} field(s) active. New fields appear at your view's center.`
+      : "Fields appear at your view's center — orbit/pan to aim, then add one.";
+  };
+
+  const addRow = el('div', '', 'row wrap');
+  for (const k of Object.keys(FIELD_INFO) as FieldKind[]) {
+    const b = el('button', FIELD_INFO[k].label, 'mini');
+    b.onclick = () => { sandbox.addField(k); updateInfo(); };
+    addRow.append(b);
+  }
+  panel.append(addRow);
+
+  const sField = el('div', '', 'field');
+  const sLabel = el('label', 'Field strength <b>1.0</b>');
+  const sRange = el('input');
+  sRange.type = 'range'; sRange.min = '0'; sRange.max = '3'; sRange.step = '0.1'; sRange.value = '1';
+  sRange.oninput = () => {
+    const v = parseFloat(sRange.value);
+    sandbox.setFieldStrength(v);
+    sLabel.querySelector('b')!.textContent = v.toFixed(1);
+  };
+  sField.append(sLabel, sRange);
+  panel.append(sField);
+
+  const clearRow = el('div', '', 'row');
+  const bClear = el('button', 'Clear fields', 'danger');
+  bClear.onclick = () => { sandbox.clearFields(); updateInfo(); };
+  clearRow.append(bClear);
+  panel.append(info, clearRow);
+  updateInfo();
 }
 
 function numInput(value: number, title: string): HTMLInputElement {

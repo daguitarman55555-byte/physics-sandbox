@@ -59,9 +59,19 @@ A checklist so nothing is lost. `[x]` = in Phase 1 today · `[ ]` = planned (wit
 
 ## Forces & fields — `systems/fields.ts` (Phase 4)
 - [ ] Gravity direction/strength/per-object/zero-G
-- [ ] Force fields: attractor · repeller · wind · vortex · buoyancy zone
-- [ ] Joints & motors: hinge · slider · spring · fixed · rope
-- [ ] Tools: push · blow · freeze · duplicate · delete
+- [x] **Force fields** (`systems/fields.ts`) — attractor · repeller · wind · vortex, added at the
+      camera's focus point with translucent markers, a live global strength slider, and clear-all.
+      Radial fields pull/push ∝ mass with a smooth radius cutoff; wind is a constant directional
+      force; the **vortex steers bodies toward a swirl+inward target velocity** so they orbit stably
+      instead of flinging out (verified: 8 spheres hold a ring inside the radius). Applied as
+      impulse = F·dt each fixed step.
+- [x] **Joints** (`systems/joints.ts`) — the **connect tool** (click two objects): **weld** (fixed,
+      no snap) · **hinge** (revolute, swings) · **spring** (damped tether) · **rope** (max-distance
+      link). Live connector lines; removed automatically when either body is deleted. (Motors/slider
+      still to come.)
+- [x] **Tools** — a left-click **mode** selector: Grab (default) · Connect · **Freeze** (pin a body
+      in place, icy tint; click again to release) · **Push** (shove away from the camera). (Blow /
+      duplicate still to come.)
 
 ## Effects & chemistry — `systems/effects.ts`, `systems/chemistry.ts` (Phase 5)
 - [ ] Temperature: heat sources · conduction · thermal expansion · melt→swap (Module T rule)
