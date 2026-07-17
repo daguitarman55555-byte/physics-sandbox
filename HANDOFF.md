@@ -341,8 +341,29 @@ Build 4 (last of the 4) shipped as TWO commits (2026-07-17):
     pointer events + direct stepping: push cleared 48→5 near the point, pull held them, swirl gave
     tangential speed 4.5; controls restored on pointerup; no console errors.
 ALL FOUR of Rafael's picks are now DONE (draw-a-force, lift, turbulence, brush+auto-fit).
-STILL OPEN (Rafael asked, not yet built): TRUE-3D DRAWING for the draw tool — per-point depth so a single
-stroke isn't planar (draw-then-lift, or scroll-wheel-sets-height while drawing). Natural follow-up to build 1.
+Draw reworked into a GRID CANVAS + base size 10 (2026-07-17):
+ • BASE SIZE 10 — every FIELD_INFO.size is now 10 (was 6; well was 16, turbulence 6). Path's tube stays 4
+   but its base curve `scale` in beginPlace is now 10 (the path's "size" is the curve, not the tube). NB
+   the well going 16→10 slightly cuts its default reach on a big crowd — the Fit-to-objects button covers it.
+ • DRAW CANVAS — the old 'draw' TOOL is GONE (removed from the Tool union + Tools section). Draw now starts
+   from a **"✎ Draw a flow" button in the Fields panel** → `Sandbox.beginDraw()` spawns a white GridHelper
+   (+ faint fill plane) at controls.target, oriented to FACE THE CAMERA (setFromUnitVectors(_UP, toCam)) so
+   you sketch straight onto it. A `this.draw` session owns BOTH mouse buttons (OrbitControls suspended):
+   onPointerDown/Move/Up route to onDrawDown/Move/Up. LEFT-drag = draw (raycast onto the grid plane, points
+   spaced ≥0.12) or erase (screen-space, remove pts within 16px). RIGHT-drag = `rotateGrid` (yaw about world
+   up + pitch about camera-right; drawn points stay in WORLD space so you rotate then keep drawing → real 3D
+   curve). Grid plane rebuilt on every rotate (`refreshDrawPlane`, normal = quat·+Y). commitDraw → the
+   existing `createDrawnPath` (unchanged) makes a live 'path'/'Drawn' field; clearDraw restarts; cancelDraw/
+   endDraw disposes the grid + restores controls. Keys: Enter=place, Esc=cancel, E=toggle erase (added at TOP
+   of onKeyDown, before the activeField guard). contextmenu is preventDefault'd while drawing so right-drag
+   doesn't pop the browser menu. UI: buildFieldsSection has the start button + a draw panel (Draw/Erase chips,
+   Place/Clear/Cancel) toggled by `sandbox.onDrawChange`. Verified via synthetic PointerEvents: grid appears,
+   58-pt spiral captured, right-drag rotated 0.8 rad, erase 21→14, commit made a path/'Drawn' field, objects
+   follow it; all field defaults read 10; no console errors. NB the screenshot tool was timing out this
+   session (app rendered fine, fps 20, no errors) so this build has functional verification but no new
+   screenshot — re-shoot next session if Rafael wants the visual.
+STILL OPEN: none of Rafael's explicit asks remain — the grid canvas delivers the true-3D drawing that was
+the last follow-up. Possible nexts: scroll-to-set-grid-height while drawing; snap the grid to axis planes.
 STANDING RULE (Rafael, 2026-07-16): git commit AND push after EVERY build — don't wait to be asked.
 
 Stability hardening (2026-07-13): dynamic bodies now spawn with CCD enabled and reject deeply-

@@ -69,6 +69,8 @@ A checklist so nothing is lost. `[x]` = in Phase 1 today · `[ ]` = planned (wit
       now **selectable** (click a field's core dot), **movable**, and **deletable individually**
       (**Del**) — previously the only recourse for a misplaced field was Clear-all. **Per-field**
       strength/radius are editable live (they used to be fixed presets under one global multiplier).
+      Every field's **base region size is 10** (radius / half-extent) so they all start the same roomy
+      size; the path/flow's base **curve size is 10** too, with a snug tube of 4.
 - [x] **Path (flow) field** — the vortex generalized to any curve: bodies inside a **tube** around a
       flow curve are steered to ride ALONG it (look-ahead steering, so fast flow on a tight loop
       doesn't fling out) and drawn onto it, with an optional **swirl** that corkscrews them *around*
@@ -97,15 +99,16 @@ A checklist so nothing is lost. `[x]` = in Phase 1 today · `[ ]` = planned (wit
       field can be **hidden** (marker invisible, force still acting), toggled from the editor or a
       per-row eye in the **field list** (which also keeps hidden fields selectable). Applied as
       impulse = F·dt each fixed step.
-- [x] **Draw a flow** (`Draw flow` tool) — sketch a force by hand: with the tool active, **left-drag
-      on the scene** and your stroke (raycast onto a horizontal plane through the camera focus) becomes
-      a live **path (flow) field** along the line you drew — objects then follow your squiggle. It reuses
-      the whole `pathForce` engine, so a drawn curve steers exactly like a preset. The stroke is
-      simplified, centred, normalized (stored as `path.drawn` unit points so the size input can re-scale
-      it — there's no equation to re-sample), and its **closure is auto-detected** (draw a loop → it
-      wraps; draw an open squiggle → bodies flow off the end). The result is a normal path field: move /
-      **tilt it (R / gizmo)**, resize its tube, add swirl, or delete it like any other. (Drawing is on a
-      plane, so a single stroke is planar-in-3D; true per-point depth — draw-then-lift — is a follow-up.)
+- [x] **Draw a flow** (a **"✎ Draw a flow" button in the Fields & Forces panel**) — click it and a
+      **floating white grid canvas** appears at the view centre, facing you. **Left-drag** sketches a
+      stroke onto the grid; **right-drag tumbles the grid** so a single continuous stroke can climb into
+      **true 3D** (drawn points stay put in world space, so you rotate the easel and keep drawing at a new
+      angle); an **Erase** mode (or **E**) rubs points out in screen space. **Place** (or **Enter**) turns
+      the polyline into a live **path (flow) field**; **Clear** restarts the sketch; **Cancel** / **Esc**
+      closes it. Reuses the whole `pathForce` engine, so a drawn curve steers exactly like a preset; the
+      stroke is simplified, centred, normalized (stored as `path.drawn` unit points so the size input can
+      re-scale it), and its **closure is auto-detected**. The result is a normal path field — move / tilt
+      (R / gizmo), resize its tube, toggle Lift, add swirl, or delete it like any other.
 - [x] **Lift inside a flow tube** (path fields, `Lift` toggle) — suspend world gravity for bodies inside
       a flow tube (∝ the same smoothstep tube influence, via `pathInfluence`), so they ride a rising or
       3D curve **up into the air** instead of dropping out the bottom and stalling on the floor — a

@@ -54,7 +54,7 @@ export interface Entity {
   frozen?: boolean; // Phase 4 freeze tool: body switched to Fixed (held in place until unfrozen)
 }
 
-export type Tool = 'grab' | 'connect' | 'freeze' | 'push' | 'draw' | 'brush';
+export type Tool = 'grab' | 'connect' | 'freeze' | 'push' | 'brush';
 export type BrushMode = 'push' | 'pull' | 'swirl';
 
 interface JointRec {
@@ -153,9 +153,23 @@ export class Sandbox {
   selected: Entity | null = null;
   private pointerDownAt = { x: 0, y: 0 };
   private lastPointerPx = { x: 0, y: 0 };
-  // freehand "draw a flow" tool: a stroke sketched on a horizontal plane, turned into a path field
-  private stroke: { pts: THREE.Vector3[]; line: THREE.Line } | null = null;
-  private drawPlane = new THREE.Plane();
+  // "Draw a flow" — a floating white grid you sketch on (started from the Fields panel). Left-drag draws
+  // a stroke onto the grid; right-drag tumbles the grid so you can build a curve in 3D; erase mode rubs
+  // points out. The accumulated polyline becomes a live flow (path) field on Place.
+  private draw: {
+    group: THREE.Group; // the white grid canvas (grid lines + a faint fill so it reads as a surface)
+    quat: THREE.Quaternion; // grid orientation — right-drag rotates this
+    center: THREE.Vector3; // grid centre; the drawing plane passes through here
+    plane: THREE.Plane; // the current drawing plane (rebuilt whenever the grid turns)
+    pts: THREE.Vector3[]; // accumulated world-space points (the flow curve, across any grid rotations)
+    line: THREE.Line; // bright preview polyline through pts
+    mode: 'draw' | 'erase';
+    stroking: boolean; // left button held (adding / erasing points)
+    rotating: boolean; // right button held (tumbling the grid)
+    lastPtr: { x: number; y: number };
+  } | null = null;
+  onDrawChange?: () => void; // UI hook: the draw panel re-renders when a session starts/ends/switches mode
+  private drawPlane = new THREE.Plane(); // scratch plane reused by the force brush
   // force brush: hold + drag to push / pull / swirl objects near the cursor, live (no placed field)
   private brushActive = false;
   private brushMode: BrushMode = 'push';
@@ -235,6 +249,8 @@ export class Sandbox {
     addEventListener('pointermove', this.onPointerMove);
     addEventListener('pointerup', this.onPointerUp);
     addEventListener('keydown', this.onKeyDown);
+    // while drawing, right-drag rotates the grid — swallow the browser context menu so it doesn't pop
+    canvas.addEventListener('contextmenu', (e) => { if (this.draw) e.preventDefault(); });
   }
 
   // ---------------------------------------------------------------- scene setup
@@ -891,6 +907,7 @@ export class Sandbox {
   /** Start placing a new field: spawns the ghost at the view centre. Nothing acts until committed. */
   beginPlace(kind: FieldKind) {
     this.cancelPlace();
+    this.cancelDraw(); // starting a field closes an open draw canvas
     this.selectField(null);
     const info = FIELD_INFO[kind];
     const c = this.controls.target;
@@ -907,7 +924,7 @@ export class Sandbox {
       strength: info.strength, hidden: false,
     };
     if (kind === 'path') {
-      const scale = 3;
+      const scale = 10; // base flow-curve size (matches the other fields' base region of 10)
       const q = PATH_PRESETS.circle; // a circle to start (that's just the plain vortex)
       const spec: CurveSpec = { xt: q.xt, yt: q.yt, zt: q.zt, t0: q.t0, t1: q.t1 };
       const s = samplePath(spec, scale)!;
@@ -1665,13 +1682,11 @@ export class Sandbox {
   }
 
   private onPointerDown = (e: PointerEvent) => {
+    if (this.draw) { this.onDrawDown(e); return; } // a draw session owns BOTH mouse buttons
     if (e.button !== 0) return; // left button = pick/drag; right/middle handled by OrbitControls
     if (this.transform.axis !== null) return; // the placement gizmo owns this click
     this.pointerDownAt = { x: e.clientX, y: e.clientY };
     this.setPointer(e);
-
-    // draw tool: left-drag sketches a flow curve on a horizontal plane; nothing else claims the click
-    if (this.tool === 'draw') { this.beginStroke(); return; }
 
     // brush tool: hold + drag to push / pull / swirl nearby objects live (force applied each step)
     if (this.tool === 'brush') {
@@ -1772,7 +1787,7 @@ export class Sandbox {
   }
 
   private onPointerMove = (e: PointerEvent) => {
-    if (this.stroke) { this.extendStroke(e); return; }
+    if (this.draw) { this.onDrawMove(e); return; }
     if (this.brushActive) { this.setPointer(e); this.updateBrushPoint(); return; }
     if (!this.grab) return;
     this.setPointer(e);
@@ -1780,8 +1795,8 @@ export class Sandbox {
     if (hit) this.grab.target.copy(hit);
   };
 
-  private onPointerUp = (_e: PointerEvent) => {
-    if (this.stroke) { this.finishStroke(); return; }
+  private onPointerUp = (e: PointerEvent) => {
+    if (this.draw) { this.onDrawUp(e); return; }
     if (this.brushActive) { this.brushActive = false; this.controls.enabled = true; return; }
     this.releaseGrab();
   };
@@ -1827,46 +1842,152 @@ export class Sandbox {
     }
   }
 
-  // ---------------------------------------------------------------- draw a flow (freehand path field)
-  /** Start a stroke: sketch on a HORIZONTAL plane through the camera focus height, so the drawn flow
-   *  sits at a sensible height over the objects. OrbitControls is suspended for the duration. */
-  private beginStroke() {
+  // ---------------------------------------------------------------- draw a flow (grid canvas → path field)
+  /**
+   * Open the draw canvas: a floating white grid at the view centre, facing the camera so you sketch
+   * straight onto it. Left-drag draws; right-drag tumbles the grid (so a stroke can climb into 3D);
+   * erase mode rubs points out. OrbitControls is suspended — the grid owns both mouse buttons — until
+   * you Place (→ a live flow field), Clear, or Cancel.
+   */
+  beginDraw() {
+    if (this.draw) return;
     this.cancelPlace();
     this.selectField(null);
-    this.drawPlane.setFromNormalAndCoplanarPoint(_UP, new THREE.Vector3(0, this.controls.target.y, 0));
-    const hit = this.raycaster.ray.intersectPlane(this.drawPlane, new THREE.Vector3());
-    if (!hit) return;
-    const line = new THREE.Line(
-      new THREE.BufferGeometry().setFromPoints([hit]),
-      new THREE.LineBasicMaterial({ color: FIELD_INFO.path.color }),
+    const center = this.controls.target.clone();
+    const grid = new THREE.GridHelper(20, 20, 0xffffff, 0x9fb2c8);
+    const gm = grid.material as THREE.Material;
+    gm.transparent = true; gm.opacity = 0.55; gm.depthWrite = false;
+    const fill = new THREE.Mesh(
+      new THREE.PlaneGeometry(20, 20),
+      new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.05, side: THREE.DoubleSide, depthWrite: false }),
     );
+    fill.rotation.x = -Math.PI / 2; // PlaneGeometry is in XY; lay it into the grid's XZ plane
+    const group = new THREE.Group();
+    group.add(grid, fill);
+    group.position.copy(center);
+    // orient the grid so its face (local +Y normal) points at the camera — you draw onto a surface
+    // that's squarely in front of you, like a sketchpad held up to the screen
+    const toCam = this.camera.position.clone().sub(center).normalize();
+    const quat = new THREE.Quaternion().setFromUnitVectors(_UP, toCam);
+    group.quaternion.copy(quat);
+    this.scene.add(group);
+    const line = new THREE.Line(new THREE.BufferGeometry(), new THREE.LineBasicMaterial({ color: FIELD_INFO.path.color }));
     line.frustumCulled = false;
     this.scene.add(line);
-    this.stroke = { pts: [hit], line };
+    this.draw = { group, quat, center, plane: new THREE.Plane(), pts: [], line, mode: 'draw', stroking: false, rotating: false, lastPtr: { x: 0, y: 0 } };
+    this.refreshDrawPlane();
     this.controls.enabled = false;
+    this.onDrawChange?.();
   }
 
-  /** Append a point to the live stroke (only if the cursor moved far enough) and redraw the preview. */
-  private extendStroke(e: PointerEvent) {
-    if (!this.stroke) return;
-    this.setPointer(e);
-    const hit = this.raycaster.ray.intersectPlane(this.drawPlane, new THREE.Vector3());
-    if (!hit) return;
-    if (hit.distanceTo(this.stroke.pts[this.stroke.pts.length - 1]) < 0.08) return;
-    this.stroke.pts.push(hit);
-    this.stroke.line.geometry.setFromPoints(this.stroke.pts);
+  setDrawMode(mode: 'draw' | 'erase') { if (this.draw) { this.draw.mode = mode; this.onDrawChange?.(); } }
+  get drawing(): boolean { return this.draw !== null; }
+  get drawMode(): 'draw' | 'erase' { return this.draw?.mode ?? 'draw'; }
+
+  /** Wipe the current sketch but keep the canvas open (start over on the same grid). */
+  clearDraw() {
+    if (!this.draw) return;
+    this.draw.pts = [];
+    this.draw.line.geometry.setFromPoints([]);
   }
 
-  /** Finish the stroke: drop the preview, restore the camera, and turn the polyline into a flow field. */
-  private finishStroke() {
-    if (!this.stroke) return;
-    const pts = this.stroke.pts;
-    this.scene.remove(this.stroke.line);
-    this.stroke.line.geometry.dispose();
-    (this.stroke.line.material as THREE.Material).dispose();
-    this.stroke = null;
+  /** Commit the sketch to a live flow field (if it's long enough) and close the canvas. */
+  commitDraw() {
+    if (!this.draw) return;
+    const pts = this.draw.pts.map((p) => p.clone());
+    this.endDraw();
+    if (pts.length >= 3) this.createDrawnPath(pts);
+  }
+
+  /** Close the canvas without committing. */
+  cancelDraw() { this.endDraw(); }
+
+  private endDraw() {
+    if (!this.draw) return;
+    this.scene.remove(this.draw.group, this.draw.line);
+    this.draw.group.traverse((o) => {
+      const m = o as THREE.Mesh;
+      if (m.geometry) m.geometry.dispose();
+      if (m.material) (Array.isArray(m.material) ? m.material : [m.material]).forEach((mm) => mm.dispose());
+    });
+    this.draw.line.geometry.dispose();
+    (this.draw.line.material as THREE.Material).dispose();
+    this.draw = null;
     this.controls.enabled = true;
-    this.createDrawnPath(pts);
+    this.onDrawChange?.();
+  }
+
+  /** Recompute the drawing plane from the grid's current orientation (its local +Y through the centre). */
+  private refreshDrawPlane() {
+    if (!this.draw) return;
+    const n = _UP.clone().applyQuaternion(this.draw.quat);
+    this.draw.plane.setFromNormalAndCoplanarPoint(n, this.draw.center);
+  }
+
+  private onDrawDown(e: PointerEvent) {
+    const d = this.draw!;
+    d.lastPtr = { x: e.clientX, y: e.clientY };
+    if (e.button === 2) { d.rotating = true; return; } // right button tumbles the grid
+    if (e.button !== 0) return;
+    d.stroking = true;
+    this.setPointer(e);
+    if (d.mode === 'draw') this.addDrawPoint();
+    else this.eraseAt(e.clientX, e.clientY);
+  }
+
+  private onDrawMove(e: PointerEvent) {
+    const d = this.draw!;
+    if (d.rotating) {
+      const dx = e.clientX - d.lastPtr.x, dy = e.clientY - d.lastPtr.y;
+      d.lastPtr = { x: e.clientX, y: e.clientY };
+      this.rotateGrid(dx, dy);
+      return;
+    }
+    if (!d.stroking) return;
+    this.setPointer(e);
+    if (d.mode === 'draw') this.addDrawPoint();
+    else this.eraseAt(e.clientX, e.clientY);
+  }
+
+  private onDrawUp(e: PointerEvent) {
+    const d = this.draw!;
+    if (e.button === 2) { d.rotating = false; return; }
+    d.stroking = false;
+  }
+
+  /** Add the point where the cursor ray meets the grid plane (spaced out so points aren't bunched). */
+  private addDrawPoint() {
+    const d = this.draw!;
+    const hit = this.raycaster.ray.intersectPlane(d.plane, new THREE.Vector3());
+    if (!hit) return;
+    if (d.pts.length && hit.distanceTo(d.pts[d.pts.length - 1]) < 0.12) return;
+    d.pts.push(hit);
+    d.line.geometry.setFromPoints(d.pts);
+  }
+
+  /** Erase drawn points near the cursor in SCREEN space (works no matter how the grid has been turned). */
+  private eraseAt(cx: number, cy: number) {
+    const d = this.draw!;
+    const proj = new THREE.Vector3();
+    const keep = d.pts.filter((p) => {
+      proj.copy(p).project(this.camera);
+      const sx = (proj.x * 0.5 + 0.5) * innerWidth, sy = (1 - (proj.y * 0.5 + 0.5)) * innerHeight;
+      return Math.hypot(sx - cx, sy - cy) > 16;
+    });
+    if (keep.length !== d.pts.length) { d.pts = keep; d.line.geometry.setFromPoints(d.pts); }
+  }
+
+  /** Tumble the grid from a right-drag: yaw about world-up, pitch about the camera's right axis. Drawn
+   *  points stay put in the world, so rotating then drawing more builds the curve up in 3D. */
+  private rotateGrid(dx: number, dy: number) {
+    const d = this.draw!;
+    const k = 0.01; // rad per pixel
+    const yaw = new THREE.Quaternion().setFromAxisAngle(_UP, -dx * k);
+    const right = new THREE.Vector3().setFromMatrixColumn(this.camera.matrixWorld, 0).normalize();
+    const pitch = new THREE.Quaternion().setFromAxisAngle(right, -dy * k);
+    d.quat.premultiply(yaw).premultiply(pitch);
+    d.group.quaternion.copy(d.quat);
+    this.refreshDrawPlane();
   }
 
   /**
@@ -1931,6 +2052,14 @@ export class Sandbox {
    * out. Only active while a field is being placed or is selected, and never while you're typing.
    */
   private onKeyDown = (ev: KeyboardEvent) => {
+    const el = ev.target as HTMLElement | null;
+    const typing = !!el && (el.isContentEditable || ['INPUT', 'TEXTAREA', 'SELECT', 'MATH-FIELD'].includes(el.tagName));
+    // draw canvas shortcuts: Enter places the flow, Esc cancels, E toggles draw/erase
+    if (this.draw && !typing && !ev.metaKey && !ev.ctrlKey && !ev.altKey) {
+      if (ev.key === 'Enter') { this.commitDraw(); return; }
+      if (ev.key === 'Escape') { this.cancelDraw(); return; }
+      if (ev.key.toLowerCase() === 'e') { this.setDrawMode(this.draw.mode === 'draw' ? 'erase' : 'draw'); return; }
+    }
     const rec = this.activeField;
     if (!rec || ev.metaKey || ev.ctrlKey || ev.altKey) return;
     const t = ev.target as HTMLElement | null;

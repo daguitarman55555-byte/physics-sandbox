@@ -885,13 +885,12 @@ function buildImplicitCreator(
 
 /** Tools section: the left-click mode (Grab / Connect / Freeze / Push) + the joint-type picker. */
 function buildToolsSection(panel: HTMLElement, sandbox: Sandbox) {
-  const toolDefs: Array<[Tool, string]> = [['grab', 'Grab'], ['connect', 'Connect'], ['freeze', 'Freeze'], ['push', 'Push'], ['draw', 'Draw flow'], ['brush', 'Brush']];
+  const toolDefs: Array<[Tool, string]> = [['grab', 'Grab'], ['connect', 'Connect'], ['freeze', 'Freeze'], ['push', 'Push'], ['brush', 'Brush']];
   const toolHints: Record<Tool, string> = {
     grab: 'Left-drag an object to move & throw it.',
     connect: 'Click two objects to link them, using the joint below.',
     freeze: 'Click an object to pin it in place; click again to release.',
     push: 'Click an object to shove it away from the camera.',
-    draw: 'Drag on the scene to sketch a flow curve; release and objects follow your line.',
     brush: 'Hold & drag to push / pull / swirl nearby objects, using the mode below.',
   };
   const hint = el('div', '', 'preview');
@@ -962,6 +961,39 @@ function buildFieldsSection(panel: HTMLElement, sandbox: Sandbox) {
     addRow.append(b);
   }
   panel.append(addRow);
+
+  // --- draw a flow: a white grid canvas you sketch on; the drawing becomes a live flow field ---
+  const drawStartRow = el('div', '', 'row');
+  const bDrawStart = el('button', '✎ Draw a flow', 'mini');
+  bDrawStart.onclick = () => sandbox.beginDraw();
+  drawStartRow.append(bDrawStart);
+
+  const drawPanel = el('div', '', 'hidden');
+  const modeRow = el('div', '', 'row wrap');
+  const bModeDraw = el('button', 'Draw', 'mini chip');
+  const bModeErase = el('button', 'Erase', 'mini chip');
+  bModeDraw.onclick = () => sandbox.setDrawMode('draw');
+  bModeErase.onclick = () => sandbox.setDrawMode('erase');
+  modeRow.append(bModeDraw, bModeErase);
+  const drawHint = el('div', 'Left-drag to sketch on the grid · <b>right-drag</b> to rotate it for 3D · <b>E</b> toggles erase.', 'preview');
+  const drawBtns = el('div', '', 'row wrap');
+  const bDrawPlace = el('button', 'Place', 'mini');
+  const bDrawClear = el('button', 'Clear', 'mini');
+  const bDrawCancel = el('button', 'Cancel', 'mini');
+  bDrawPlace.onclick = () => sandbox.commitDraw();
+  bDrawClear.onclick = () => sandbox.clearDraw();
+  bDrawCancel.onclick = () => sandbox.cancelDraw();
+  drawBtns.append(bDrawPlace, bDrawClear, bDrawCancel);
+  drawPanel.append(modeRow, drawHint, drawBtns);
+  panel.append(drawStartRow, drawPanel);
+
+  sandbox.onDrawChange = () => {
+    const on = sandbox.drawing;
+    drawStartRow.classList.toggle('hidden', on);
+    drawPanel.classList.toggle('hidden', !on);
+    bModeDraw.classList.toggle('on', sandbox.drawMode === 'draw');
+    bModeErase.classList.toggle('on', sandbox.drawMode === 'erase');
+  };
 
   // --- list of live fields (click to select; eye toggles visibility, works on hidden ones too) ---
   const list = el('div', '', 'fieldlist');

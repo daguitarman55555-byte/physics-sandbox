@@ -64,17 +64,17 @@ export interface Field {
 /** Per-kind defaults. Every `strength` is now a TARGET SPEED (m/s), so the scale is shared across all
  *  kinds — a 5 feels the same on any field. `size` = default region extent (path: tube radius). */
 export const FIELD_INFO: Record<FieldKind, { strength: number; size: number; color: number; label: string }> = {
-  attractor: { strength: 8, size: 6, color: 0x5b8def, label: 'Attract' },
-  repeller: { strength: 8, size: 6, color: 0xdc4a4a, label: 'Repel' },
-  wind: { strength: 8, size: 6, color: 0x4fb89a, label: 'Wind' },
-  vortex: { strength: 8, size: 6, color: 0xa978e0, label: 'Vortex' },
-  path: { strength: 8, size: 2.5, color: 0xe0a04f, label: 'Path' }, // size.x = tube (capture) radius
-  // the well's `strength` is its MASS (how hard it pulls), not a target speed. Its default region is
-  // big so it actually REACHES a spread-out crowd (100 objects settle across a wide floor patch) and
-  // draws it all in — a small well would only grab the few bodies right under it.
-  gravitywell: { strength: 8, size: 16, color: 0xe05aa0, label: 'Gravity well' },
+  // Every field's base region is 10 (radius / half-extent) so they all start the same, roomy size.
+  attractor: { strength: 8, size: 10, color: 0x5b8def, label: 'Attract' },
+  repeller: { strength: 8, size: 10, color: 0xdc4a4a, label: 'Repel' },
+  wind: { strength: 8, size: 10, color: 0x4fb89a, label: 'Wind' },
+  vortex: { strength: 8, size: 10, color: 0xa978e0, label: 'Vortex' },
+  path: { strength: 8, size: 4, color: 0xe0a04f, label: 'Path' }, // size.x = tube (capture) radius; the
+  //                                curve's own base size is 10 (set in beginPlace), the tube stays snug at 4
+  // the well's `strength` is its MASS (how hard it pulls), not a target speed.
+  gravitywell: { strength: 8, size: 10, color: 0xe05aa0, label: 'Gravity well' },
   // turbulence: `strength` is the drift speed of the eddies (target-velocity model, so mass-independent)
-  turbulence: { strength: 8, size: 6, color: 0xe8d44d, label: 'Turbulence' },
+  turbulence: { strength: 8, size: 10, color: 0xe8d44d, label: 'Turbulence' },
 };
 
 export const FIELD_SHAPES: FieldShape[] = ['sphere', 'box', 'cylinder'];
