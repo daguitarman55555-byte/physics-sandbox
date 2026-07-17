@@ -141,6 +141,52 @@ CURVE_CATALOG.push(
   { name: 'Wobble ring', group: 'Flowers', xt: '(1.4+0.18*cos(13*t))*cos(t)', yt: '0.12*sin(13*t)', zt: '(1.4+0.18*cos(13*t))*sin(t)', t0: 0, t1: TAU, tube: 0.11 },
 );
 
+// Spirographs (hypotrochoid): a pen at radius d on a circle r rolling INSIDE a ring R. Closes after
+// r turns for coprime (R,r). Flat in XZ — great for a plate of objects tracing petals.
+for (const [R, r, d] of [[5, 3, 5], [7, 3, 4], [7, 4, 5], [8, 3, 5], [5, 2, 3], [9, 4, 6], [11, 5, 6], [13, 6, 7]] as const) {
+  const f = `(${R - r}/${r})`;
+  CURVE_CATALOG.push({
+    name: `Spirograph (${R},${r})`, group: 'Spirographs',
+    xt: `${R - r}*cos(t)+${d}*cos(${f}*t)`, yt: '0', zt: `${R - r}*sin(t)-${d}*sin(${f}*t)`,
+    t0: 0, t1: TAU * r, tube: 0.08,
+  });
+}
+// Epitrochoids: the pen rides a circle rolling OUTSIDE the ring — looping flower rosettes.
+for (const [R, r, d] of [[3, 1, 1], [5, 2, 3], [5, 3, 4], [7, 2, 3], [4, 1, 2]] as const) {
+  const f = `(${R + r}/${r})`;
+  CURVE_CATALOG.push({
+    name: `Epitrochoid (${R},${r})`, group: 'Spirographs',
+    xt: `${R + r}*cos(t)-${d}*cos(${f}*t)`, yt: '0', zt: `${R + r}*sin(t)-${d}*sin(${f}*t)`,
+    t0: 0, t1: TAU * r, tube: 0.08,
+  });
+}
+// Rose curves r = cos(k·t): k petals when odd, 2k when even. Flat, then a lifted 3D variant.
+for (const k of [2, 3, 4, 5, 6, 7, 8] as const) {
+  CURVE_CATALOG.push({ name: `Rose (${k})`, group: 'Roses', xt: `cos(${k}*t)*cos(t)`, yt: '0', zt: `cos(${k}*t)*sin(t)`, t0: 0, t1: TAU, tube: 0.07 });
+}
+for (const k of [3, 5, 7] as const) {
+  CURVE_CATALOG.push({ name: `Rose 3D (${k})`, group: 'Roses', xt: `cos(${k}*t)*cos(t)`, yt: `0.4*sin(${k}*t)`, zt: `cos(${k}*t)*sin(t)`, t0: 0, t1: TAU, tube: 0.07 });
+}
+// classic roulettes & special plane curves (rolling-circle shapes)
+CURVE_CATALOG.push(
+  { name: 'Cardioid', group: 'Roulettes', xt: '(1-cos(t))*cos(t)', yt: '0', zt: '(1-cos(t))*sin(t)', t0: 0, t1: TAU, tube: 0.1 },
+  { name: 'Nephroid', group: 'Roulettes', xt: '3*cos(t)-cos(3*t)', yt: '0', zt: '3*sin(t)-sin(3*t)', t0: 0, t1: TAU, tube: 0.1 },
+  { name: 'Deltoid', group: 'Roulettes', xt: '2*cos(t)+cos(2*t)', yt: '0', zt: '2*sin(t)-sin(2*t)', t0: 0, t1: TAU, tube: 0.1 },
+  { name: 'Astroid', group: 'Roulettes', xt: 'cos(t)^3', yt: '0', zt: 'sin(t)^3', t0: 0, t1: TAU, tube: 0.1 },
+  { name: 'Pentacloid', group: 'Roulettes', xt: '4*cos(t)+cos(4*t)', yt: '0', zt: '4*sin(t)-sin(4*t)', t0: 0, t1: TAU, tube: 0.09 },
+  { name: 'Lemniscate', group: 'Roulettes', xt: 'cos(t)/(1+sin(t)^2)', yt: '0', zt: 'sin(t)*cos(t)/(1+sin(t)^2)', t0: 0, t1: TAU, tube: 0.12 },
+  { name: 'Butterfly', group: 'Roulettes', xt: 'sin(t)*(exp(cos(t))-2*cos(4*t)-sin(t/12)^5)', yt: '0', zt: 'cos(t)*(exp(cos(t))-2*cos(4*t)-sin(t/12)^5)', t0: 0, t1: 37.7, tube: 0.08 },
+);
+// 3D flourishes you can build systems around
+CURVE_CATALOG.push(
+  { name: "Viviani's curve", group: 'Space curves', xt: '1+cos(t)', yt: '2*sin(t/2)', zt: 'sin(t)', t0: 0, t1: 2 * TAU, tube: 0.12 },
+  { name: 'Baseball seam', group: 'Space curves', xt: 'cos(t)+0.5*cos(3*t)', yt: '0.6*sin(3*t)', zt: 'sin(t)-0.5*sin(3*t)', t0: 0, t1: TAU, tube: 0.11 },
+  { name: 'Helix ribbon', group: 'Space curves', xt: 'cos(t)*(1+0.3*cos(8*t))', yt: '0.14*t', zt: 'sin(t)*(1+0.3*cos(8*t))', t0: 0, t1: 3 * TAU, tube: 0.09 },
+  { name: 'Log spiral', group: 'Spirals', xt: 'exp(0.14*t)*cos(t)', yt: '0', zt: 'exp(0.14*t)*sin(t)', t0: 0, t1: 4 * TAU, tube: 0.08 },
+  { name: 'Rose spiral', group: 'Spirals', xt: 't*cos(t)*cos(5*t)', yt: '0', zt: 't*sin(t)*cos(5*t)', t0: 0, t1: TAU, tube: 0.07 },
+  { name: 'Toroidal spiral', group: 'Spirals', xt: '(2+cos(9*t))*cos(t)', yt: 'sin(9*t)', zt: '(2+cos(9*t))*sin(t)', t0: 0, t1: TAU, tube: 0.08 },
+);
+
 // ============================================================ parametric surfaces (~50)
 // superellipsoid helper: sign(w)·|w|^p keeps fractional powers real
 const sc = (w: string, p: number) => `sign(cos(${w}))*abs(cos(${w}))^${p}`;

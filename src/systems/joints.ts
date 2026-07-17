@@ -3,19 +3,21 @@
  * objects). This module builds the Rapier JointData for a chosen kind at a shared world anchor;
  * the Sandbox owns the joint records, the connector-line rendering, and cleanup on delete.
  *
- *   fixed  — weld: locks relative position AND orientation at the current pose (no snap).
- *   hinge  — revolute about a horizontal (world-X) axis: the pair swings like a pendulum.
+ *   fixed  — weld: locks relative position AND orientation at the current pose.
+ *   edge   — door hinge: the Sandbox docks the pair into an aligned, face-to-face pose, then this
+ *            makes a revolute about one EDGE of the shared face, so it swings OPEN like a door
+ *            (collisions stay on, so it can never swing inside its partner).
  *   spring — a damped spring at the current separation: a bouncy tether.
  *   rope   — a maximum-distance link: bodies can approach freely but not separate past the length.
  */
 import * as THREE from 'three';
 import RAPIER from '@dimforge/rapier3d-compat';
 
-export type JointKind = 'fixed' | 'hinge' | 'spring' | 'rope';
+export type JointKind = 'fixed' | 'edge' | 'spring' | 'rope';
 
 export const JOINT_INFO: Record<JointKind, { color: number; label: string }> = {
   fixed: { color: 0xd8dee9, label: 'Weld' },
-  hinge: { color: 0x4fb89a, label: 'Hinge' },
+  edge: { color: 0x4fb89a, label: 'Hinge' },
   spring: { color: 0xc9bb3a, label: 'Spring' },
   rope: { color: 0xe89948, label: 'Rope' },
 };
@@ -36,12 +38,16 @@ export interface JointBuild {
 }
 
 /**
- * Build JointData connecting bodies A and B at `worldAnchor` (typically the midpoint of the two).
- * Anchors are converted into each body's local frame so the constraint is satisfied at creation
- * (nothing snaps). Returns null if the bodies are coincident (degenerate).
+ * Build JointData connecting bodies A and B at `worldAnchor` (the midpoint of the two for a weld, or
+ * one edge of the shared face for an edge hinge). Anchors are converted into each body's local frame
+ * so the constraint is satisfied at creation — nothing snaps. The Sandbox docks fixed/edge pairs
+ * into place BEFORE calling this (collisions on; the edge hinge also aligns them face-to-face), so by
+ * here they already sit where they should. `edgeAxisLocalA` (in A's local frame) is the hinge axis
+ * for kind 'edge'. Returns null if the bodies are coincident (degenerate).
  */
 export function buildJoint(
   kind: JointKind, a: RAPIER.RigidBody, b: RAPIER.RigidBody, worldAnchor: THREE.Vector3,
+  edgeAxisLocalA?: THREE.Vector3,
 ): JointBuild | null {
   const ta = a.translation(), tb = b.translation();
   const ra = a.rotation(), rb = b.rotation();
@@ -50,8 +56,8 @@ export function buildJoint(
   const centerDist = _pa.distanceTo(_pb);
 
   // rope & spring are distance links, so they tie each body at its OWN center — the limit/rest is
-  // then just the center-to-center distance (two boxes 2 apart stay ~2 apart). fixed & hinge share
-  // a single pivot point at the midpoint, so their anchors are that point in each body's frame.
+  // then just the center-to-center distance (two boxes 2 apart stay ~2 apart). fixed & edge pin a
+  // single pivot point (weld: the midpoint; edge: a face corner), so their anchors are that point.
   let localA: THREE.Vector3, localB: THREE.Vector3;
   if (kind === 'rope' || kind === 'spring') {
     localA = new THREE.Vector3(0, 0, 0);
@@ -69,8 +75,11 @@ export function buildJoint(
     // relative orientation satisfied, so the weld doesn't torque the pair into alignment
     const rel = _qa.clone().invert().multiply(_qb);
     data = RAPIER.JointData.fixed(va, { x: 0, y: 0, z: 0, w: 1 }, vb, { x: rel.x, y: rel.y, z: rel.z, w: rel.w });
-  } else if (kind === 'hinge') {
-    data = RAPIER.JointData.revolute(va, vb, { x: 1, y: 0, z: 0 }); // swing about world-X
+  } else if (kind === 'edge') {
+    // revolute about the given edge axis; the pair was aligned face-to-face during docking, so the
+    // revolute's axis-alignment has nothing left to correct (no snap) — it just swings open
+    const ax = edgeAxisLocalA ?? new THREE.Vector3(1, 0, 0);
+    data = RAPIER.JointData.revolute(va, vb, { x: ax.x, y: ax.y, z: ax.z });
   } else if (kind === 'spring') {
     data = RAPIER.JointData.spring(centerDist, 22, 3.5, va, vb); // rest, stiffness, damping — a lively tether
   } else {

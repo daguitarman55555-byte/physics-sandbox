@@ -59,15 +59,57 @@ A checklist so nothing is lost. `[x]` = in Phase 1 today · `[ ]` = planned (wit
 
 ## Forces & fields — `systems/fields.ts` (Phase 4)
 - [ ] Gravity direction/strength/per-object/zero-G
-- [x] **Force fields** (`systems/fields.ts`) — attractor · repeller · wind · vortex, added at the
-      camera's focus point with translucent markers, a live global strength slider, and clear-all.
-      Radial fields pull/push ∝ mass with a smooth radius cutoff; wind is a constant directional
-      force; the **vortex steers bodies toward a swirl+inward target velocity** so they orbit stably
-      instead of flinging out (verified: 8 spheres hold a ring inside the radius). Applied as
+- [x] **Field placement & editing** — picking a kind spawns a translucent **hologram** at the view
+      centre that exerts **no force** until you confirm it (the commit-or-cancel pattern every 3D
+      builder uses). Position it with an axis-constrained **gizmo** (three.js TransformControls,
+      snapped to the 1-unit floor grid — axis constraint is the honest answer to "a 2D mouse can't
+      pick a 3D point") or the keyboard, Blender-style: **X/Y/Z** locks an axis, **arrows**/**PgUp**/
+      **PgDn** nudge, **Shift** = fine step, **Enter** places, **Esc** cancels. Ghost turns red and
+      refuses to place off-world/below the floor. **R** aims a wind field (rotate mode). Fields are
+      now **selectable** (click a field's core dot), **movable**, and **deletable individually**
+      (**Del**) — previously the only recourse for a misplaced field was Clear-all. **Per-field**
+      strength/radius are editable live (they used to be fixed presets under one global multiplier).
+- [x] **Path (flow) field** — the vortex generalized to any curve: bodies inside a **tube** around a
+      flow curve are steered to ride ALONG it (look-ahead steering, so fast flow on a tight loop
+      doesn't fling out) and drawn onto it, with an optional **swirl** that corkscrews them *around*
+      the curve (a circle reproduces the plain vortex; a helix is a spiral updraft). Swirl scales with
+      radius (0 on the centreline) so it's smooth, not a violent spin. On **open** curves bodies flow
+      OUT the end (look-ahead extrapolates past it) instead of piling up. The curve can be a quick
+      **preset**, one of **~90 in the library** (a "More…" popup: springs, spirals, waves, wires,
+      torus knots, Lissajous, flowers, **spirographs**, **roses**, roulettes, butterfly, space
+      curves — reusing `systems/catalog.ts`), or your **own equations** (a Desmos-style `x(t),y(t),
+      z(t)` MathLive editor). Any curve is auto-centred, normalized to `scale`, and its closure is
+      auto-detected. The marker draws the curve, its capture tube, and flow arrows.
+- [x] **Force fields** (`systems/fields.ts`) — attractor · repeller · wind · vortex · path, with
+      translucent region markers, a live global strength slider, and clear-all. **One unified model:**
+      every field builds a *target velocity* and steers bodies toward it, so **`strength` means the
+      same on every kind** — a 5 is "move bodies at ~5 m/s," whether attractor, wind, vortex, or flow
+      (verified: strength 5 → ~5 m/s peak on all). Each field is **confined to a region** with a
+      **smooth (smoothstep) boundary** — full strength inside, easing to zero across the outer shell,
+      zero outside; wind included (it used to be global/infinite). The **vortex swirls about the
+      field's OWN axis** (tilt its region with R and the whirlpool tilts too). The region is a
+      **shape you choose** — **sphere / box / cylinder** — sized per-axis, oriented with the rotate
+      gizmo. Each
+      field can be **hidden** (marker invisible, force still acting), toggled from the editor or a
+      per-row eye in the **field list** (which also keeps hidden fields selectable). Applied as
       impulse = F·dt each fixed step.
-- [x] **Joints** (`systems/joints.ts`) — the **connect tool** (click two objects): **weld** (fixed,
-      no snap) · **hinge** (revolute, swings) · **spring** (damped tether) · **rope** (max-distance
-      link). Live connector lines; removed automatically when either body is deleted. (Motors/slider
+- [x] **Joints** (`systems/joints.ts`) — the **connect tool** (click two objects): **weld** (fixed) ·
+      **hinge** (an *edge pivot* — a real door hinge) · **spring** (damped tether) · **rope**
+      (max-distance link).
+      Weld & hinge **dock into true surface contact** before locking: a soft, mass-scaled damped
+      spring (gravity suspended on the pair meanwhile, so it always reaches contact) draws them
+      gently together with collisions left ON, so their real colliders — not a computed point — stop
+      them exactly at the surface; the rigid joint then locks at that pose. So nothing smashes and
+      nothing ends up inside anything else, at any shape / orientation (verified with diagonal &
+      uneven blocks: dock peak ≈ 0.9 m/s, seats at contact, no clipping).
+      The **edge pivot** additionally rotates the pair face-to-face on the way in (capped turn), then
+      pivots on one **edge of the shared contact face** with an in-face, near-vertical axis (both read
+      off the live contact manifold) — so it swings **open like a door** instead of sweeping through
+      its partner. Collision within the pair stays ON for it, so it can never swing inside the other
+      (verified: 45°-diagonal door turned in, seated at contact, swung 77° open, worst penetration
+      2 mm). A locked weld instead turns collision OFF within the pair (it's one rigid body — can't
+      clip itself, and it kills the collider-vs-joint jitter). Spring/rope stay center-to-center
+      tethers. Live connector lines; removed automatically when either body is deleted. (Motors/slider
       still to come.)
 - [x] **Tools** — a left-click **mode** selector: Grab (default) · Connect · **Freeze** (pin a body
       in place, icy tint; click again to release) · **Push** (shove away from the camera). (Blow /
@@ -88,8 +130,11 @@ A checklist so nothing is lost. `[x]` = in Phase 1 today · `[ ]` = planned (wit
 
 ## Inspector & selection — `systems/inspector.ts`
 - [x] Single-select + live read-out (+ shape label for custom objects) + **Delete object** button
-- [x] **Free-body forces view** — isolated 3D render of the selection, centered, live orientation,
-      force arrows (weight / net / contact / velocity) + values
+- [x] **Free-body forces view** — 3D render of the selection, live orientation, force arrows
+      (weight / net / contact / velocity) + values. When the selection is **joined to other bodies**,
+      the whole **connected assembly** is rendered (each body in its own material/texture, in its live
+      relative pose; selected body at the origin where its arrows are) — the header reads "N-body
+      system"
 - [x] All panels are **windows**: drag by header, resize (contents & mini-renderers reflow)
 - [x] **Collapsible panel sections** — Material / Spawn / creators / World; creators sit
       collapsed until needed, so the panel fits without scrolling; drag the panel by its title

@@ -18,7 +18,7 @@ import {
 } from './systems/catalog';
 import { exprToLatex } from './systems/expr';
 import { PLAIN, PRESETS as MATERIALS, type Material } from './systems/materials';
-import { FIELD_INFO, type FieldKind } from './systems/fields';
+import { FIELD_INFO, FIELD_SHAPES, PATH_PRESETS, PATH_PRESET_KEYS, type FieldKind, type FieldShape } from './systems/fields';
 import { JOINT_INFO, type JointKind } from './systems/joints';
 import type { Tool } from './sandbox';
 
@@ -929,24 +929,240 @@ function buildToolsSection(panel: HTMLElement, sandbox: Sandbox) {
 }
 
 /** Fields section: add attractor/repeller/wind/vortex at the camera focus, a strength slider, clear. */
+/**
+ * Fields panel. Picking a kind spawns a translucent HOLOGRAM at the view centre that exerts no force
+ * until you confirm it — position it with the gizmo or the keyboard, then Enter to place, Esc to bail.
+ * Every field is confined to a region you can SHAPE (sphere/box/cylinder), size, orient, and HIDE
+ * (invisible but still acting). The field list lets you re-select any field — even a hidden one.
+ */
 function buildFieldsSection(panel: HTMLElement, sandbox: Sandbox) {
-  const info = el('div', '', 'preview');
-  const updateInfo = () => {
-    info.textContent = sandbox.fieldCount
-      ? `${sandbox.fieldCount} field(s) active. New fields appear at your view's center.`
-      : "Fields appear at your view's center — orbit/pan to aim, then add one.";
-  };
-
   const addRow = el('div', '', 'row wrap');
   for (const k of Object.keys(FIELD_INFO) as FieldKind[]) {
     const b = el('button', FIELD_INFO[k].label, 'mini');
-    b.onclick = () => { sandbox.addField(k); updateInfo(); };
+    b.onclick = () => sandbox.beginPlace(k);
     addRow.append(b);
   }
   panel.append(addRow);
 
+  // --- list of live fields (click to select; eye toggles visibility, works on hidden ones too) ---
+  const list = el('div', '', 'fieldlist');
+  panel.append(list);
+
+  // --- editor for the active field (the ghost being placed, or a live one you clicked) ---
+  const editor = el('div', '', 'hidden');
+  const title = el('div', '', 'preview');
+
+  const shapeRow = el('div', '', 'row wrap');
+  const shapeBtns = {} as Record<FieldShape, HTMLButtonElement>;
+  for (const sh of FIELD_SHAPES) {
+    const b = el('button', sh[0].toUpperCase() + sh.slice(1), 'mini');
+    b.onclick = () => { const r = sandbox.activeField; if (r) sandbox.setFieldShape(r, sh); };
+    shapeBtns[sh] = b;
+    shapeRow.append(b);
+  }
+
+  const sizeRow = el('div', '', 'row nums');
+  const szA = numInput(1, 'size'), szB = numInput(1, 'size'), szC = numInput(1, 'size');
+  const wrapA = labeled('r', szA), wrapB = labeled('y', szB), wrapC = labeled('z', szC);
+  sizeRow.append(wrapA, wrapB, wrapC);
+
+  // path-field controls (shown only for a Path field): which flow curve, its scale + tube, its swirl
+  const applySpec = (spec: { xt: string; yt: string; zt: string; t0: number; t1: number }, label: string) => {
+    const r = sandbox.activeField; if (r) sandbox.setPathSpec(r, spec, label);
+  };
+  const pathRow = el('div', '', 'row wrap');
+  const pathBtns: Record<string, HTMLButtonElement> = {};
+  for (const key of PATH_PRESET_KEYS) {
+    const p = PATH_PRESETS[key];
+    const b = el('button', p.label, 'mini');
+    b.onclick = () => applySpec({ xt: p.xt, yt: p.yt, zt: p.zt, t0: p.t0, t1: p.t1 }, p.label);
+    pathBtns[key] = b;
+    pathRow.append(b);
+  }
+  // "More…" opens a library of ~100 curves; "f(t)" reveals the custom-equation editor
+  const bMore = el('button', 'More…', 'mini more');
+  const bCustom = el('button', 'f(t)', 'mini');
+  pathRow.append(bMore, bCustom);
+
+  const pathNums = el('div', '', 'row nums');
+  const scaleIn = numInput(3, 'Overall size of the flow curve');
+  const tubeIn = numInput(2.5, 'Capture radius — bodies inside this tube ride the flow');
+  const swirlIn = numInput(0, 'Swirl around the path (0 = flow along it, ~1 = corkscrew)');
+  pathNums.append(labeled('curve size', scaleIn), labeled('tube', tubeIn), labeled('swirl', swirlIn));
+
+  // custom-equation editor: type your own x(t), y(t), z(t) (Desmos-style MathLive, only "t" allowed)
+  const customBox = el('div', '', 'hidden');
+  const mf = { xt: mathField('cos(t)'), yt: mathField('0'), zt: mathField('sin(t)') };
+  for (const [key, label] of [['xt', 'x(t)'], ['yt', 'y(t)'], ['zt', 'z(t)']] as const) {
+    const f = el('div', '', 'field');
+    f.append(el('label', `<b>${label}</b>`), mf[key].el);
+    customBox.append(f);
+  }
+  const customT = el('div', '', 'row nums');
+  const ct0 = numInput(0, 'from t'), ct1 = numInput(6.283, 'to t');
+  customT.append(labeled('from t', ct0), labeled('to t', ct1));
+  const customErr = el('div', '', 'preview');
+  const bApply = el('button', 'Apply equations', 'mini');
+  bApply.onclick = () => {
+    const r = sandbox.activeField; if (!r) return;
+    const spec = { xt: mf.xt.value(), yt: mf.yt.value(), zt: mf.zt.value(), t0: parseFloat(ct0.value) || 0, t1: parseFloat(ct1.value) || 6.283 };
+    customErr.textContent = sandbox.setPathSpec(r, spec, 'custom') ? '' : 'Could not parse — check the equations (only "t" is allowed).';
+  };
+  customBox.append(customT, bApply, customErr);
+  bCustom.onclick = () => customBox.classList.toggle('hidden');
+
+  // the curve library popup (the "More…" 100-curve picker), grouped like the shape library
+  const lib = el('div', '', 'hidden'); lib.id = 'curve-library';
+  const libClose = el('button', '×'); libClose.onclick = () => lib.classList.add('hidden');
+  const libHead = el('header', '<span>Flow curves</span>'); libHead.append(libClose);
+  const libBody = el('div', '', 'libbody');
+  const libPage = el('div', '', 'libpage');
+  { // populate grouped, clicking applies the curve to the active path field and closes
+    const groups = new Map<string, typeof CURVE_CATALOG>();
+    for (const e of CURVE_CATALOG) { const g = groups.get(e.group) ?? []; g.push(e); groups.set(e.group, g); }
+    for (const [group, list] of groups) {
+      libPage.append(el('h4', group));
+      const row = el('div', '', 'row wrap');
+      for (const e of list) {
+        const b = el('button', e.name, 'mini');
+        b.onclick = () => { applySpec({ xt: e.xt, yt: e.yt, zt: e.zt, t0: e.t0, t1: e.t1 }, e.name); lib.classList.add('hidden'); };
+        row.append(b);
+      }
+      libPage.append(row);
+    }
+  }
+  libBody.append(libPage);
+  lib.append(libHead, libBody);
+  document.body.append(lib);
+  makeFloating(lib, 'header');
+  bMore.onclick = () => lib.classList.remove('hidden');
+
+  const strRow = el('div', '', 'row');
+  const sIn = numInput(1, 'This field’s own strength');
+  const strWrap = labeled('strength', sIn);
+  strRow.append(strWrap);
+
+  const hint = el('div', '', 'preview');
+  const btns = el('div', '', 'row wrap');
+  const bHide = el('button', 'Hide', 'mini');
+  const bPlace = el('button', 'Place', 'mini');
+  const bCancel = el('button', 'Cancel', 'mini');
+  const bDelete = el('button', 'Delete field', 'danger');
+  btns.append(bHide, bPlace, bCancel, bDelete);
+  editor.append(title, shapeRow, sizeRow, pathRow, pathNums, customBox, strRow, hint, btns);
+  panel.append(editor);
+
+  const info = el('div', '', 'preview');
+  const updateInfo = () => {
+    info.textContent = sandbox.fieldCount
+      ? `${sandbox.fieldCount} field(s) live — click one in the list or its core dot to edit it.`
+      : 'No fields yet. Pick one above, position the hologram, then press Enter.';
+  };
+
+  const applyStrength = () => {
+    const rec = sandbox.activeField;
+    if (rec) sandbox.setFieldStrengthOf(rec, parseFloat(sIn.value) || 0);
+  };
+  const applySize = () => {
+    const rec = sandbox.activeField;
+    if (!rec) return;
+    const s = rec.field.size;
+    const a = parseFloat(szA.value) || s.x, b = parseFloat(szB.value) || s.y, c = parseFloat(szC.value) || s.z;
+    const v = rec.field.shape === 'box' ? new THREE.Vector3(a, b, c)
+      : rec.field.shape === 'cylinder' ? new THREE.Vector3(a, b, a) // radius, ½height, radius
+        : new THREE.Vector3(a, a, a); // sphere: uniform radius
+    sandbox.setFieldSize(rec, v);
+  };
+  sIn.oninput = applyStrength;
+  for (const i of [szA, szB, szC]) i.oninput = applySize;
+  scaleIn.oninput = () => { const r = sandbox.activeField; if (r) sandbox.setPathScale(r, parseFloat(scaleIn.value) || 1); };
+  tubeIn.oninput = () => { const r = sandbox.activeField; if (r) sandbox.setFieldSize(r, new THREE.Vector3().setScalar(parseFloat(tubeIn.value) || r.field.size.x)); };
+  swirlIn.oninput = () => { const r = sandbox.activeField; if (r) sandbox.setPathSwirl(r, parseFloat(swirlIn.value) || 0); };
+  bHide.onclick = () => { const r = sandbox.activeField; if (r) sandbox.setFieldHidden(r, !r.field.hidden); };
+  bPlace.onclick = () => sandbox.commitPlace();
+  bCancel.onclick = () => sandbox.cancelPlace();
+  bDelete.onclick = () => { const r = sandbox.selectedField; if (r) sandbox.removeField(r); };
+
+  const renderList = () => {
+    list.innerHTML = '';
+    for (const rec of sandbox.fieldList) {
+      const row = el('div', '', 'fieldrow');
+      if (rec === sandbox.selectedField) row.classList.add('on');
+      const dot = `<i class="dot" style="background:#${FIELD_INFO[rec.field.kind].color.toString(16).padStart(6, '0')}"></i>`;
+      const sub = rec.field.kind === 'path' ? rec.field.path!.label : rec.field.shape;
+      const name = el('button', `${dot}${FIELD_INFO[rec.field.kind].label} · ${sub}`, 'flabel');
+      name.onclick = () => sandbox.selectField(rec);
+      const eye = el('button', rec.field.hidden ? 'show' : 'hide', 'mini eye');
+      eye.onclick = (e) => { e.stopPropagation(); sandbox.setFieldHidden(rec, !rec.field.hidden); };
+      row.append(name, eye);
+      list.append(row);
+    }
+  };
+
+  const sizeLabels = (shape: FieldShape) => {
+    // relabel + show only the inputs this shape needs
+    const set = (wrap: HTMLElement, input: HTMLInputElement, label: string, val: number, show: boolean) => {
+      wrap.classList.toggle('hidden', !show);
+      (wrap.firstChild as Text).textContent = label;
+      if (document.activeElement !== input) input.value = String(+val.toFixed(2));
+    };
+    const rec = sandbox.activeField!;
+    const s = rec.field.size;
+    if (shape === 'sphere') { set(wrapA, szA, 'radius', s.x, true); set(wrapB, szB, 'y', s.y, false); set(wrapC, szC, 'z', s.z, false); }
+    else if (shape === 'cylinder') { set(wrapA, szA, 'radius', s.x, true); set(wrapB, szB, '½ height', s.y, true); set(wrapC, szC, 'z', s.z, false); }
+    else { set(wrapA, szA, 'x', s.x, true); set(wrapB, szB, 'y', s.y, true); set(wrapC, szC, 'z', s.z, true); }
+  };
+
+  const refresh = () => {
+    const rec = sandbox.activeField;
+    updateInfo();
+    renderList();
+    editor.classList.toggle('hidden', !rec);
+    if (!rec) return;
+    const placing = sandbox.isPlacing;
+    const bad = placing && !sandbox.placementValid;
+    const isPath = rec.field.kind === 'path';
+    title.innerHTML = `${placing ? 'Placing' : 'Editing'} <b>${FIELD_INFO[rec.field.kind].label}</b>`
+      + (rec.field.hidden ? ' · <b>hidden</b>' : '')
+      + (bad ? ' · <b style="color:#dc4a4a">off-world / below floor</b>' : '');
+    // path fields swap the shape/size controls for the flow-curve controls
+    shapeRow.classList.toggle('hidden', isPath);
+    sizeRow.classList.toggle('hidden', isPath);
+    pathRow.classList.toggle('hidden', !isPath);
+    pathNums.classList.toggle('hidden', !isPath);
+    if (!isPath) customBox.classList.add('hidden'); // never leave the equation editor up on a non-path
+    (strWrap.firstChild as Text).textContent = isPath ? 'flow m/s' : 'speed m/s';
+    if (isPath) {
+      const pf = rec.field.path!;
+      for (const key of PATH_PRESET_KEYS) pathBtns[key].classList.toggle('on', pf.label === PATH_PRESETS[key].label);
+      if (document.activeElement !== scaleIn) scaleIn.value = String(+pf.scale.toFixed(2));
+      if (document.activeElement !== tubeIn) tubeIn.value = String(+rec.field.size.x.toFixed(2));
+      if (document.activeElement !== swirlIn) swirlIn.value = String(+pf.swirl.toFixed(2));
+    } else {
+      for (const sh of FIELD_SHAPES) shapeBtns[sh].classList.toggle('on', rec.field.shape === sh);
+      sizeLabels(rec.field.shape);
+    }
+    if (document.activeElement !== sIn) sIn.value = String(+rec.field.strength.toFixed(2));
+    bHide.textContent = rec.field.hidden ? 'Show' : 'Hide';
+    const p = rec.field.pos;
+    const lock = sandbox.lockedAxis;
+    const canRotate = rec.field.kind === 'wind' || isPath || rec.field.shape !== 'sphere';
+    hint.innerHTML =
+      `x ${p.x.toFixed(1)} · y ${p.y.toFixed(1)} · z ${p.z.toFixed(1)}`
+      + (lock ? ` · <b>${lock.toUpperCase()} locked</b>` : '')
+      + (sandbox.gizmoMode === 'rotate' ? ' · <b>turning</b>' : '')
+      + '<br><b>X/Y/Z</b> lock · <b>arrows</b>/<b>PgUp</b>/<b>PgDn</b> nudge · <b>Shift</b> fine'
+      + (canRotate ? ` · <b>R</b> ${rec.field.kind === 'wind' ? 'aim' : 'turn'}` : '')
+      + (placing ? '<br><b>Enter</b> place · <b>Esc</b> cancel' : '<br><b>Del</b> remove · <b>Esc</b> deselect');
+    bPlace.classList.toggle('hidden', !placing);
+    bCancel.classList.toggle('hidden', !placing);
+    bDelete.classList.toggle('hidden', placing);
+    bPlace.disabled = bad;
+  };
+  sandbox.onFieldChange = refresh;
+
   const sField = el('div', '', 'field');
-  const sLabel = el('label', 'Field strength <b>1.0</b>');
+  const sLabel = el('label', 'Global strength <b>1.0</b>'); // multiplies every field at once
   const sRange = el('input');
   sRange.type = 'range'; sRange.min = '0'; sRange.max = '3'; sRange.step = '0.1'; sRange.value = '1';
   sRange.oninput = () => {
@@ -959,10 +1175,10 @@ function buildFieldsSection(panel: HTMLElement, sandbox: Sandbox) {
 
   const clearRow = el('div', '', 'row');
   const bClear = el('button', 'Clear fields', 'danger');
-  bClear.onclick = () => { sandbox.clearFields(); updateInfo(); };
+  bClear.onclick = () => sandbox.clearFields();
   clearRow.append(bClear);
   panel.append(info, clearRow);
-  updateInfo();
+  refresh();
 }
 
 function numInput(value: number, title: string): HTMLInputElement {
@@ -1040,11 +1256,13 @@ function buildInspector(sandbox: Sandbox) {
 }
 
 /**
- * Free-body diagram view, docked directly above the inspector. Shows the selected object ISOLATED
- * in its own mini 3D scene — always centered, mirroring the body's live orientation — with the
- * forces acting on it drawn as arrows from its center: weight (red), measured net ΣF = m·a (blue),
- * contact/friction/drag = net − weight (green), and velocity (yellow) for context. Arrow lengths
- * scale with magnitude relative to the strongest current force.
+ * Free-body diagram view, docked directly above the inspector. Shows the selected object in its own
+ * mini 3D scene, with the forces acting on it drawn as arrows from its center: weight (red), measured
+ * net ΣF = m·a (blue), contact/friction/drag = net − weight (green), and velocity (yellow) for
+ * context. Arrow lengths scale with magnitude relative to the strongest current force. When the
+ * object is joined to others, the WHOLE connected assembly is rendered — each body in its own
+ * material/texture, in its live relative pose — so you see the system it belongs to (the selected
+ * body sits at the origin where its force arrows are drawn).
  */
 function buildForcesView(sandbox: Sandbox) {
   // dock: a fixed bottom-left column — forces view on top, inspector (moved in) below
@@ -1070,12 +1288,12 @@ function buildForcesView(sandbox: Sandbox) {
   const sun = new THREE.DirectionalLight('#ffffff', 1.9);
   sun.position.set(4, 6, 5);
   scene.add(sun);
-  // holder rotates with the body; the mesh inside is offset by −(bounding center) so the shape's
-  // visual middle stays pinned to the origin — nothing drifts off-frame as it tumbles
-  const holder = new THREE.Group();
-  scene.add(holder);
+  // every body in the selected object's connected assembly is rendered under here, each placed in
+  // its live pose relative to the selected body (which sits at the group's origin)
+  const assembly = new THREE.Group();
+  scene.add(assembly);
 
-  let frameR = 1; // radius the camera must fit (shape + arrow reach)
+  let frameR = 1; // radius the camera must fit (assembly + arrow reach)
   const fit = () => {
     camera.aspect = (canvas.clientWidth || 214) / (canvas.clientHeight || 170);
     fitCamera(camera, frameR, 0.55, 0.42, 0.9);
@@ -1098,36 +1316,36 @@ function buildForcesView(sandbox: Sandbox) {
   for (const d of ARROW_DEFS) {
     const a = new THREE.ArrowHelper(new THREE.Vector3(0, 1, 0), new THREE.Vector3(), 1, d.color);
     a.visible = false;
-    scene.add(a);
+    scene.add(a); // arrows live at the origin, where the selected body is placed
     arrows[d.key] = a;
   }
 
-  let mesh: THREE.Mesh | null = null;
-  let meshFor = -1; // entity id the display mesh was built for
-  let ownGeometry = false; // custom shapes share the world mesh's geometry — never dispose those
+  // one rendered body per assembly member; rebuilt only when the membership set changes
+  interface Part { e: Entity; mesh: THREE.Mesh; own: boolean; radius: number }
+  let parts: Part[] = [];
+  let assemblyKey = ''; // sorted entity ids currently built
 
-  const rebuildMesh = (e: Entity) => {
-    if (mesh) {
-      holder.remove(mesh);
-      if (ownGeometry) mesh.geometry.dispose();
-      (mesh.material as THREE.Material).dispose();
+  const geometryFor = (e: Entity): { geo: THREE.BufferGeometry; own: boolean } => {
+    if (e.kind === 'custom') return { geo: e.mesh!.geometry, own: false }; // shared — never dispose
+    if (e.kind === 'box') return { geo: new THREE.BoxGeometry(e.size * 2, e.size * 2, e.size * 2), own: true };
+    return { geo: new THREE.SphereGeometry(e.size, 48, 32), own: true };
+  };
+
+  const rebuild = (list: Entity[]) => {
+    for (const p of parts) {
+      assembly.remove(p.mesh);
+      if (p.own) p.mesh.geometry.dispose();
+      (p.mesh.material as THREE.Material).dispose();
     }
-    let geo: THREE.BufferGeometry;
-    if (e.kind === 'custom') { geo = e.mesh!.geometry; ownGeometry = false; }
-    else if (e.kind === 'box') { geo = new THREE.BoxGeometry(e.size * 2, e.size * 2, e.size * 2); ownGeometry = true; }
-    else { geo = new THREE.SphereGeometry(e.size, 48, 32); ownGeometry = true; }
-    // the isolated object wears its real material — same maps and tiling as the world mesh
-    const mat = sandbox.materialFor(e);
-    mat.side = e.kind === 'custom' ? THREE.DoubleSide : THREE.FrontSide; // open surfaces have two faces
-    mesh = new THREE.Mesh(geo, mat);
-    geo.computeBoundingSphere();
-    const bs = geo.boundingSphere!;
-    mesh.position.copy(bs.center).multiplyScalar(-1); // visual middle at the origin
-    holder.add(mesh);
-    meshFor = e.id;
-    // fit the whole shape AND the longest possible arrow (1.2 × arrow base radius)
-    frameR = Math.max(bs.radius || 0.2, 1.2 * Math.max(e.size, 0.2)) * 1.08;
-    fit();
+    parts = list.map((e) => {
+      const { geo, own } = geometryFor(e);
+      const mat = sandbox.materialFor(e); // each body wears its own maps + tiling
+      mat.side = e.kind === 'custom' ? THREE.DoubleSide : THREE.FrontSide; // open surfaces have two faces
+      const mesh = new THREE.Mesh(geo, mat);
+      geo.computeBoundingSphere();
+      assembly.add(mesh);
+      return { e, mesh, own, radius: geo.boundingSphere?.radius ?? Math.max(e.size, 0.2) };
+    });
   };
 
   const dir = new THREE.Vector3();
@@ -1154,11 +1372,13 @@ function buildForcesView(sandbox: Sandbox) {
     return n;
   };
 
+  const anchor = new THREE.Vector3(); // selected body's world position (the group's origin)
+  const rel = new THREE.Vector3();
   let lastText = 0;
   const frame = () => {
     requestAnimationFrame(frame);
     const e = sandbox.selected;
-    if (!e) { win.classList.add('hidden'); meshFor = -1; return; }
+    if (!e) { win.classList.add('hidden'); assemblyKey = ''; return; }
     win.classList.remove('hidden');
     if (!renderer) {
       renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true });
@@ -1167,8 +1387,22 @@ function buildForcesView(sandbox: Sandbox) {
       renderer.toneMapping = THREE.ACESFilmicToneMapping; // match the main view's look
       renderer.toneMappingExposure = 1.2;
     }
-    if (meshFor !== e.id) rebuildMesh(e);
-    holder.quaternion.copy(e.currQuat); // live orientation — the object exactly as it sits in the world
+
+    const list = sandbox.assemblyOf(e);
+    const key = list.map((x) => x.id).sort((p, q) => p - q).join(',');
+    if (key !== assemblyKey) { rebuild(list); assemblyKey = key; }
+
+    // place every body in its live pose relative to the selected one, and size the frame to fit them
+    anchor.copy(e.currPos);
+    let R = 1.2 * Math.max(e.size, 0.2); // room for the selected body's force arrows
+    for (const p of parts) {
+      rel.copy(p.e.currPos).sub(anchor);
+      p.mesh.position.copy(rel);
+      p.mesh.quaternion.copy(p.e.currQuat);
+      R = Math.max(R, rel.length() + p.radius);
+    }
+    const wantR = R * 1.12;
+    if (Math.abs(wantR - frameR) > frameR * 0.05) { frameR = wantR; fit(); } // refit only on real change
 
     const m = e.body.mass();
     const g = sandbox.gravityY;
@@ -1181,19 +1415,21 @@ function buildForcesView(sandbox: Sandbox) {
     const cMag = Math.hypot(C.x, C.y, C.z);
     const speed = Math.hypot(v.x, v.y, v.z);
     const maxF = Math.max(wMag, fMag, cMag);
-    const R = Math.max(e.size, 0.2);
+    const aR = Math.max(e.size, 0.2);
 
-    setArrow(arrows.weight, Wv.x, Wv.y, Wv.z, wMag, maxF, R);
-    setArrow(arrows.net, F.x, F.y, F.z, fMag, maxF, R);
-    setArrow(arrows.contact, C.x, C.y, C.z, cMag, maxF, R);
-    setArrow(arrows.velocity, v.x, v.y, v.z, speed, Math.max(speed, 8), R); // own scale — different unit
+    setArrow(arrows.weight, Wv.x, Wv.y, Wv.z, wMag, maxF, aR);
+    setArrow(arrows.net, F.x, F.y, F.z, fMag, maxF, aR);
+    setArrow(arrows.contact, C.x, C.y, C.z, cMag, maxF, aR);
+    setArrow(arrows.velocity, v.x, v.y, v.z, speed, Math.max(speed, 8), aR); // own scale — different unit
 
     renderer.render(scene, camera);
 
     const now = performance.now();
     if (now - lastText < 100) return;
     lastText = now;
-    head.textContent = `forces · #${e.id} ${e.kind}`;
+    head.textContent = list.length > 1
+      ? `forces · #${e.id} · ${list.length}-body system`
+      : `forces · #${e.id} ${e.kind}`;
     const vals = [`${wMag.toFixed(1)} N`, `${fMag.toFixed(1)} N`, `${cMag.toFixed(1)} N`, `${speed.toFixed(2)} m/s`];
     legend.innerHTML =
       ARROW_DEFS.map((d, i) => fleg(d.color, d.label, vals[i])).join('') +

@@ -14,6 +14,7 @@
  */
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
+import { TransformControls } from 'three/examples/jsm/controls/TransformControls.js';
 import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment.js';
 import RAPIER from '@dimforge/rapier3d-compat';
 import {
@@ -22,7 +23,7 @@ import {
 } from './systems/shapes';
 import { buildImplicit, type ImplicitSpec } from './systems/implicit';
 import { PLAIN, type Material } from './systems/materials';
-import { fieldForce, FIELD_INFO, type Field, type FieldKind } from './systems/fields';
+import { fieldForce, FIELD_INFO, samplePath, PATH_PRESETS, type Field, type FieldKind, type FieldShape, type CurveSpec } from './systems/fields';
 import { buildJoint, anchorWorld, JOINT_INFO, type JointKind } from './systems/joints';
 
 export type Kind = 'box' | 'sphere' | 'custom';
@@ -61,7 +62,22 @@ interface JointRec {
   localA: THREE.Vector3; localB: THREE.Vector3;
   line: THREE.Line;
 }
-interface FieldRec { field: Field; marker: THREE.Object3D; }
+
+/**
+ * A weld/hinge in its DOCKING phase: before the rigid joint exists, the two bodies are drawn
+ * together under gentle velocity control (collisions stay on, so their real colliders — not a
+ * computed contact point — stop them exactly at the surface). When they touch (or a timeout hits),
+ * the dock resolves into a real JointRec locked at that pose. This is why blocks never smash or end
+ * up inside each other, at any orientation.
+ */
+interface DockRec {
+  id: number; kind: JointKind; a: Entity; b: Entity;
+  line: THREE.Line;
+  spring: RAPIER.ImpulseJoint; // soft damped pull that draws the pair together (removed on lock)
+  elapsed: number;
+}
+/** A force field + its scene marker. `core` is the solid dot: click handle, gizmo anchor, ghost pulse. */
+export interface FieldRec { field: Field; marker: THREE.Object3D; core?: THREE.Object3D }
 
 const FIXED = 1 / 60; // physics timestep — never varies
 const MAX_INSTANCES = 4000;
@@ -96,12 +112,20 @@ export class Sandbox {
   private fields: FieldRec[] = [];
   private fieldStrength = 1; // live global multiplier over every field's base strength
   private fieldGroup = new THREE.Group(); // holds the translucent field markers
+  // field placement/editing: the gizmo, the ghost awaiting confirmation, and the live selection
+  private transform!: TransformControls;
+  private placing: FieldRec | null = null; // ghost being positioned — NOT in `fields`, exerts no force
+  selectedField: FieldRec | null = null;
+  private placeValid = true;
+  private axisLock: 'x' | 'y' | 'z' | null = null;
+  onFieldChange?: () => void; // UI re-renders the field panel off this
   private joints: JointRec[] = [];
-  private jointGroup = new THREE.Group(); // holds the connector lines
+  private docks: DockRec[] = []; // weld/hinge pairs currently being drawn together (pre-lock)
+  private jointGroup = new THREE.Group(); // holds the connector lines (docks + joints)
   private nextFieldId = 0;
   private nextJointId = 0;
   tool: Tool = 'grab';
-  jointKind: JointKind = 'hinge';
+  jointKind: JointKind = 'fixed';
   private connectA: Entity | null = null; // first object picked by the connect tool
 
   // interaction. Grabbing is physical: a collider-less kinematic body follows the cursor, tied to
@@ -173,6 +197,21 @@ export class Sandbox {
 
     this.scene.add(this.fieldGroup, this.jointGroup); // Phase 4 visuals live here
 
+    // --- field placement gizmo ---
+    // Axis-constrained handles are the honest answer to "a 2D mouse can't pick a 3D point": each
+    // drag commits to one axis. Snapped to 1 unit so it lands on the floor grid.
+    this.transform = new TransformControls(this.camera, canvas);
+    this.transform.setTranslationSnap(1);
+    this.transform.setRotationSnap(THREE.MathUtils.degToRad(15));
+    this.transform.addEventListener('dragging-changed', (e) => {
+      this.controls.enabled = !(e as unknown as { value: boolean }).value; // don't orbit while dragging
+    });
+    this.transform.addEventListener('objectChange', () => {
+      const rec = this.activeField;
+      if (rec) this.syncFieldFromMarker(rec);
+    });
+    this.scene.add(this.transform.getHelper()); // r169+: the helper is the scene-graph object
+
     this.buildDefaultScene();
 
     // --- events ---
@@ -180,6 +219,7 @@ export class Sandbox {
     canvas.addEventListener('pointerdown', this.onPointerDown);
     addEventListener('pointermove', this.onPointerMove);
     addEventListener('pointerup', this.onPointerUp);
+    addEventListener('keydown', this.onKeyDown);
   }
 
   // ---------------------------------------------------------------- scene setup
@@ -599,30 +639,205 @@ export class Sandbox {
     this.connectA = null;
   }
 
-  /** Join two bodies with the active joint kind, anchored at the midpoint of their centers. */
-  createJoint(a: Entity, b: Entity) {
-    const ta = a.body.translation(), tb = b.body.translation();
-    const mid = new THREE.Vector3((ta.x + tb.x) / 2, (ta.y + tb.y) / 2, (ta.z + tb.z) / 2);
-    const built = buildJoint(this.jointKind, a.body, b.body, mid);
-    if (!built) return;
-    const joint = this.world.createImpulseJoint(built.data, a.body, b.body, true);
-    a.body.wakeUp(); b.body.wakeUp();
+  private makeConnectorLine(kind: JointKind): THREE.Line {
     const geom = new THREE.BufferGeometry();
     geom.setAttribute('position', new THREE.BufferAttribute(new Float32Array(6), 3));
-    const line = new THREE.Line(geom, new THREE.LineBasicMaterial({ color: JOINT_INFO[this.jointKind].color }));
+    const line = new THREE.Line(geom, new THREE.LineBasicMaterial({ color: JOINT_INFO[kind].color }));
     line.frustumCulled = false;
     this.jointGroup.add(line);
-    this.joints.push({
-      id: this.nextJointId++, kind: this.jointKind, a, b,
-      joint: joint as RAPIER.ImpulseJoint, localA: built.localA, localB: built.localB, line,
-    });
+    return line;
+  }
+
+  /**
+   * Connect two bodies with the active joint kind. Spring/rope are tethers, created immediately at
+   * the current separation. Weld & edge-hinge instead begin a DOCK: a soft, damped spring draws the
+   * pair gently together with collisions left ON, so their real colliders — not a computed contact
+   * point — stop them exactly at the surface (the edge hinge also rotates them face-to-face on the
+   * way in). The instant they've seated, the rigid joint locks. This is why blocks never smash
+   * together or end up inside each other, at any shape or orientation.
+   */
+  createJoint(a: Entity, b: Entity) {
+    a.body.wakeUp(); b.body.wakeUp();
+    if (this.jointKind === 'spring' || this.jointKind === 'rope') {
+      this.lockJoint(a, b, this.jointKind, this.makeConnectorLine(this.jointKind));
+      return;
+    }
+    // Mass-scaled so the pull feels the same whether the blocks are balsa or steel: force = K·x with
+    // K,C ∝ average mass gives a mass-independent acceleration and damping ratio (gentle, ~1 m/s peak,
+    // no overshoot). Rest length 0 keeps pulling inward; the colliders halt it at the surface.
+    const mAvg = Math.max(0.1, (a.body.mass() + b.body.mass()) / 2);
+    const spring = this.world.createImpulseJoint(
+      RAPIER.JointData.spring(0, 4 * mAvg, 6 * mAvg, { x: 0, y: 0, z: 0 }, { x: 0, y: 0, z: 0 }),
+      a.body, b.body, true,
+    ) as RAPIER.ImpulseJoint;
+    this.docks.push({ id: this.nextJointId++, kind: this.jointKind, a, b, elapsed: 0, line: this.makeConnectorLine(this.jointKind), spring });
+  }
+
+  /** Build and register the rigid joint at the pair's CURRENT pose (they've already been docked). */
+  private lockJoint(a: Entity, b: Entity, kind: JointKind, line: THREE.Line) {
+    const ta = a.body.translation(), tb = b.body.translation();
+    // weld/spring/rope anchor at the centre midpoint; the edge hinge pivots on one edge of the
+    // shared contact face (computed from the live contact manifold) with an in-face axis.
+    let anchor = new THREE.Vector3((ta.x + tb.x) / 2, (ta.y + tb.y) / 2, (ta.z + tb.z) / 2);
+    let edgeAxisLocalA: THREE.Vector3 | undefined;
+    if (kind === 'edge') {
+      const edge = this.computeEdge(a, b);
+      anchor = edge.pivot;
+      edgeAxisLocalA = edge.axis.clone().applyQuaternion(this.quatOf(a.body).invert()); // into A's frame
+    }
+    const built = buildJoint(kind, a.body, b.body, anchor, edgeAxisLocalA);
+    if (!built) { this.disposeLine(line); return; }
+    const joint = this.world.createImpulseJoint(built.data, a.body, b.body, true) as RAPIER.ImpulseJoint;
+    // A weld makes the pair one rigid body, so it can't clip itself — turn OFF collision between the
+    // two so the colliders don't fight the weld over the last millimetre of contact (that fight is
+    // what spun a freshly-welded pair). An edge hinge KEEPS collision on: it must not swing inside
+    // its partner, so the colliders are what stop the swing. Contact with every OTHER body is unaffected.
+    if (kind === 'fixed') joint.setContactsEnabled(false);
+    a.body.wakeUp(); b.body.wakeUp();
+    this.joints.push({ id: this.nextJointId++, kind, a, b, joint, localA: built.localA, localB: built.localB, line });
+  }
+
+  private quatOf(body: RAPIER.RigidBody): THREE.Quaternion {
+    const r = body.rotation();
+    return new THREE.Quaternion(r.x, r.y, r.z, r.w);
+  }
+
+  /**
+   * Where a door hinge should pivot: one EDGE of the pair's shared contact face, with an axis lying
+   * IN that face (chosen closest to vertical, so it reads as a door). Contact points and normal come
+   * from the live manifold; if none are available it falls back to the centre line between the bodies.
+   */
+  private computeEdge(a: Entity, b: Entity): { pivot: THREE.Vector3; axis: THREE.Vector3 } {
+    const pts: THREE.Vector3[] = [];
+    const normal = new THREE.Vector3();
+    for (let i = 0; i < a.body.numColliders(); i++) {
+      const ca = a.body.collider(i);
+      for (let j = 0; j < b.body.numColliders(); j++) {
+        this.world.contactPair(ca, b.body.collider(j), (m, flipped) => {
+          const n = m.normal();
+          normal.set(n.x, n.y, n.z);
+          if (flipped) normal.negate();
+          for (let k = 0; k < m.numSolverContacts(); k++) {
+            const p = m.solverContactPoint(k);
+            pts.push(new THREE.Vector3(p.x, p.y, p.z));
+          }
+        });
+      }
+    }
+    if (pts.length === 0 || normal.lengthSq() < 1e-6) {
+      // fallback: no usable manifold — pivot at the centre line, normal along it
+      const ta = a.body.translation(), tb = b.body.translation();
+      const pA = new THREE.Vector3(ta.x, ta.y, ta.z), pB = new THREE.Vector3(tb.x, tb.y, tb.z);
+      normal.copy(pB).sub(pA).normalize();
+      pts.push(pA.clone().lerp(pB, 0.5));
+    }
+    normal.normalize();
+    // hinge axis = the in-face direction closest to vertical (a door hinges about a vertical edge)
+    const up = new THREE.Vector3(0, 1, 0);
+    let axis = up.clone().addScaledVector(normal, -up.dot(normal));
+    if (axis.lengthSq() < 1e-4) axis = new THREE.Vector3(1, 0, 0).addScaledVector(normal, -normal.x); // contact face is horizontal
+    axis.normalize();
+    const perp = new THREE.Vector3().crossVectors(normal, axis).normalize(); // in-face, ⊥ the axis
+    let pivot = pts[0], best = -Infinity; // the contact point furthest to one side = an edge of the face
+    for (const p of pts) { const d = p.dot(perp); if (d > best) { best = d; pivot = p; } }
+    return { pivot: pivot.clone(), axis };
+  }
+
+  /** True if the two bodies' colliders are actually touching (a contact manifold with real points). */
+  private pairInContact(a: Entity, b: Entity): boolean {
+    for (let i = 0; i < a.body.numColliders(); i++) {
+      const ca = a.body.collider(i);
+      for (let j = 0; j < b.body.numColliders(); j++) {
+        const cb = b.body.collider(j);
+        let touching = false;
+        this.world.contactPair(ca, cb, (m) => { if (m.numContacts() > 0) touching = true; });
+        if (touching) return true;
+      }
+    }
+    return false;
+  }
+
+  /**
+   * Advance every active dock: the soft spring (added in createJoint) does the pulling, so here we
+   * just watch for the pair's colliders to touch — the instant they do (or a safety timeout hits),
+   * swap the spring for the rigid weld/hinge at that pose. Because the spring is compliant, the
+   * colliders always win the approach, so the pair meets AT the surface instead of clipping through.
+   */
+  private stepDocks() {
+    for (let i = this.docks.length - 1; i >= 0; i--) {
+      const d = this.docks[i];
+      d.elapsed += FIXED;
+      // An edge hinge must also be aligned face-to-face before it can lock (else the revolute would
+      // snap the two into line). A weld locks as soon as the surfaces meet.
+      const aligned = d.kind !== 'edge' || this.alignDock(d.a, d.b);
+      if ((this.pairInContact(d.a, d.b) && aligned) || d.elapsed > 6) {
+        this.world.removeImpulseJoint(d.spring, true); // drop the pull; lock them where they meet
+        this.lockJoint(d.a, d.b, d.kind, d.line);
+        this.docks.splice(i, 1);
+        continue;
+      }
+      // Dock in effective zero-G: cancel gravity on the pair while they close. Otherwise, when one is
+      // held (frozen) or much heavier, gravity stretches the soft spring to a hanging equilibrium and
+      // they never reach contact. Suspending gravity briefly lets the gentle spring always seat them.
+      for (const e of [d.a, d.b]) {
+        if (e.frozen) continue;
+        const m = e.body.mass();
+        e.body.applyImpulse({ x: 0, y: -this.gravityY * m * FIXED, z: 0 }, true);
+        e.body.wakeUp();
+      }
+    }
+  }
+
+  /**
+   * Edge-hinge docking: gently rotate the free body toward the other's orientation so the two seat
+   * face-to-face (a door needs aligned panels). Returns true once they're within a small angle. The
+   * turn is velocity-capped, so it's smooth however far off the two blocks started.
+   */
+  private alignDock(a: Entity, b: Entity): boolean {
+    // rotate whichever body is free; prefer turning b (the second-picked) toward a
+    const mover = !b.frozen ? b : (!a.frozen ? a : null);
+    const anchor = mover === b ? a : b;
+    if (!mover) return true; // both pinned — nothing to align
+    const qTarget = this.quatOf(anchor.body);
+    const qNow = this.quatOf(mover.body);
+    const qRel = qTarget.multiply(qNow.invert()); // world rotation carrying mover → anchor orientation
+    let angle = 2 * Math.acos(Math.min(1, Math.abs(qRel.w)));
+    if (angle < 0.04) { mover.body.setAngvel({ x: 0, y: 0, z: 0 }, true); return true; }
+    const s = Math.sqrt(Math.max(1e-9, 1 - qRel.w * qRel.w));
+    const sign = qRel.w < 0 ? -1 : 1; // shortest arc
+    const w = Math.min(angle / 0.35, 5); // rad/s, capped — smooth turn-in
+    mover.body.setAngvel({ x: (sign * qRel.x / s) * w, y: (sign * qRel.y / s) * w, z: (sign * qRel.z / s) * w }, true);
+    return false;
+  }
+
+  /** Every entity reachable from `e` through joints (its connected assembly), including `e`. */
+  assemblyOf(e: Entity): Entity[] {
+    const seen = new Set<Entity>([e]);
+    const stack: Entity[] = [e];
+    while (stack.length) {
+      const cur = stack.pop()!;
+      for (const j of this.joints) {
+        const other = j.a === cur ? j.b : j.b === cur ? j.a : null;
+        if (other && !seen.has(other)) { seen.add(other); stack.push(other); }
+      }
+    }
+    return [...seen];
+  }
+
+  private disposeLine(line: THREE.Line) {
+    this.jointGroup.remove(line);
+    line.geometry.dispose();
+    (line.material as THREE.Material).dispose();
   }
 
   private removeJointRec(rec: JointRec) {
     this.world.removeImpulseJoint(rec.joint, true);
-    this.jointGroup.remove(rec.line);
-    rec.line.geometry.dispose();
-    (rec.line.material as THREE.Material).dispose();
+    this.disposeLine(rec.line);
+  }
+
+  private removeDock(rec: DockRec) {
+    this.world.removeImpulseJoint(rec.spring, true);
+    this.disposeLine(rec.line);
   }
 
   private removeJointsFor(e: Entity) {
@@ -632,36 +847,271 @@ export class Sandbox {
         this.joints.splice(i, 1);
       }
     }
+    for (let i = this.docks.length - 1; i >= 0; i--) { // drop any in-progress dock touching it
+      if (this.docks[i].a === e || this.docks[i].b === e) {
+        this.removeDock(this.docks[i]);
+        this.docks.splice(i, 1);
+      }
+    }
   }
 
   clearJoints() {
     for (const j of this.joints) this.removeJointRec(j);
     this.joints.length = 0;
+    for (const d of this.docks) this.removeDock(d);
+    this.docks.length = 0;
     this.connectA = null;
   }
 
   get jointCount(): number { return this.joints.length; }
 
-  /** Add a force field at the current camera look-at point (wind is a global directional force). */
-  addField(kind: FieldKind) {
+  // ------------------------------------------------------------ fields: place, select, move, delete
+  //
+  // Placing a field is a two-step, commit-or-cancel flow (the pattern every 3D builder uses): a
+  // translucent GHOST appears at the view centre exerting no force, you position it, then confirm.
+  // A 2D mouse can't specify a 3D point on its own, so positioning is axis-constrained: drag the
+  // gizmo's arrows, or lock an axis with X/Y/Z and nudge with the arrow keys (Blender's model).
+  // The same machinery edits a LIVE field: click its core to select, move it, Delete to remove it.
+
+  /** Start placing a new field: spawns the ghost at the view centre. Nothing acts until committed. */
+  beginPlace(kind: FieldKind) {
+    this.cancelPlace();
+    this.selectField(null);
     const info = FIELD_INFO[kind];
     const c = this.controls.target;
+    const r = info.size;
     const field: Field = {
-      id: this.nextFieldId++, kind,
-      pos: new THREE.Vector3(c.x, Math.max(c.y, 2), c.z),
-      dir: new THREE.Vector3(1, 0, 0), // wind blows +X by default
-      strength: info.strength, radius: info.radius,
+      id: this.nextFieldId++, kind, shape: 'sphere',
+      pos: new THREE.Vector3(Math.round(c.x), Math.max(Math.round(c.y), 2), Math.round(c.z)),
+      quat: new THREE.Quaternion(), // wind blows local +X until you aim it (rotate gizmo / R)
+      size: new THREE.Vector3(r, r, r),
+      strength: info.strength, hidden: false,
     };
-    const marker = this.makeFieldMarker(field);
-    this.fieldGroup.add(marker);
-    this.fields.push({ field, marker });
+    if (kind === 'path') {
+      const scale = 3;
+      const q = PATH_PRESETS.circle; // a circle to start (that's just the plain vortex)
+      const spec: CurveSpec = { xt: q.xt, yt: q.yt, zt: q.zt, t0: q.t0, t1: q.t1 };
+      const s = samplePath(spec, scale)!;
+      field.path = { spec, label: q.label, scale, swirl: 0, pts: s.pts, tans: s.tans, closed: s.closed };
+    }
+    const rec: FieldRec = { field, marker: this.makeFieldMarker(field) };
+    this.fieldGroup.add(rec.marker);
+    this.tagMarker(rec);
+    this.placing = rec;
+    this.attachGizmo(rec, 'translate');
+    this.refreshPlaceValidity();
+    this.onFieldChange?.();
+  }
+
+  /** Commit the ghost: the field goes live and starts exerting force. Stays selected for tweaking. */
+  commitPlace() {
+    const rec = this.placing;
+    if (!rec || !this.placeValid) return;
+    rec.core?.scale.setScalar(1); // stop the ghost pulse
+    this.tintMarker(rec.marker, FIELD_INFO[rec.field.kind].color);
+    this.fields.push(rec);
+    this.placing = null;
+    this.selectedField = rec; // keep the gizmo on it so you can keep nudging
     for (const e of this.entities) e.body.wakeUp();
+    this.onFieldChange?.();
+  }
+
+  /** Throw the ghost away without placing anything. */
+  cancelPlace() {
+    const rec = this.placing;
+    if (!rec) return;
+    this.placing = null;
+    if (this.transform.object === rec.marker) this.transform.detach();
+    this.fieldGroup.remove(rec.marker);
+    this.disposeMarker(rec.marker);
+    this.onFieldChange?.();
+  }
+
+  /** Select a live field for editing (null clears). */
+  selectField(rec: FieldRec | null) {
+    this.selectedField = rec;
+    if (rec) this.attachGizmo(rec, 'translate');
+    else if (!this.placing) { this.transform.detach(); this.axisLock = null; }
+    this.onFieldChange?.();
+  }
+
+  /** Delete one field (the gap that used to force a Clear-all just to fix one mistake). */
+  removeField(rec: FieldRec) {
+    const i = this.fields.indexOf(rec);
+    if (i < 0) return;
+    if (this.transform.object === rec.marker) this.transform.detach();
+    this.fields.splice(i, 1);
+    this.fieldGroup.remove(rec.marker);
+    this.disposeMarker(rec.marker);
+    if (this.selectedField === rec) this.selectedField = null;
+    for (const e of this.entities) e.body.wakeUp();
+    this.onFieldChange?.();
+  }
+
+  /** This field's own strength (independent of the global multiplier). */
+  setFieldStrengthOf(rec: FieldRec, strength: number) {
+    rec.field.strength = strength;
+    for (const e of this.entities) e.body.wakeUp();
+    this.onFieldChange?.();
+  }
+
+  /** Resize the region. `size` is per-axis (sphere uses .x as radius; cylinder .x=radius, .y=½height). */
+  setFieldSize(rec: FieldRec, size: THREE.Vector3) {
+    rec.field.size.set(Math.max(0.5, size.x), Math.max(0.5, size.y), Math.max(0.5, size.z));
+    this.rebuildMarker(rec); // geometry changed → redraw the region halo
+    for (const e of this.entities) e.body.wakeUp();
+    this.onFieldChange?.();
+  }
+
+  /** Change the region's shape (sphere / box / cylinder). The force stays confined to whatever it is. */
+  setFieldShape(rec: FieldRec, shape: FieldShape) {
+    rec.field.shape = shape;
+    this.rebuildMarker(rec);
+    for (const e of this.entities) e.body.wakeUp();
+    this.onFieldChange?.();
+  }
+
+  /** Hide/show a field's region marker. Hidden = invisible in the scene but STILL exerting force. */
+  setFieldHidden(rec: FieldRec, hidden: boolean) {
+    rec.field.hidden = hidden;
+    rec.marker.visible = !hidden;
+    this.onFieldChange?.();
+  }
+
+  /**
+   * Set a path field's flow curve from any equations — a preset, a catalog pick, or the user's own
+   * x(t),y(t),z(t). Re-samples and redraws. Returns false (leaving the current curve untouched) if
+   * the equations don't parse or the curve isn't finite, so the editor can flag a bad formula.
+   */
+  setPathSpec(rec: FieldRec, spec: CurveSpec, label: string): boolean {
+    const p = rec.field.path;
+    if (!p) return false;
+    const s = samplePath(spec, p.scale);
+    if (!s) return false;
+    p.spec = spec; p.label = label; p.pts = s.pts; p.tans = s.tans; p.closed = s.closed;
+    this.rebuildMarker(rec);
+    for (const e of this.entities) e.body.wakeUp();
+    this.onFieldChange?.();
+    return true;
+  }
+
+  /** Resize a path field's curve (its overall extent, separate from the tube's capture radius). */
+  setPathScale(rec: FieldRec, scale: number) {
+    const p = rec.field.path;
+    if (!p) return;
+    p.scale = Math.max(0.5, scale);
+    const s = samplePath(p.spec, p.scale);
+    if (!s) return;
+    p.pts = s.pts; p.tans = s.tans; p.closed = s.closed;
+    this.rebuildMarker(rec);
+    for (const e of this.entities) e.body.wakeUp();
+    this.onFieldChange?.();
+  }
+
+  /** 0 = flow straight along the path; higher = corkscrew swirl around it (a vortex tube). */
+  setPathSwirl(rec: FieldRec, swirl: number) {
+    const p = rec.field.path;
+    if (!p) return;
+    p.swirl = Math.max(0, swirl);
+    for (const e of this.entities) e.body.wakeUp();
+    this.onFieldChange?.();
+  }
+
+  /** The field the gizmo/keys currently drive: the ghost being placed, else the selected one. */
+  get activeField(): FieldRec | null { return this.placing ?? this.selectedField; }
+  get isPlacing(): boolean { return this.placing !== null; }
+  get placementValid(): boolean { return this.placeValid; }
+  get lockedAxis(): 'x' | 'y' | 'z' | null { return this.axisLock; }
+  get gizmoMode(): string { return this.transform.mode; }
+
+  private attachGizmo(rec: FieldRec, mode: 'translate' | 'rotate') {
+    this.transform.setMode(mode);
+    this.transform.attach(rec.marker);
+    this.setAxisLock(null);
+  }
+
+  /** X/Y/Z lock one axis (press again to release) — the gizmo then shows only that handle. */
+  setAxisLock(a: 'x' | 'y' | 'z' | null) {
+    this.axisLock = a;
+    this.transform.showX = !a || a === 'x';
+    this.transform.showY = !a || a === 'y';
+    this.transform.showZ = !a || a === 'z';
+    this.onFieldChange?.();
+  }
+
+  /** Move the active field by `d` (used by the arrow keys). */
+  nudgeField(d: THREE.Vector3) {
+    const rec = this.activeField;
+    if (!rec) return;
+    rec.marker.position.add(d);
+    this.syncFieldFromMarker(rec);
+  }
+
+  /** Pull pos/orientation back off the marker after the gizmo or a nudge moved it. */
+  private syncFieldFromMarker(rec: FieldRec) {
+    rec.field.pos.copy(rec.marker.position);
+    rec.field.quat.copy(rec.marker.quaternion); // region axes + wind direction (= quat·+X)
+    if (this.placing === rec) this.refreshPlaceValidity();
+    else for (const e of this.entities) e.body.wakeUp(); // a live field moved — re-wake its victims
+    this.onFieldChange?.();
+  }
+
+  /** A ghost is invalid below the floor or off the world — tinted red, and Enter won't place it. */
+  private refreshPlaceValidity() {
+    const rec = this.placing;
+    if (!rec) return;
+    const p = rec.field.pos;
+    this.placeValid = p.y >= 0.3 && Math.abs(p.x) <= 245 && Math.abs(p.z) <= 245;
+    this.tintMarker(rec.marker, this.placeValid ? FIELD_INFO[rec.field.kind].color : 0xdc4a4a);
+  }
+
+  private tintMarker(marker: THREE.Object3D, hex: number) {
+    marker.traverse((o) => {
+      const mat = (o as THREE.Mesh).material as THREE.Material | undefined;
+      const col = (mat as unknown as { color?: THREE.Color } | undefined)?.color;
+      if (col) col.setHex(hex);
+    });
+  }
+
+  /** Remember the core (the click handle + pulse target) and point it back at its record. */
+  private tagMarker(rec: FieldRec) {
+    rec.marker.traverse((o) => {
+      if (o.userData.fieldCore) { o.userData.rec = rec; rec.core = o; }
+    });
+  }
+
+  private rebuildMarker(rec: FieldRec) {
+    const attached = this.transform.object === rec.marker;
+    const pos = rec.marker.position.clone(), quat = rec.marker.quaternion.clone();
+    if (attached) this.transform.detach();
+    this.fieldGroup.remove(rec.marker);
+    this.disposeMarker(rec.marker);
+    rec.marker = this.makeFieldMarker(rec.field);
+    rec.marker.position.copy(pos);
+    rec.marker.quaternion.copy(quat);
+    rec.marker.visible = !rec.field.hidden;
+    this.fieldGroup.add(rec.marker);
+    this.tagMarker(rec);
+    if (this.placing === rec) this.refreshPlaceValidity();
+    if (attached) this.transform.attach(rec.marker);
+  }
+
+  /** The field under the cursor, picked by its solid core (the big halo would swallow every click). */
+  private pickField(): FieldRec | null {
+    for (const h of this.raycaster.intersectObjects(this.fieldGroup.children, true)) {
+      if (h.object.userData.fieldCore) return (h.object.userData.rec as FieldRec) ?? null;
+    }
+    return null;
   }
 
   clearFields() {
+    this.cancelPlace();
+    this.transform.detach();
+    this.selectedField = null;
     for (const f of this.fields) this.disposeMarker(f.marker);
     this.fieldGroup.clear();
     this.fields.length = 0;
+    this.onFieldChange?.();
   }
 
   setFieldStrength(v: number) {
@@ -671,31 +1121,88 @@ export class Sandbox {
 
   get fieldCount(): number { return this.fields.length; }
 
+  /** Live fields, for the panel's list (so a hidden field is still selectable). */
+  get fieldList(): FieldRec[] { return this.fields; }
+
+  /** Geometry outlining a field's region, in its local frame (the group carries pos + orientation). */
+  private shapeGeometry(field: Field): THREE.BufferGeometry {
+    const s = field.size;
+    if (field.shape === 'box') return new THREE.BoxGeometry(s.x * 2, s.y * 2, s.z * 2);
+    if (field.shape === 'cylinder') return new THREE.CylinderGeometry(s.x, s.x, s.y * 2, 28, 1);
+    return new THREE.SphereGeometry(s.x, 24, 16);
+  }
+
   private makeFieldMarker(field: Field): THREE.Object3D {
     const info = FIELD_INFO[field.kind];
     const g = new THREE.Group();
     g.position.copy(field.pos);
-    if (field.kind === 'wind') {
-      g.add(new THREE.ArrowHelper(field.dir, new THREE.Vector3(), 3.2, info.color, 1, 0.7));
-      return g;
-    }
-    g.add(new THREE.Mesh(
-      new THREE.SphereGeometry(field.radius, 24, 16),
-      new THREE.MeshBasicMaterial({ color: info.color, transparent: true, opacity: 0.07, depthWrite: false }),
-    ));
-    g.add(new THREE.Mesh(
-      new THREE.SphereGeometry(0.32, 16, 12),
-      new THREE.MeshBasicMaterial({ color: info.color, transparent: true, opacity: 0.75 }),
-    ));
-    if (field.kind === 'vortex') {
-      const ring = new THREE.Mesh(
-        new THREE.TorusGeometry(field.radius * 0.62, 0.05, 8, 44),
-        new THREE.MeshBasicMaterial({ color: info.color, transparent: true, opacity: 0.5 }),
+    g.quaternion.copy(field.quat); // region orientation (also aims wind's arrow, which points local +X)
+
+    if (field.kind === 'path' && field.path) {
+      this.addPathMarker(g, field, info.color);
+    } else {
+      // the region hull — translucent so you see the confined space and its boundary
+      const hull = new THREE.Mesh(
+        this.shapeGeometry(field),
+        new THREE.MeshBasicMaterial({ color: info.color, transparent: true, opacity: 0.08, depthWrite: false }),
       );
-      ring.rotation.x = Math.PI / 2;
-      g.add(ring);
+      g.add(hull);
+      // a wireframe edge makes box/cylinder read clearly and marks the smooth boundary shell
+      g.add(new THREE.LineSegments(
+        new THREE.WireframeGeometry(hull.geometry),
+        new THREE.LineBasicMaterial({ color: info.color, transparent: true, opacity: 0.28 }),
+      ));
+
+      if (field.kind === 'wind') {
+        const len = Math.min(field.size.x, 3.4);
+        g.add(new THREE.ArrowHelper(new THREE.Vector3(1, 0, 0), new THREE.Vector3(), Math.max(len, 1.6), info.color, 0.9, 0.6));
+      } else if (field.kind === 'vortex') {
+        const ring = new THREE.Mesh(
+          new THREE.TorusGeometry(field.size.x * 0.62, 0.05, 8, 44),
+          new THREE.MeshBasicMaterial({ color: info.color, transparent: true, opacity: 0.5 }),
+        );
+        ring.rotation.x = Math.PI / 2;
+        g.add(ring);
+      }
     }
+
+    // every kind gets a solid core: it's the click handle, the gizmo's anchor, and the ghost's pulse
+    const core = new THREE.Mesh(
+      new THREE.SphereGeometry(0.32, 16, 12),
+      new THREE.MeshBasicMaterial({ color: info.color, transparent: true, opacity: 0.85 }),
+    );
+    core.userData.fieldCore = true;
+    g.add(core);
     return g;
+  }
+
+  /** Draw a path field: the flow curve (bright), its capture tube (translucent), and flow arrows. */
+  private addPathMarker(g: THREE.Group, field: Field, color: number) {
+    const p = field.path!;
+    const curvePts: THREE.Vector3[] = [];
+    for (let i = 0; i < p.pts.length; i += 3) curvePts.push(new THREE.Vector3(p.pts[i], p.pts[i + 1], p.pts[i + 2]));
+    if (curvePts.length < 2) return;
+
+    // centerline (close the loop visually for closed curves)
+    const linePts = p.closed ? [...curvePts, curvePts[0].clone()] : curvePts;
+    g.add(new THREE.Line(
+      new THREE.BufferGeometry().setFromPoints(linePts),
+      new THREE.LineBasicMaterial({ color, transparent: true, opacity: 0.9 }),
+    ));
+    // the capture tube — bodies within this ride the flow; translucent so it reads as a region
+    const curve = new THREE.CatmullRomCurve3(curvePts, p.closed);
+    g.add(new THREE.Mesh(
+      new THREE.TubeGeometry(curve, Math.max(32, curvePts.length), Math.max(field.size.x, 0.5), 12, p.closed),
+      new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.06, depthWrite: false }),
+    ));
+    // a handful of arrows showing which way the flow goes
+    const arrows = 7;
+    const step = Math.max(1, Math.floor(p.pts.length / 3 / arrows));
+    for (let i = 0; i < p.pts.length / 3; i += step) {
+      const dir = new THREE.Vector3(p.tans[i * 3], p.tans[i * 3 + 1], p.tans[i * 3 + 2]);
+      const at = new THREE.Vector3(p.pts[i * 3], p.pts[i * 3 + 1], p.pts[i * 3 + 2]);
+      g.add(new THREE.ArrowHelper(dir, at, 0.9, color, 0.35, 0.22));
+    }
   }
 
   private disposeMarker(m: THREE.Object3D) {
@@ -812,6 +1319,9 @@ export class Sandbox {
       this.grab.entity.body.wakeUp();
     }
 
+    // weld/hinge docking: draw pending pairs gently together until their colliders touch, then lock
+    if (this.docks.length) this.stepDocks();
+
     // force fields: sum each field's force on every awake dynamic body, apply as impulse = F·dt
     if (this.fields.length) {
       for (const e of this.entities) {
@@ -910,6 +1420,18 @@ export class Sandbox {
       pos.setXYZ(1, this._s.x, this._s.y, this._s.z);
       pos.needsUpdate = true;
     }
+    // docks-in-progress: draw a center-to-center line so the pending link is visible while it closes
+    for (const d of this.docks) {
+      const ta = d.a.body.translation(), tb = d.b.body.translation();
+      const pos = d.line.geometry.getAttribute('position') as THREE.BufferAttribute;
+      pos.setXYZ(0, ta.x, ta.y, ta.z);
+      pos.setXYZ(1, tb.x, tb.y, tb.z);
+      pos.needsUpdate = true;
+    }
+    // an un-placed field breathes, so a ghost never reads as an already-placed one
+    if (this.placing?.core) {
+      this.placing.core.scale.setScalar(1 + Math.sin(performance.now() * 0.005) * 0.18);
+    }
   }
 
   // ---------------------------------------------------------------- interaction
@@ -971,8 +1493,14 @@ export class Sandbox {
 
   private onPointerDown = (e: PointerEvent) => {
     if (e.button !== 0) return; // left button = pick/drag; right/middle handled by OrbitControls
+    if (this.transform.axis !== null) return; // the placement gizmo owns this click
     this.pointerDownAt = { x: e.clientX, y: e.clientY };
     this.setPointer(e);
+
+    // a field's core is a click target: selecting one puts the gizmo + keys on it
+    const field = this.pickField();
+    if (field) { this.selectField(field); return; }
+    if (this.selectedField && !this.placing) this.selectField(null); // clicked away → drop the gizmo
 
     // non-grab tools act on the picked object (or empty space) and never start a drag
     if (this.tool !== 'grab') {
@@ -1071,6 +1599,62 @@ export class Sandbox {
   private onPointerUp = (_e: PointerEvent) => {
     this.releaseGrab();
   };
+
+  /**
+   * Keyboard placement, modelled on Blender's modal transform (the pattern precise users reach for):
+   * X/Y/Z locks an axis, the arrows nudge along it, Shift is the fine step, Enter commits, Esc backs
+   * out. Only active while a field is being placed or is selected, and never while you're typing.
+   */
+  private onKeyDown = (ev: KeyboardEvent) => {
+    const rec = this.activeField;
+    if (!rec || ev.metaKey || ev.ctrlKey || ev.altKey) return;
+    const t = ev.target as HTMLElement | null;
+    if (t && (t.isContentEditable || ['INPUT', 'TEXTAREA', 'SELECT', 'MATH-FIELD'].includes(t.tagName))) return;
+
+    const step = ev.shiftKey ? 0.1 : 1; // 1 = the floor grid; Shift = fine
+    const k = ev.key;
+    const lower = k.toLowerCase();
+    if (lower === 'x' || lower === 'y' || lower === 'z') {
+      const a = lower as 'x' | 'y' | 'z';
+      this.setAxisLock(this.axisLock === a ? null : a);
+    } else if (k === 'Enter') {
+      if (this.placing) this.commitPlace();
+    } else if (k === 'Escape') {
+      if (this.placing) this.cancelPlace(); else this.selectField(null);
+    } else if (k === 'Delete' || k === 'Backspace') {
+      if (this.selectedField && !this.placing) this.removeField(this.selectedField);
+    } else if (lower === 'r' && (rec.field.kind === 'wind' || rec.field.kind === 'path' || rec.field.shape !== 'sphere')) {
+      this.transform.setMode(this.transform.mode === 'rotate' ? 'translate' : 'rotate'); // aim wind / turn the region or path
+      this.onFieldChange?.();
+    } else if (lower === 'g') {
+      this.transform.setMode('translate');
+      this.onFieldChange?.();
+    } else {
+      const d = this.nudgeVector(k, step);
+      if (!d) return;
+      this.nudgeField(d);
+    }
+    ev.preventDefault();
+  };
+
+  /** Arrow/PageUp keys → a world-space step. With an axis locked, all arrows drive that axis. */
+  private nudgeVector(key: string, step: number): THREE.Vector3 | null {
+    const a = this.axisLock;
+    if (a) {
+      const sign = key === 'ArrowUp' || key === 'ArrowRight' ? 1 : key === 'ArrowDown' || key === 'ArrowLeft' ? -1 : 0;
+      if (!sign) return null;
+      return new THREE.Vector3(a === 'x' ? sign * step : 0, a === 'y' ? sign * step : 0, a === 'z' ? sign * step : 0);
+    }
+    switch (key) { // unlocked: arrows sweep the floor plane, PageUp/Down climb
+      case 'ArrowLeft': return new THREE.Vector3(-step, 0, 0);
+      case 'ArrowRight': return new THREE.Vector3(step, 0, 0);
+      case 'ArrowUp': return new THREE.Vector3(0, 0, -step);
+      case 'ArrowDown': return new THREE.Vector3(0, 0, step);
+      case 'PageUp': return new THREE.Vector3(0, step, 0);
+      case 'PageDown': return new THREE.Vector3(0, -step, 0);
+      default: return null;
+    }
+  }
 
   private onResize = () => {
     this.camera.aspect = innerWidth / innerHeight;
