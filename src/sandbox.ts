@@ -54,7 +54,7 @@ export interface Entity {
   frozen?: boolean; // Phase 4 freeze tool: body switched to Fixed (held in place until unfrozen)
 }
 
-export type Tool = 'grab' | 'connect' | 'freeze' | 'push';
+export type Tool = 'grab' | 'connect' | 'freeze' | 'push' | 'draw';
 
 interface JointRec {
   id: number; kind: JointKind; a: Entity; b: Entity;
@@ -85,6 +85,7 @@ const MAX_CATCHUP = 3; // cap steps per frame → smooth slight-slow-motion unde
 const MAX_SPEED = 60; // m/s hard cap — guards against solver-injected energy from deep-overlap spawns
 const VOID_Y = -20; // below this, an entity fell off the world edge — it gets removed (no respawn)
 const PICK_PIXEL_TOLERANCE = 18; // px — fallback nearest-entity radius when the exact ray misses
+const _UP = new THREE.Vector3(0, 1, 0); // world up — the draw tool's sketch plane normal
 
 const PALETTE = ['#5b8def', '#4fb89a', '#c9bb3a', '#e89948', '#dc4a4a', '#a978e0'];
 
@@ -148,6 +149,9 @@ export class Sandbox {
   selected: Entity | null = null;
   private pointerDownAt = { x: 0, y: 0 };
   private lastPointerPx = { x: 0, y: 0 };
+  // freehand "draw a flow" tool: a stroke sketched on a horizontal plane, turned into a path field
+  private stroke: { pts: THREE.Vector3[]; line: THREE.Line } | null = null;
+  private drawPlane = new THREE.Plane();
 
   // stats
   private acc = 0;
@@ -1067,6 +1071,7 @@ export class Sandbox {
     const s = samplePath(spec, p.scale);
     if (!s) return false;
     p.spec = spec; p.label = label; p.pts = s.pts; p.tans = s.tans; p.closed = s.closed;
+    p.drawn = undefined; // applying real equations turns a once-drawn curve back into an equation curve
     this.rebuildMarker(rec);
     for (const e of this.entities) e.body.wakeUp();
     this.onFieldChange?.();
@@ -1078,9 +1083,15 @@ export class Sandbox {
     const p = rec.field.path;
     if (!p) return;
     p.scale = Math.max(0.5, scale);
-    const s = samplePath(p.spec, p.scale);
-    if (!s) return;
-    p.pts = s.pts; p.tans = s.tans; p.closed = s.closed;
+    if (p.drawn) {
+      // a freehand curve has no equation to re-sample — re-scale the stored unit stroke geometrically
+      const s = this.scaledFromUnit(p.drawn, p.scale, p.closed);
+      p.pts = s.pts; p.tans = s.tans;
+    } else {
+      const s = samplePath(p.spec, p.scale);
+      if (!s) return;
+      p.pts = s.pts; p.tans = s.tans; p.closed = s.closed;
+    }
     this.rebuildMarker(rec);
     for (const e of this.entities) e.body.wakeUp();
     this.onFieldChange?.();
@@ -1604,6 +1615,9 @@ export class Sandbox {
     this.pointerDownAt = { x: e.clientX, y: e.clientY };
     this.setPointer(e);
 
+    // draw tool: left-drag sketches a flow curve on a horizontal plane; nothing else claims the click
+    if (this.tool === 'draw') { this.beginStroke(); return; }
+
     // a field's core is a click target: clicking one opens it for editing (via a preview draft)
     const field = this.pickField();
     if (field) { this.beginEdit(field); return; }
@@ -1697,6 +1711,7 @@ export class Sandbox {
   }
 
   private onPointerMove = (e: PointerEvent) => {
+    if (this.stroke) { this.extendStroke(e); return; }
     if (!this.grab) return;
     this.setPointer(e);
     const hit = this.raycaster.ray.intersectPlane(this.grab.plane, this._p.clone());
@@ -1704,8 +1719,107 @@ export class Sandbox {
   };
 
   private onPointerUp = (_e: PointerEvent) => {
+    if (this.stroke) { this.finishStroke(); return; }
     this.releaseGrab();
   };
+
+  // ---------------------------------------------------------------- draw a flow (freehand path field)
+  /** Start a stroke: sketch on a HORIZONTAL plane through the camera focus height, so the drawn flow
+   *  sits at a sensible height over the objects. OrbitControls is suspended for the duration. */
+  private beginStroke() {
+    this.cancelPlace();
+    this.selectField(null);
+    this.drawPlane.setFromNormalAndCoplanarPoint(_UP, new THREE.Vector3(0, this.controls.target.y, 0));
+    const hit = this.raycaster.ray.intersectPlane(this.drawPlane, new THREE.Vector3());
+    if (!hit) return;
+    const line = new THREE.Line(
+      new THREE.BufferGeometry().setFromPoints([hit]),
+      new THREE.LineBasicMaterial({ color: FIELD_INFO.path.color }),
+    );
+    line.frustumCulled = false;
+    this.scene.add(line);
+    this.stroke = { pts: [hit], line };
+    this.controls.enabled = false;
+  }
+
+  /** Append a point to the live stroke (only if the cursor moved far enough) and redraw the preview. */
+  private extendStroke(e: PointerEvent) {
+    if (!this.stroke) return;
+    this.setPointer(e);
+    const hit = this.raycaster.ray.intersectPlane(this.drawPlane, new THREE.Vector3());
+    if (!hit) return;
+    if (hit.distanceTo(this.stroke.pts[this.stroke.pts.length - 1]) < 0.08) return;
+    this.stroke.pts.push(hit);
+    this.stroke.line.geometry.setFromPoints(this.stroke.pts);
+  }
+
+  /** Finish the stroke: drop the preview, restore the camera, and turn the polyline into a flow field. */
+  private finishStroke() {
+    if (!this.stroke) return;
+    const pts = this.stroke.pts;
+    this.scene.remove(this.stroke.line);
+    this.stroke.line.geometry.dispose();
+    (this.stroke.line.material as THREE.Material).dispose();
+    this.stroke = null;
+    this.controls.enabled = true;
+    this.createDrawnPath(pts);
+  }
+
+  /**
+   * Build a live path (flow) field from a freehand stroke. The polyline is simplified, centred, and
+   * normalized to unit size (stored in `path.drawn` so the size input can re-scale it later — there's
+   * no equation to re-sample). Closure is auto-detected so a drawn loop wraps. It reuses the whole
+   * pathForce engine, so a drawn squiggle steers bodies exactly like a preset curve.
+   */
+  createDrawnPath(world: THREE.Vector3[]): FieldRec | null {
+    const raw: THREE.Vector3[] = [];
+    for (const p of world) if (!raw.length || p.distanceTo(raw[raw.length - 1]) > 0.15) raw.push(p.clone());
+    if (raw.length < 3) return null; // too short to be a curve
+    const c = new THREE.Vector3();
+    for (const p of raw) c.add(p);
+    c.divideScalar(raw.length);
+    let maxR = 1e-3;
+    for (const p of raw) maxR = Math.max(maxR, p.distanceTo(c));
+    const closed = raw[0].distanceTo(raw[raw.length - 1]) < 0.15 * maxR + 0.3; // start ≈ end → a loop
+    const n = closed ? raw.length - 1 : raw.length; // drop the duplicate endpoint on a closed loop
+    const unit = new Float32Array(n * 3);
+    for (let i = 0; i < n; i++) {
+      const d = raw[i].clone().sub(c).divideScalar(maxR);
+      unit[i * 3] = d.x; unit[i * 3 + 1] = d.y; unit[i * 3 + 2] = d.z;
+    }
+    const scale = maxR;
+    const { pts, tans } = this.scaledFromUnit(unit, scale, closed);
+    const tube = THREE.MathUtils.clamp(maxR * 0.4, 1, 5); // capture radius scales with the drawing's size
+    const field: Field = {
+      id: this.nextFieldId++, kind: 'path', shape: 'sphere', pos: c.clone(),
+      quat: new THREE.Quaternion(), size: new THREE.Vector3(tube, tube, tube),
+      strength: FIELD_INFO.path.strength, hidden: false,
+      path: { spec: { xt: '', yt: '', zt: '', t0: 0, t1: 1 }, label: 'Drawn', scale, swirl: 0, pts, tans, closed, drawn: unit },
+    };
+    const rec: FieldRec = { field, marker: this.makeFieldMarker(field) };
+    this.fieldGroup.add(rec.marker);
+    this.tagMarker(rec);
+    this.fields.push(rec);
+    for (const e of this.entities) e.body.wakeUp();
+    this.onFieldChange?.();
+    return rec;
+  }
+
+  /** Scale a unit polyline (bounding radius 1) to `scale` and recompute its unit tangents. */
+  private scaledFromUnit(unit: Float32Array, scale: number, closed: boolean): { pts: Float32Array; tans: Float32Array } {
+    const pts = new Float32Array(unit.length);
+    for (let i = 0; i < unit.length; i++) pts[i] = unit[i] * scale;
+    const n = pts.length / 3;
+    const tans = new Float32Array(n * 3);
+    for (let i = 0; i < n; i++) {
+      const a = closed ? (i - 1 + n) % n : Math.max(0, i - 1);
+      const b = closed ? (i + 1) % n : Math.min(n - 1, i + 1);
+      const dx = pts[b * 3] - pts[a * 3], dy = pts[b * 3 + 1] - pts[a * 3 + 1], dz = pts[b * 3 + 2] - pts[a * 3 + 2];
+      const len = Math.hypot(dx, dy, dz) || 1;
+      tans[i * 3] = dx / len; tans[i * 3 + 1] = dy / len; tans[i * 3 + 2] = dz / len;
+    }
+    return { pts, tans };
+  }
 
   /**
    * Keyboard placement, modelled on Blender's modal transform (the pattern precise users reach for):

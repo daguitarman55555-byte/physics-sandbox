@@ -97,6 +97,15 @@ A checklist so nothing is lost. `[x]` = in Phase 1 today · `[ ]` = planned (wit
       field can be **hidden** (marker invisible, force still acting), toggled from the editor or a
       per-row eye in the **field list** (which also keeps hidden fields selectable). Applied as
       impulse = F·dt each fixed step.
+- [x] **Draw a flow** (`Draw flow` tool) — sketch a force by hand: with the tool active, **left-drag
+      on the scene** and your stroke (raycast onto a horizontal plane through the camera focus) becomes
+      a live **path (flow) field** along the line you drew — objects then follow your squiggle. It reuses
+      the whole `pathForce` engine, so a drawn curve steers exactly like a preset. The stroke is
+      simplified, centred, normalized (stored as `path.drawn` unit points so the size input can re-scale
+      it — there's no equation to re-sample), and its **closure is auto-detected** (draw a loop → it
+      wraps; draw an open squiggle → bodies flow off the end). The result is a normal path field: move /
+      **tilt it (R / gizmo)**, resize its tube, add swirl, or delete it like any other. (Drawing is on a
+      plane, so a single stroke is planar-in-3D; true per-point depth — draw-then-lift — is a follow-up.)
 - [x] **Gravity well** (`systems/fields.ts`) — a **true Newtonian 1/r²** pull (Plummer-softened so
       it's finite at the centre). Unlike the attractor it is **conservative — no velocity-target
       damping** — so bodies keep their sideways speed and **ORBIT** instead of collapsing into a dead,

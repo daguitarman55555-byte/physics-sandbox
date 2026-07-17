@@ -295,6 +295,25 @@ largest (a 3D-isotropic knot), so genuinely 3D curves — Helix (an updraft), tr
 instead of yanked to some arbitrary plane. Verified live: Loop, Wave, and a vertical Rose all lay flat
 and carry the pile (Loop 4.4 m/s, 64% moving, horizontal racetrack on screen); Helix/trefoil unchanged;
 no console errors. Wave stays marginal but that's its open-path drain-off, not orientation.
+Draw-a-force shipped (2026-07-17, build 1 of 4 Rafael queued): a **`'draw'` Tool** — left-drag on the
+canvas sketches a stroke that becomes a live **path field** ("Draw a force"). onPointerDown/Move/Up in
+sandbox.ts branch on `this.stroke` first; `beginStroke` raycasts onto a HORIZONTAL plane through
+`controls.target.y` (OrbitControls suspended for the drag), `extendStroke` appends points >0.08 m apart
++ redraws a preview Line, `finishStroke` → `createDrawnPath(worldPts)` which simplifies (drop <0.15 m
+samples), centres, normalizes to unit radius (kept in new `FieldPath.drawn`), auto-detects closure, and
+pushes a live path field reusing `pathForce` (no equation). `setPathScale` re-scales `path.drawn`
+geometrically (guarded — a drawn curve has no spec to sample); `setPathSpec` clears `.drawn` when a real
+equation is applied. Tested via SYNTHETIC PointerEvents (project world pts→client coords with
+`camera.project`, dispatch pointerdown on #scene + move/up on window): a circle→closed field, an
+S-curve→open field (63% of 100 objects follow it), controls re-enabled after, no errors. NB import('three')
+fails in the console (bare specifier) — grab THREE via `S.controls.target.constructor` instead.
+STILL OPEN from Rafael's picks (build next, one at a time, each its own commit+push): (2) LIFT inside
+flow tubes (suspend gravity in a path field's tube like the well does, so the complex 3D catalog curves
+that failed the floor-pile test — Lissajous/Viviani/sphere-spiral, 3–23% moving — actually carry it),
+(3) TURBULENCE field (curl-of-noise, the queued kind), (4) FORCE BRUSH (drag to push/pull/swirl live) +
+AUTO-FIT (button to size a field's region to the crowd — the 500-object test showed the default well
+under-reaches a wide pile). Rafael also asked for true-3D drawing (per-point depth: draw-then-lift or
+scroll-to-height) — a natural follow-up to build 1.
 STANDING RULE (Rafael, 2026-07-16): git commit AND push after EVERY build — don't wait to be asked.
 
 Stability hardening (2026-07-13): dynamic bodies now spawn with CCD enabled and reject deeply-

@@ -885,12 +885,13 @@ function buildImplicitCreator(
 
 /** Tools section: the left-click mode (Grab / Connect / Freeze / Push) + the joint-type picker. */
 function buildToolsSection(panel: HTMLElement, sandbox: Sandbox) {
-  const toolDefs: Array<[Tool, string]> = [['grab', 'Grab'], ['connect', 'Connect'], ['freeze', 'Freeze'], ['push', 'Push']];
+  const toolDefs: Array<[Tool, string]> = [['grab', 'Grab'], ['connect', 'Connect'], ['freeze', 'Freeze'], ['push', 'Push'], ['draw', 'Draw flow']];
   const toolHints: Record<Tool, string> = {
     grab: 'Left-drag an object to move & throw it.',
     connect: 'Click two objects to link them, using the joint below.',
     freeze: 'Click an object to pin it in place; click again to release.',
     push: 'Click an object to shove it away from the camera.',
+    draw: 'Drag on the scene to sketch a flow curve; release and objects follow your line.',
   };
   const hint = el('div', '', 'preview');
   const jointRow = el('div', '', 'row wrap');

@@ -43,6 +43,8 @@ export interface FieldPath {
   pts: Float32Array; // sampled points in the field's LOCAL frame (centred + scaled), flat xyz
   tans: Float32Array; // unit tangents at each sample, flat xyz
   closed: boolean;
+  drawn?: Float32Array; // present for a FREEHAND-drawn flow: the stroke as unit points (bounding radius
+  //                       1, centred). There's no equation to re-sample, so `scale` re-scales THESE.
 }
 
 export interface Field {
