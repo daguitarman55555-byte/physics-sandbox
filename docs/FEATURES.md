@@ -93,6 +93,17 @@ A checklist so nothing is lost. `[x]` = in Phase 1 today · `[ ]` = planned (wit
       field can be **hidden** (marker invisible, force still acting), toggled from the editor or a
       per-row eye in the **field list** (which also keeps hidden fields selectable). Applied as
       impulse = F·dt each fixed step.
+- [x] **Gravity well** (`systems/fields.ts`) — a **true Newtonian 1/r²** pull (Plummer-softened so
+      it's finite at the centre). Unlike the attractor it is **conservative — no velocity-target
+      damping** — so bodies keep their sideways speed and **ORBIT** instead of collapsing into a dead,
+      jammed clump (the attractor's failure mode with a crowd: 100 objects piled up, ~1% still moving).
+      A Coriolis-like **curl about the region axis** bends radial infall into orbits, so even a resting
+      pile winds up as a spinning **accretion disc/cloud**; because that curl is ⊥ to velocity it does
+      no work (no runaway spin). Inside the region **world gravity is suspended** (∝ influence), so
+      bodies lift off the floor and circle the centre in free-fall rather than grinding orbits into the
+      ground and stalling on friction. Its `strength` is the well's **mass**, not a target speed. Spawns
+      **elevated** with a **generous default region** so it actually reaches a spread-out crowd.
+      Verified: 100 objects → a fluid orbiting cloud, **93% moving** (vs the attractor's 1%), no errors.
 - [x] **Joints** (`systems/joints.ts`) — the **connect tool** (click two objects): **weld** (fixed) ·
       **hinge** (an *edge pivot* — a real door hinge) · **spring** (damped tether) · **rope**
       (max-distance link).

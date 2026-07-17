@@ -23,7 +23,7 @@ import {
 } from './systems/shapes';
 import { buildImplicit, type ImplicitSpec } from './systems/implicit';
 import { PLAIN, type Material } from './systems/materials';
-import { fieldForce, FIELD_INFO, samplePath, PATH_PRESETS, type Field, type FieldKind, type FieldShape, type CurveSpec } from './systems/fields';
+import { fieldForce, fieldInfluence, FIELD_INFO, samplePath, PATH_PRESETS, type Field, type FieldKind, type FieldShape, type CurveSpec } from './systems/fields';
 import { buildJoint, anchorWorld, JOINT_INFO, type JointKind } from './systems/joints';
 
 export type Kind = 'box' | 'sphere' | 'custom';
@@ -883,9 +883,13 @@ export class Sandbox {
     const info = FIELD_INFO[kind];
     const c = this.controls.target;
     const r = info.size;
+    // A gravity well is spawned up in the air (its big region still reaches down past the floor to
+    // capture bodies resting there): with the orbit centre elevated, captured bodies lift off and
+    // circle it instead of grinding their orbits into the floor. Other fields keep their low default.
+    const minY = kind === 'gravitywell' ? 8 : 2;
     const field: Field = {
       id: this.nextFieldId++, kind, shape: 'sphere',
-      pos: new THREE.Vector3(Math.round(c.x), Math.max(Math.round(c.y), 2), Math.round(c.z)),
+      pos: new THREE.Vector3(Math.round(c.x), Math.max(Math.round(c.y), minY), Math.round(c.z)),
       quat: new THREE.Quaternion(), // wind blows local +X until you aim it (rotate gizmo / R)
       size: new THREE.Vector3(r, r, r),
       strength: info.strength, hidden: false,
@@ -1250,6 +1254,16 @@ export class Sandbox {
         );
         ring.rotation.x = Math.PI / 2;
         g.add(ring);
+      } else if (field.kind === 'gravitywell') {
+        // concentric orbit rings in the well's spin plane — reads as "things circle here"
+        for (const f of [0.35, 0.62, 0.85]) {
+          const ring = new THREE.Mesh(
+            new THREE.TorusGeometry(field.size.x * f, 0.04, 8, 48),
+            new THREE.MeshBasicMaterial({ color: info.color, transparent: true, opacity: 0.4 }),
+          );
+          ring.rotation.x = Math.PI / 2;
+          g.add(ring);
+        }
       }
     }
 
@@ -1419,10 +1433,16 @@ export class Sandbox {
         this._fieldV.set(v.x, v.y, v.z);
         const mass = e.body.mass();
         this._s.set(0, 0, 0);
+        let wellInf = 0; // strongest gravity-well influence on this body (drives the gravity suspension)
         for (const { field } of this.fields) {
           fieldForce(field, this._p, this._fieldV, mass, this.fieldStrength, this._fieldF);
           this._s.add(this._fieldF);
+          if (field.kind === 'gravitywell') wellInf = Math.max(wellInf, fieldInfluence(field, this._p));
         }
+        // Inside a gravity well, suspend world gravity (∝ influence, so it fades at the region edge):
+        // the well's own pull becomes the only gravity, so bodies lift off the floor and ORBIT the
+        // centre in free-fall instead of being pinned down and stalled by floor friction.
+        if (wellInf > 0) this._s.y += -this.gravityY * mass * wellInf;
         if (this._s.x || this._s.y || this._s.z) {
           e.body.applyImpulse({ x: this._s.x * FIXED, y: this._s.y * FIXED, z: this._s.z * FIXED }, true);
         }

@@ -265,9 +265,24 @@ QUEUED new FIELD kinds (Rafael picked 2026-07-16, build ONE at a time, each its 
 **Turbulence** (curl-noise region — objects jitter/swirl like leaves in gusty air), **Magnetic**
 (F=q·v×B, force ⊥ velocity so movers curve into circles/helices — distinct from the positional
 vortex), **Drag zone** (damps velocity → terminal-velocity / slow-mo pockets; bridges the roadmap's
-wind→relative-velocity drag), **Gravity well** (true 1/r² Newtonian falloff → real orbits, Cosmos
-on-ramp). All fit the existing `fieldForce` target-velocity model except magnetic/drag which act on
-`vel` directly (already passed in). Harmonic trap + one-shot Explosion are the "Other" runners-up.
+wind→relative-velocity drag). Harmonic trap + one-shot Explosion are the "Other" runners-up.
+Gravity well SHIPPED (2026-07-17): the 5th field kind `'gravitywell'` — a true Newtonian 1/r² pull
+(Plummer-softened, `WELL_SOFT`). It does NOT use the target-velocity model — that model damps out
+sideways velocity, which is exactly why the ATTRACTOR collapses a crowd into a jammed static clump
+(measured: 100 objects → ~1% moving). The well applies a CONSERVATIVE central force (no `vel` term)
+so bodies keep tangential speed and orbit; plus a Coriolis-like curl about the region axis
+(`WELL_SWIRL`, ⊥ to velocity ⇒ does no work) that bends radial infall into a spinning disc so even a
+resting pile swirls up instead of falling dead-straight in. KEY realizations from testing: (1) a pure
+well is far too weak to beat FLOOR FRICTION (~μg ≈ 6 m/s²) — bodies just sit; had to raise `WELL_GM`
+to 60 AND (2) suspend WORLD GRAVITY inside the region (∝ influence, done in `stepPhysics`'s field loop
+using `fieldInfluence` + `this.gravityY`, same trick as `stepDocks`) so bodies lift off the floor and
+orbit in free-fall instead of grinding on the ground; (3) reach beats strength — a spread 100-object
+pile sits out to floor-radius ~12–20, so the well needs a BIG default region (size 16) + elevated
+spawn (`beginPlace` puts it at y≥8) or it only grabs the few bodies right under it. `strength` = the
+well's MASS (UI label reads "mass", not "speed"). Marker = concentric orbit rings. Verified live:
+100 objects → fluid orbiting cloud, 93% moving, 30fps, no console errors (attractor left as-is = the
+plain gatherer). Was queued as fitting the target-velocity model — that turned out to be WRONG; it
+needed its own conservative path + gravity suspension.
 STANDING RULE (Rafael, 2026-07-16): git commit AND push after EVERY build — don't wait to be asked.
 
 Stability hardening (2026-07-13): dynamic bodies now spawn with CCD enabled and reject deeply-

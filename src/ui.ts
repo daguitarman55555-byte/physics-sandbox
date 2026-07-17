@@ -1158,7 +1158,7 @@ function buildFieldsSection(panel: HTMLElement, sandbox: Sandbox) {
     pathRow.classList.toggle('hidden', !isPath);
     pathNums.classList.toggle('hidden', !isPath);
     if (!isPath) customBox.classList.add('hidden'); // never leave the equation editor up on a non-path
-    (strWrap.firstChild as Text).textContent = isPath ? 'flow m/s' : 'speed m/s';
+    (strWrap.firstChild as Text).textContent = isPath ? 'flow m/s' : rec.field.kind === 'gravitywell' ? 'mass' : 'speed m/s';
     if (isPath) {
       const pf = rec.field.path!;
       for (const key of PATH_PRESET_KEYS) pathBtns[key].classList.toggle('on', pf.label === PATH_PRESETS[key].label);

@@ -15,11 +15,16 @@
  *                          region); NOT mass-scaled, so light things blow faster than heavy ones.
  *   vortex               — tangential swirl about the region's vertical axis plus a light inward tug,
  *                          steered toward a target velocity so objects circle stably (a tornado).
+ *   gravitywell          — a true Newtonian 1/r² pull toward the centre. Unlike the attractor it does
+ *                          NOT steer toward a target velocity, so it never damps out sideways motion —
+ *                          bodies keep the tangential speed they have and ORBIT instead of collapsing
+ *                          into a jammed clump. On a resting pile it seeds a little spin so the cloud
+ *                          swirls into an accretion disc rather than falling dead-straight to a point.
  */
 import * as THREE from 'three';
 import { parseExpression } from './expr';
 
-export type FieldKind = 'attractor' | 'repeller' | 'wind' | 'vortex' | 'path';
+export type FieldKind = 'attractor' | 'repeller' | 'wind' | 'vortex' | 'path' | 'gravitywell';
 export type FieldShape = 'sphere' | 'box' | 'cylinder';
 
 /**
@@ -60,6 +65,10 @@ export const FIELD_INFO: Record<FieldKind, { strength: number; size: number; col
   wind: { strength: 8, size: 6, color: 0x4fb89a, label: 'Wind' },
   vortex: { strength: 8, size: 6, color: 0xa978e0, label: 'Vortex' },
   path: { strength: 8, size: 2.5, color: 0xe0a04f, label: 'Path' }, // size.x = tube (capture) radius
+  // the well's `strength` is its MASS (how hard it pulls), not a target speed. Its default region is
+  // big so it actually REACHES a spread-out crowd (100 objects settle across a wide floor patch) and
+  // draws it all in — a small well would only grab the few bodies right under it.
+  gravitywell: { strength: 8, size: 16, color: 0xe05aa0, label: 'Gravity well' },
 };
 
 export const FIELD_SHAPES: FieldShape[] = ['sphere', 'box', 'cylinder'];
@@ -121,7 +130,15 @@ const RESPONSE = 5; // how hard any field steers a body toward its target veloci
 const SOFT_EDGE = 0.55; // full strength inside this fraction of the region; smoothstep to 0 by the edge
 const PATH_LOOKAHEAD = 4; // samples ahead the flow steers toward (follows curvature + draws onto the path)
 const SWIRL_GAIN = 0.7; // path swirl scales with radius (0 at the centreline) and this cap — keeps it gentle
+// Gravity well: GM = strength·gain·WELL_GM sets how hard the 1/r² pull is; WELL_SOFT (metres) is a
+// Plummer softening length so the force stays finite at the centre (no singular slingshot); WELL_SWIRL
+// (rad/s) is a Coriolis-like curl about the region axis that bends radial infall into orbits — it acts
+// perpendicular to velocity so it does NO work (a resting pile forms a spinning disc without runaway spin).
+const WELL_GM = 60;
+const WELL_SOFT = 1.5;
+const WELL_SWIRL = 1.4;
 const _d = new THREE.Vector3();
+const _ax = new THREE.Vector3(); // gravity well's local spin axis in world space
 const _iq = new THREE.Quaternion();
 const _pl = new THREE.Vector3(); // body position in a path field's local frame
 const _tv = new THREE.Vector3(); // target velocity being assembled
@@ -166,6 +183,7 @@ export function fieldForce(
 ): THREE.Vector3 {
   out.set(0, 0, 0);
   if (field.kind === 'path') return field.path ? pathForce(field, bodyPos, vel, mass, gain, out) : out;
+  if (field.kind === 'gravitywell') return wellForce(field, bodyPos, vel, mass, gain, out);
   const inf = fieldInfluence(field, bodyPos);
   if (inf <= 0) return out;
   const speed = field.strength * gain; // target speed (m/s) — SAME meaning for every kind
@@ -186,6 +204,35 @@ export function fieldForce(
     _tv.copy(_d).divideScalar(_d.length() || 1).multiplyScalar(sign * speed);
   }
   return out.set(_tv.x - vel.x, _tv.y - vel.y, _tv.z - vel.z).multiplyScalar(mass * RESPONSE * inf);
+}
+
+/**
+ * A true gravity well: a Newtonian 1/r² pull toward the region centre (Plummer-softened so it's finite
+ * at the middle), plus a Coriolis-like curl about the region's axis that curves radial infall into
+ * orbits. Crucially there is NO velocity-target damping (that's what makes the attractor collapse a
+ * crowd into a jammed clump) — the pull is conservative, so bodies keep their sideways speed and circle.
+ * Both terms are mass-scaled, so the resulting ACCELERATION is mass-independent and everything orbits
+ * alike, exactly like real gravity. Force fades to zero across the region boundary (the usual shell).
+ */
+function wellForce(
+  field: Field, bodyPos: THREE.Vector3, vel: THREE.Vector3, mass: number, gain: number, out: THREE.Vector3,
+): THREE.Vector3 {
+  const inf = fieldInfluence(field, bodyPos);
+  if (inf <= 0) return out;
+  _d.subVectors(field.pos, bodyPos); // toward the centre
+  const r = _d.length() || 1e-3;
+  const gm = field.strength * gain * WELL_GM;
+  const a = gm / (r * r + WELL_SOFT * WELL_SOFT); // 1/r² pull, softened so it never blows up at r→0
+  _d.divideScalar(r); // unit vector toward the centre
+  // central pull: force = m·a (⇒ acceleration a, mass-independent). No `vel` term ⇒ conservative ⇒ orbits.
+  out.set(_d.x * a, _d.y * a, _d.z * a);
+  // orbital seed: k·(axis × v). Perpendicular to velocity, so it does no work — it only bends the path,
+  // turning a dead-straight fall into a spiral so a resting crowd winds up as a spinning disc.
+  _ax.set(0, 1, 0).applyQuaternion(field.quat); // region's spin axis (tilts if you turn the region)
+  out.x += WELL_SWIRL * (_ax.y * vel.z - _ax.z * vel.y);
+  out.y += WELL_SWIRL * (_ax.z * vel.x - _ax.x * vel.z);
+  out.z += WELL_SWIRL * (_ax.x * vel.y - _ax.y * vel.x);
+  return out.multiplyScalar(mass * inf);
 }
 
 /**
