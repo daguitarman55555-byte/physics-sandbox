@@ -362,8 +362,26 @@ Draw reworked into a GRID CANVAS + base size 10 (2026-07-17):
    follow it; all field defaults read 10; no console errors. NB the screenshot tool was timing out this
    session (app rendered fine, fps 20, no errors) so this build has functional verification but no new
    screenshot — re-shoot next session if Rafael wants the visual.
-STILL OPEN: none of Rafael's explicit asks remain — the grid canvas delivers the true-3D drawing that was
-the last follow-up. Possible nexts: scroll-to-set-grid-height while drawing; snap the grid to axis planes.
+Draw reworked AGAIN into a windowed mini-editor (2026-07-17): Rafael wanted the in-scene grid replaced by
+a "moveable and sizeable tab", a visible line while drawing, and X/Y/Z axis buttons + gnomon. New file
+`src/drawpad.ts` = `DrawPad` class: a floating, `resize:both` window (#drawpad, CSS matches #shape-preview)
+with its OWN WebGLRenderer/scene/camera — fully independent of the sim until Place. Contents: a GridHelper
+"paper" that billboards to the draw plane, an always-on AxesHelper gnomon + X/Y/Z sprite labels, and the
+live orange sketch Line. Camera orbits via spherical az/pol (right-drag); X/Y/Z buttons snap to look down
+each axis (front/side/top); left-drag draws onto the plane through the origin ⊥ to the view (so two views
+build a real 3D curve — verified extent ~10×8×8 across all axes). Erase removes points in screen space.
+Place → `sandbox.createDrawnPath(worldPts)` centred on controls.target. The Fields "✎ Draw a flow" button
+lazily `new DrawPad(sandbox)` + `.open()`. The OLD in-scene draw session in sandbox.ts is GONE (removed
+beginDraw/onDraw*/rotateGrid/etc., the `this.draw` state, pointer routing, keyboard block, contextmenu —
+kept only createDrawnPath). BUG FOUND + FIXED: the sketch line was invisible because `clear()` did
+`lineGeom.setFromPoints([])`, which creates an EMPTY position attribute; this three build's setFromPoints
+then only WRITES INTO the existing zero-length buffer and silently drops every point (attr stayed length 0
+even with 22 pts). Fix = `updateLine()` sets a FRESH BufferAttribute each time (never setFromPoints).
+Verified live: window opens/moves/resizes, orange loop visible while drawing, X/Y/Z snap + gnomon, 2-view
+3D curve, Place makes a 'Drawn' path field moving objects, no console errors.
+STILL OPEN: Rafael said "we will polish everything forces and field related after we fix this" — so NEXT is
+a polish pass over all forces/fields. Possible drawpad nice-to-haves: fatter line (Line2) for visibility,
+snap-line preview, per-axis ortho camera.
 STANDING RULE (Rafael, 2026-07-16): git commit AND push after EVERY build — don't wait to be asked.
 
 Stability hardening (2026-07-13): dynamic bodies now spawn with CCD enabled and reject deeply-

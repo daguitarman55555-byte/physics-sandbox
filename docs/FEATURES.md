@@ -99,16 +99,17 @@ A checklist so nothing is lost. `[x]` = in Phase 1 today · `[ ]` = planned (wit
       field can be **hidden** (marker invisible, force still acting), toggled from the editor or a
       per-row eye in the **field list** (which also keeps hidden fields selectable). Applied as
       impulse = F·dt each fixed step.
-- [x] **Draw a flow** (a **"✎ Draw a flow" button in the Fields & Forces panel**) — click it and a
-      **floating white grid canvas** appears at the view centre, facing you. **Left-drag** sketches a
-      stroke onto the grid; **right-drag tumbles the grid** so a single continuous stroke can climb into
-      **true 3D** (drawn points stay put in world space, so you rotate the easel and keep drawing at a new
-      angle); an **Erase** mode (or **E**) rubs points out in screen space. **Place** (or **Enter**) turns
-      the polyline into a live **path (flow) field**; **Clear** restarts the sketch; **Cancel** / **Esc**
-      closes it. Reuses the whole `pathForce` engine, so a drawn curve steers exactly like a preset; the
-      stroke is simplified, centred, normalized (stored as `path.drawn` unit points so the size input can
-      re-scale it), and its **closure is auto-detected**. The result is a normal path field — move / tilt
-      (R / gizmo), resize its tube, toggle Lift, add swirl, or delete it like any other.
+- [x] **Draw a flow** (a **"✎ Draw a flow" button in the Fields & Forces panel**, `src/drawpad.ts`) —
+      opens a **movable, resizable window with its own mini 3D editor**. Inside, an always-on **colored
+      X/Y/Z gnomon** (red/green/blue, labelled) shows orientation, and **X / Y / Z buttons snap the view
+      to look straight down each axis** (front / side / top) — so you sketch the curve from different
+      angles and build it in **true 3D** (drawn points stay put in world space; turning the view and
+      drawing more just adds depth — verified a two-view sketch spans all three axes ~10×8×8). **Left-drag**
+      sketches onto the plane facing you and you **see the orange line as you draw**; **right-drag** turns
+      the view; **Erase** rubs points out (screen-space); **Place** drops the whole sketch into the scene
+      as a live **path (flow) field** at the view focus (via `Sandbox.createDrawnPath`, reusing the whole
+      `pathForce` engine — closure auto-detected, re-scalable). The editor renders into its own WebGL
+      canvas, independent of the sim — nothing touches physics until Place.
 - [x] **Lift inside a flow tube** (path fields, `Lift` toggle) — suspend world gravity for bodies inside
       a flow tube (∝ the same smoothstep tube influence, via `pathInfluence`), so they ride a rising or
       3D curve **up into the air** instead of dropping out the bottom and stalling on the floor — a

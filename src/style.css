@@ -126,6 +126,29 @@ button:disabled:hover { border-color: var(--border); background: var(--accent); 
   resize: both; overflow: hidden; min-width: 200px; min-height: 200px;
 }
 #shape-preview.hidden { display: none; }
+
+/* Draw-a-flow window: a movable, resizable mini 3D editor for sketching a flow curve. */
+#drawpad {
+  position: fixed; top: 70px; left: 24px; width: 340px; height: 420px; background: var(--panel);
+  border: 1px solid var(--border); border-radius: 12px;
+  box-shadow: 0 12px 34px rgba(0,0,0,.5); z-index: 60;
+  display: flex; flex-direction: column;
+  resize: both; overflow: hidden; min-width: 260px; min-height: 300px;
+}
+#drawpad.hidden { display: none; }
+#drawpad header {
+  display: flex; justify-content: space-between; align-items: center; padding: 8px 8px 6px 12px;
+  user-select: none; touch-action: none; cursor: grab; font-family: var(--mono); font-size: 10.5px;
+  letter-spacing: .12em; text-transform: uppercase; color: var(--muted); font-weight: 600; flex: 0 0 auto;
+}
+#drawpad header:active { cursor: grabbing; }
+#drawpad header button { flex: 0 0 auto; padding: 0 8px; font-size: 15px; line-height: 20px; border-radius: 6px; }
+#drawpad .dp-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding: 0 12px 6px; flex: 0 0 auto; }
+#drawpad .dp-label { font-family: var(--mono); font-size: 10px; letter-spacing: .1em; text-transform: uppercase; color: var(--muted); }
+#drawpad .dp-canvas { display: block; width: 100%; flex: 1 1 200px; min-height: 120px; background: #0d0f16; cursor: crosshair; touch-action: none; }
+#drawpad .dp-hint { font-family: var(--mono); font-size: 10.5px; color: var(--text-2); padding: 6px 12px; flex: 0 0 auto; }
+#drawpad button.ax { padding: 2px 9px; font-weight: 700; }
+#drawpad button.ax-x { color: #ff6b6b; } #drawpad button.ax-y { color: #63e58a; } #drawpad button.ax-z { color: #6b9bff; }
 #shape-preview header {
   display: flex; justify-content: space-between; align-items: center; padding: 8px 8px 6px 12px;
   user-select: none; touch-action: none; font-family: var(--mono); font-size: 10.5px;
