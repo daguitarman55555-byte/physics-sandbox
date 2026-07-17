@@ -106,6 +106,13 @@ A checklist so nothing is lost. `[x]` = in Phase 1 today · `[ ]` = planned (wit
       wraps; draw an open squiggle → bodies flow off the end). The result is a normal path field: move /
       **tilt it (R / gizmo)**, resize its tube, add swirl, or delete it like any other. (Drawing is on a
       plane, so a single stroke is planar-in-3D; true per-point depth — draw-then-lift — is a follow-up.)
+- [x] **Lift inside a flow tube** (path fields, `Lift` toggle) — suspend world gravity for bodies inside
+      a flow tube (∝ the same smoothstep tube influence, via `pathInfluence`), so they ride a rising or
+      3D curve **up into the air** instead of dropping out the bottom and stalling on the floor — a
+      zero-gravity conveyor. Reuses the gravity-well's suspension trick. Off by default (flat floor flows
+      don't need it). Verified: captured bodies climb a rising spiral/Viviani curve into an airborne arc
+      (top-Y up, mean speed ~2.5× on Viviani). Honest limit: it helps the bodies a curve *captures*;
+      whether a sparse 3D curve captures a compact floor pile still depends on sizing the curve to it.
 - [x] **Gravity well** (`systems/fields.ts`) — a **true Newtonian 1/r²** pull (Plummer-softened so
       it's finite at the centre). Unlike the attractor it is **conservative — no velocity-target
       damping** — so bodies keep their sideways speed and **ORBIT** instead of collapsing into a dead,

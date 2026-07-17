@@ -57,6 +57,8 @@ export interface Field {
   strength: number; // base magnitude; the Sandbox scales this by a live global multiplier
   hidden: boolean; // marker invisible (the field still acts) — the region is just not drawn
   path?: FieldPath; // present only for kind 'path'; .size.x is the tube (capture) radius
+  lift?: boolean; // path fields only: suspend world gravity inside the tube so bodies can follow a 3D
+  //                 curve up into the air (like the gravity well does) instead of falling out of it
 }
 
 /** Per-kind defaults. Every `strength` is now a TARGET SPEED (m/s), so the scale is shared across all
@@ -207,6 +209,28 @@ const _pl = new THREE.Vector3(); // body position in a path field's local frame
 const _tv = new THREE.Vector3(); // target velocity being assembled
 
 const smoothstep01 = (t: number) => t * t * (3 - 2 * t);
+
+/**
+ * How strongly a PATH field's tube acts at `bodyPos`: 1 near the centreline, easing to 0 at the tube
+ * wall (same smoothstep shell as the point fields), 0 outside. Mirrors the `inf` that `pathForce`
+ * computes internally — exposed so the Sandbox can suspend gravity for bodies inside a lift-tube.
+ */
+export function pathInfluence(field: Field, bodyPos: THREE.Vector3): number {
+  const path = field.path;
+  if (!path) return 0;
+  const pts = path.pts;
+  _pl.copy(bodyPos).sub(field.pos).applyQuaternion(_iq.copy(field.quat).invert());
+  let bd2 = Infinity;
+  for (let i = 0; i < pts.length; i += 3) {
+    const dx = _pl.x - pts[i], dy = _pl.y - pts[i + 1], dz = _pl.z - pts[i + 2];
+    const d2 = dx * dx + dy * dy + dz * dz;
+    if (d2 < bd2) bd2 = d2;
+  }
+  const R = Math.max(field.size.x, 0.5);
+  const n = Math.sqrt(bd2) / R;
+  if (n >= 1) return 0;
+  return n <= SOFT_EDGE ? 1 : 1 - smoothstep01((n - SOFT_EDGE) / (1 - SOFT_EDGE));
+}
 
 /**
  * How strongly the field acts at `bodyPos`: 1 well inside the region, easing to 0 at its boundary

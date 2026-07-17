@@ -23,7 +23,7 @@ import {
 } from './systems/shapes';
 import { buildImplicit, type ImplicitSpec } from './systems/implicit';
 import { PLAIN, type Material } from './systems/materials';
-import { fieldForce, fieldInfluence, FIELD_INFO, samplePath, PATH_PRESETS, type Field, type FieldKind, type FieldShape, type CurveSpec } from './systems/fields';
+import { fieldForce, fieldInfluence, pathInfluence, FIELD_INFO, samplePath, PATH_PRESETS, type Field, type FieldKind, type FieldShape, type CurveSpec } from './systems/fields';
 import { buildJoint, anchorWorld, JOINT_INFO, type JointKind } from './systems/joints';
 
 export type Kind = 'box' | 'sphere' | 'custom';
@@ -989,11 +989,12 @@ export class Sandbox {
     const c: Field = {
       id: f.id, kind: f.kind, shape: f.shape,
       pos: f.pos.clone(), quat: f.quat.clone(), size: f.size.clone(),
-      strength: f.strength, hidden: f.hidden,
+      strength: f.strength, hidden: f.hidden, lift: f.lift,
     };
     if (f.path) c.path = {
       spec: { ...f.path.spec }, label: f.path.label, scale: f.path.scale, swirl: f.path.swirl,
       pts: f.path.pts.slice(), tans: f.path.tans.slice(), closed: f.path.closed,
+      drawn: f.path.drawn ? f.path.drawn.slice() : undefined,
     };
     return c;
   }
@@ -1002,10 +1003,11 @@ export class Sandbox {
   private copyFieldInto(src: Field, dst: Field) {
     dst.shape = src.shape;
     dst.pos.copy(src.pos); dst.quat.copy(src.quat); dst.size.copy(src.size);
-    dst.strength = src.strength; dst.hidden = src.hidden;
+    dst.strength = src.strength; dst.hidden = src.hidden; dst.lift = src.lift;
     dst.path = src.path ? {
       spec: { ...src.path.spec }, label: src.path.label, scale: src.path.scale, swirl: src.path.swirl,
       pts: src.path.pts.slice(), tans: src.path.tans.slice(), closed: src.path.closed,
+      drawn: src.path.drawn ? src.path.drawn.slice() : undefined,
     } : undefined;
   }
 
@@ -1093,6 +1095,14 @@ export class Sandbox {
       p.pts = s.pts; p.tans = s.tans; p.closed = s.closed;
     }
     this.rebuildMarker(rec);
+    for (const e of this.entities) e.body.wakeUp();
+    this.onFieldChange?.();
+  }
+
+  /** Toggle a flow tube's lift: on = suspend gravity inside it, so bodies can ride a 3D curve up into
+   *  the air (Lissajous, Viviani, a rising spiral) instead of dropping out the bottom of the tube. */
+  setPathLift(rec: FieldRec, on: boolean) {
+    rec.field.lift = on;
     for (const e of this.entities) e.body.wakeUp();
     this.onFieldChange?.();
   }
@@ -1444,16 +1454,18 @@ export class Sandbox {
         this._fieldV.set(v.x, v.y, v.z);
         const mass = e.body.mass();
         this._s.set(0, 0, 0);
-        let wellInf = 0; // strongest gravity-well influence on this body (drives the gravity suspension)
+        let liftInf = 0; // strongest gravity-suspension influence (a well's region, or a lift-flow tube)
         for (const { field } of this.fields) {
           fieldForce(field, this._p, this._fieldV, mass, this.fieldStrength, this._fieldF);
           this._s.add(this._fieldF);
-          if (field.kind === 'gravitywell') wellInf = Math.max(wellInf, fieldInfluence(field, this._p));
+          if (field.kind === 'gravitywell') liftInf = Math.max(liftInf, fieldInfluence(field, this._p));
+          else if (field.kind === 'path' && field.lift) liftInf = Math.max(liftInf, pathInfluence(field, this._p));
         }
-        // Inside a gravity well, suspend world gravity (∝ influence, so it fades at the region edge):
-        // the well's own pull becomes the only gravity, so bodies lift off the floor and ORBIT the
-        // centre in free-fall instead of being pinned down and stalled by floor friction.
-        if (wellInf > 0) this._s.y += -this.gravityY * mass * wellInf;
+        // Suspend world gravity (∝ influence, so it fades at the boundary) inside a gravity well OR a
+        // lift-enabled flow tube: the field's own force becomes the only thing acting, so bodies lift
+        // off the floor and follow it — orbiting a well's centre, or riding a 3D flow curve up into the
+        // air instead of falling out the bottom of the tube and stalling on floor friction.
+        if (liftInf > 0) this._s.y += -this.gravityY * mass * liftInf;
         if (this._s.x || this._s.y || this._s.z) {
           e.body.applyImpulse({ x: this._s.x * FIXED, y: this._s.y * FIXED, z: this._s.z * FIXED }, true);
         }

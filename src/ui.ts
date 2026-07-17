@@ -1000,6 +1000,14 @@ function buildFieldsSection(panel: HTMLElement, sandbox: Sandbox) {
   const swirlIn = numInput(0, 'Swirl around the path (0 = flow along it, ~1 = corkscrew)');
   pathNums.append(labeled('curve size', scaleIn), labeled('tube', tubeIn), labeled('swirl', swirlIn));
 
+  // Lift: suspend gravity inside the tube so bodies can ride a 3D curve up into the air (Lissajous,
+  // rising spirals) instead of dropping out the bottom. Off by default — flat flows don't need it.
+  const pathLift = el('div', '', 'row wrap');
+  const liftBtn = el('button', 'Lift', 'mini');
+  liftBtn.title = 'Suspend gravity inside the tube so bodies follow a 3D curve up (not just flat flows).';
+  liftBtn.onclick = () => { const r = sandbox.activeField; if (r) sandbox.setPathLift(r, !r.field.lift); };
+  pathLift.append(liftBtn);
+
   // custom-equation editor: type your own x(t), y(t), z(t) (Desmos-style MathLive, only "t" allowed).
   // It PREVIEWS live as you type — the draft curve redraws on every valid edit (no Apply-to-see step).
   const customBox = el('div', '', 'hidden');
@@ -1068,7 +1076,7 @@ function buildFieldsSection(panel: HTMLElement, sandbox: Sandbox) {
   const bCancel = el('button', 'Cancel', 'mini');
   const bDelete = el('button', 'Delete field', 'danger');
   btns.append(bHide, bPlace, bCancel, bDelete);
-  editor.append(title, shapeRow, sizeRow, pathRow, pathNums, customBox, strRow, hint, btns);
+  editor.append(title, shapeRow, sizeRow, pathRow, pathNums, pathLift, customBox, strRow, hint, btns);
   panel.append(editor);
 
   const info = el('div', '', 'preview');
@@ -1158,6 +1166,8 @@ function buildFieldsSection(panel: HTMLElement, sandbox: Sandbox) {
     sizeRow.classList.toggle('hidden', isPath);
     pathRow.classList.toggle('hidden', !isPath);
     pathNums.classList.toggle('hidden', !isPath);
+    pathLift.classList.toggle('hidden', !isPath);
+    liftBtn.classList.toggle('primary', !!rec.field.lift);
     if (!isPath) customBox.classList.add('hidden'); // never leave the equation editor up on a non-path
     (strWrap.firstChild as Text).textContent = isPath ? 'flow m/s' : rec.field.kind === 'gravitywell' ? 'mass' : 'speed m/s';
     if (isPath) {

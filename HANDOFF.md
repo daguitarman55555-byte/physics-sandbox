@@ -307,13 +307,23 @@ equation is applied. Tested via SYNTHETIC PointerEvents (project world pts→cli
 `camera.project`, dispatch pointerdown on #scene + move/up on window): a circle→closed field, an
 S-curve→open field (63% of 100 objects follow it), controls re-enabled after, no errors. NB import('three')
 fails in the console (bare specifier) — grab THREE via `S.controls.target.constructor` instead.
-STILL OPEN from Rafael's picks (build next, one at a time, each its own commit+push): (2) LIFT inside
-flow tubes (suspend gravity in a path field's tube like the well does, so the complex 3D catalog curves
-that failed the floor-pile test — Lissajous/Viviani/sphere-spiral, 3–23% moving — actually carry it),
-(3) TURBULENCE field (curl-of-noise, the queued kind), (4) FORCE BRUSH (drag to push/pull/swirl live) +
-AUTO-FIT (button to size a field's region to the crowd — the 500-object test showed the default well
-under-reaches a wide pile). Rafael also asked for true-3D drawing (per-point depth: draw-then-lift or
-scroll-to-height) — a natural follow-up to build 1.
+Lift-inside-flow-tube shipped (2026-07-17, build 2 of 4): a per-path-field `lift` flag (Field.lift) +
+`Lift` toggle in the path editor. New export `pathInfluence(field,pos)` in fields.ts (mirrors the tube
+`inf` pathForce computes) lets stepPhysics suspend world gravity for bodies inside a lift-tube — the
+`wellInf` var is now `liftInf`, max'd over gravity-wells (fieldInfluence) AND lift path tubes
+(pathInfluence). Also FIXED a latent bug: cloneField/copyFieldInto were dropping `path.drawn` (so
+editing a drawn field lost its stroke) — both now carry `drawn` + the new `lift`. HONEST RESULT from
+testing: lift works (captured bodies ride a rising spiral / Viviani UP into the air — topY↑, meanSpeed
+~2.5× on Viviani) but only modestly lifts movingFrac on the SPARSE 3D curves (Viviani ~21%→~34%),
+because the real ceiling is CAPTURE — a compact floor pile doesn't fill a big sparse 3D tube. At a
+compact scale (~6) sitting in the pile, helix/sphere-spiral already hit ~90% with OR without lift. So
+lift = a real opt-in "zero-g flow tube", not a capture fix (capture ≈ curve scale vs pile size → that's
+what build 4's auto-fit is for). Verified live, 30fps, no console errors.
+STILL OPEN from Rafael's picks (build next, one at a time, each its own commit+push): (3) TURBULENCE
+field (curl-of-noise, the queued kind), (4) FORCE BRUSH (drag to push/pull/swirl live) + AUTO-FIT
+(button to size a field's region to the crowd — the 500-object test showed the default well under-reaches
+a wide pile). Rafael also asked for true-3D drawing (per-point depth: draw-then-lift or scroll-to-height)
+— a natural follow-up to build 1.
 STANDING RULE (Rafael, 2026-07-16): git commit AND push after EVERY build — don't wait to be asked.
 
 Stability hardening (2026-07-13): dynamic bodies now spawn with CCD enabled and reject deeply-
