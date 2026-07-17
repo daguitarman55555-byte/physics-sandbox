@@ -283,6 +283,18 @@ well's MASS (UI label reads "mass", not "speed"). Marker = concentric orbit ring
 100 objects → fluid orbiting cloud, 93% moving, 30fps, no console errors (attractor left as-is = the
 plain gatherer). Was queued as fitting the target-velocity model — that turned out to be WRONG; it
 needed its own conservative path + gravity suspension.
+Path curves auto-orient FLAT (2026-07-17): reported that some path presets don't move a floor pile —
+the Loop is `(cos t, sin t, 0)`, a VERTICAL circle, so a horizontal layer of objects sits outside its
+tube (measured: 11% moving vs a horizontal Circle's 64%). Fix: `samplePath` now calls `layCurveFlat`,
+which rotates the sampled points (in the field's LOCAL frame — `field.quat` is left alone so R/gizmo
+still tilt the whole thing) so the curve's best-fit plane is horizontal. The plane normal is the
+least-variance eigenvector of the point covariance via a compact cyclic-Jacobi 3×3 solver (`planeNormal`)
+— NOT Newell's area method, which returns ~0 for a symmetric sine wave (zero net enclosed area) and left
+it vertical. `planeNormal` returns false when the smallest spread isn't appreciably flatter than the
+largest (a 3D-isotropic knot), so genuinely 3D curves — Helix (an updraft), trefoil — are left standing
+instead of yanked to some arbitrary plane. Verified live: Loop, Wave, and a vertical Rose all lay flat
+and carry the pile (Loop 4.4 m/s, 64% moving, horizontal racetrack on screen); Helix/trefoil unchanged;
+no console errors. Wave stays marginal but that's its open-path drain-off, not orientation.
 STANDING RULE (Rafael, 2026-07-16): git commit AND push after EVERY build — don't wait to be asked.
 
 Stability hardening (2026-07-13): dynamic bodies now spawn with CCD enabled and reject deeply-

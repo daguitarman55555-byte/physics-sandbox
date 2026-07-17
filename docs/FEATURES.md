@@ -79,7 +79,11 @@ A checklist so nothing is lost. `[x]` = in Phase 1 today · `[ ]` = planned (wit
       torus knots, Lissajous, flowers, **spirographs**, **roses**, roulettes, butterfly, space
       curves — reusing `systems/catalog.ts`), or your **own equations** (a Desmos-style `x(t),y(t),
       z(t)` MathLive editor). Any curve is auto-centred, normalized to `scale`, and its closure is
-      auto-detected. The marker draws the curve, its capture tube, and flow arrows.
+      auto-detected. It is also **auto-oriented FLAT** by default (its best-fit plane, found by PCA, is
+      laid horizontal) so it lands on a floor layer of objects and every preset does something visible —
+      a Loop (a vertical circle in its raw equations) becomes a horizontal racetrack, while a genuinely
+      3D curve (a Helix updraft, a trefoil knot) is left standing since it has no flat plane. Tilt it
+      yourself afterwards with **R** / the rotate gizmo. The marker draws the curve, its tube, and arrows.
 - [x] **Force fields** (`systems/fields.ts`) — attractor · repeller · wind · vortex · path, with
       translucent region markers, a live global strength slider, and clear-all. **One unified model:**
       every field builds a *target velocity* and steers bodies toward it, so **`strength` means the

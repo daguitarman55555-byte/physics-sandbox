@@ -123,7 +123,68 @@ export function samplePath(spec: CurveSpec, scale: number): { pts: Float32Array;
     const len = Math.hypot(dx, dy, dz) || 1;
     tans[i * 3] = dx / len; tans[i * 3 + 1] = dy / len; tans[i * 3 + 2] = dz / len;
   }
+  layCurveFlat(pts, tans, n); // orient the curve flat by default so it lands on the object layer
   return { pts, tans, closed };
+}
+
+const _up = new THREE.Vector3(0, 1, 0);
+const _nrm = new THREE.Vector3();
+const _rot = new THREE.Quaternion();
+const _rv = new THREE.Vector3();
+
+/**
+ * Lay a sampled flow curve FLAT by default: rotate it (in its own local frame) so its best-fit plane
+ * is horizontal — the plane's normal points world-up. The normal is the least-variance axis of the
+ * curve's points (a PCA plane fit), which is robust for closed loops, open curves, and even a flat
+ * sine wave (whose net enclosed area is zero — that fools a Newell/area estimate but not PCA). This is
+ * why every preset "just works" over a floor layer of objects: a Loop (a vertical circle in its raw
+ * equations) gets laid down like a racetrack, while a genuinely 3D curve like a Helix — whose thin axis
+ * already points up — is left standing as an updraft. Only the sampled points move; the field's own
+ * quaternion is untouched, so the user can still tilt the whole thing with the R / rotate gizmo after.
+ */
+function layCurveFlat(pts: Float32Array, tans: Float32Array, n: number) {
+  if (!planeNormal(pts, n, _nrm)) return; // no well-defined plane (e.g. a 3D-isotropic tangle) — leave it
+  if (Math.abs(_nrm.y) > 0.999) return; // already horizontal — nothing to rotate
+  _rot.setFromUnitVectors(_nrm, _up); // rotate the plane normal onto world-up
+  for (let i = 0; i < n; i++) {
+    _rv.set(pts[i * 3], pts[i * 3 + 1], pts[i * 3 + 2]).applyQuaternion(_rot);
+    pts[i * 3] = _rv.x; pts[i * 3 + 1] = _rv.y; pts[i * 3 + 2] = _rv.z;
+    _rv.set(tans[i * 3], tans[i * 3 + 1], tans[i * 3 + 2]).applyQuaternion(_rot);
+    tans[i * 3] = _rv.x; tans[i * 3 + 1] = _rv.y; tans[i * 3 + 2] = _rv.z;
+  }
+}
+
+/**
+ * Best-fit plane normal of a point set = the eigenvector of its covariance matrix with the SMALLEST
+ * eigenvalue (the direction the points vary least along). Solved with a cyclic Jacobi rotation sweep —
+ * exact enough for a 3×3 symmetric matrix in a dozen sweeps. Points are assumed ~zero-mean (samplePath
+ * centres them). Returns false if the curve is too round to have a meaningful plane (smallest and
+ * largest spreads are comparable), so a tangled 3D knot isn't yanked to some arbitrary orientation.
+ */
+function planeNormal(pts: Float32Array, n: number, out: THREE.Vector3): boolean {
+  let c00 = 0, c01 = 0, c02 = 0, c11 = 0, c12 = 0, c22 = 0;
+  for (let i = 0; i < n; i++) {
+    const x = pts[i * 3], y = pts[i * 3 + 1], z = pts[i * 3 + 2];
+    c00 += x * x; c01 += x * y; c02 += x * z; c11 += y * y; c12 += y * z; c22 += z * z;
+  }
+  const m = [[c00, c01, c02], [c01, c11, c12], [c02, c12, c22]];
+  const v = [[1, 0, 0], [0, 1, 0], [0, 0, 1]]; // accumulates the eigenvectors
+  for (let sweep = 0; sweep < 12; sweep++) {
+    for (const [p, q] of [[0, 1], [0, 2], [1, 2]] as const) {
+      if (Math.abs(m[p][q]) < 1e-12) continue;
+      const phi = 0.5 * Math.atan2(2 * m[p][q], m[q][q] - m[p][p]);
+      const c = Math.cos(phi), s = Math.sin(phi);
+      for (let k = 0; k < 3; k++) { const kp = m[k][p], kq = m[k][q]; m[k][p] = c * kp - s * kq; m[k][q] = s * kp + c * kq; }
+      for (let k = 0; k < 3; k++) { const pk = m[p][k], qk = m[q][k]; m[p][k] = c * pk - s * qk; m[q][k] = s * pk + c * qk; }
+      for (let k = 0; k < 3; k++) { const kp = v[k][p], kq = v[k][q]; v[k][p] = c * kp - s * kq; v[k][q] = s * kp + c * kq; }
+    }
+  }
+  const ev = [m[0][0], m[1][1], m[2][2]];
+  let lo = 0, hi = 0;
+  for (let i = 1; i < 3; i++) { if (ev[i] < ev[lo]) lo = i; if (ev[i] > ev[hi]) hi = i; }
+  if (ev[lo] > 0.15 * ev[hi]) return false; // not appreciably flatter in any direction → no clear plane
+  out.set(v[0][lo], v[1][lo], v[2][lo]).normalize();
+  return true;
 }
 
 const RESPONSE = 5; // how hard any field steers a body toward its target velocity (1/s) — uniform
