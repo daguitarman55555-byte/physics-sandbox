@@ -115,6 +115,9 @@ export class Sandbox {
   // field placement/editing: the gizmo, the ghost awaiting confirmation, and the live selection
   private transform!: TransformControls;
   private placing: FieldRec | null = null; // ghost being positioned — NOT in `fields`, exerts no force
+  // When editing a LIVE field, `placing` holds a DRAFT copy (the editable preview) and this points at
+  // the original: edits touch only the draft (no force, no sim change) until Apply writes them back.
+  private editingOriginal: FieldRec | null = null;
   selectedField: FieldRec | null = null;
   private placeValid = true;
   private axisLock: 'x' | 'y' | 'z' | null = null;
@@ -903,28 +906,99 @@ export class Sandbox {
     this.onFieldChange?.();
   }
 
-  /** Commit the ghost: the field goes live and starts exerting force. Stays selected for tweaking. */
+  /**
+   * Begin EDITING a live field. Rather than mutate it in place (which used to change the running sim
+   * on every click), we spawn a DRAFT copy — a ghost that exerts no force — and hide the original's
+   * marker so the draft stands in for it. Every editor control now touches the draft (pure preview);
+   * the original keeps running its current force untouched until you Apply (commitPlace).
+   */
+  beginEdit(rec: FieldRec) {
+    if (this.editingOriginal === rec) return; // already editing this one
+    this.cancelPlace(); // drop any in-progress placement/edit (restores a prior original if needed)
+    this.selectedField = null;
+    this.editingOriginal = rec;
+    rec.marker.visible = false; // the draft stands in for it while you edit
+    const draft: FieldRec = { field: this.cloneField(rec.field), marker: this.makeFieldMarker(rec.field) };
+    this.fieldGroup.add(draft.marker);
+    this.tagMarker(draft);
+    this.placing = draft;
+    this.attachGizmo(draft, 'translate');
+    this.refreshPlaceValidity();
+    this.onFieldChange?.();
+  }
+
+  /** Commit the ghost. New field → goes live. Editing → the draft's settings are written back to the
+   *  original (the one place the running sim changes). Either way the editor then closes. */
   commitPlace() {
     const rec = this.placing;
     if (!rec || !this.placeValid) return;
+    if (this.editingOriginal) {
+      const orig = this.editingOriginal;
+      this.copyFieldInto(rec.field, orig.field); // apply the draft's settings to the live field
+      orig.marker.position.copy(rec.marker.position);
+      orig.marker.quaternion.copy(rec.marker.quaternion);
+      this.rebuildMarker(orig); // reflect the new shape/size/curve (rebuild sets visible from hidden)
+      // discard the draft and close the editor
+      this.placing = null;
+      this.editingOriginal = null;
+      if (this.transform.object === rec.marker) this.transform.detach();
+      this.axisLock = null;
+      this.fieldGroup.remove(rec.marker);
+      this.disposeMarker(rec.marker);
+      for (const e of this.entities) e.body.wakeUp();
+      this.onFieldChange?.();
+      return;
+    }
     rec.core?.scale.setScalar(1); // stop the ghost pulse
     this.tintMarker(rec.marker, FIELD_INFO[rec.field.kind].color);
     this.fields.push(rec);
     this.placing = null;
-    this.selectedField = rec; // keep the gizmo on it so you can keep nudging
+    this.selectedField = null; // done placing — close the editor (click it again to edit)
+    this.transform.detach();
+    this.axisLock = null;
     for (const e of this.entities) e.body.wakeUp();
     this.onFieldChange?.();
   }
 
-  /** Throw the ghost away without placing anything. */
+  /** Throw the ghost away without placing anything — and, if editing, restore the original marker. */
   cancelPlace() {
     const rec = this.placing;
     if (!rec) return;
     this.placing = null;
     if (this.transform.object === rec.marker) this.transform.detach();
+    this.axisLock = null;
     this.fieldGroup.remove(rec.marker);
     this.disposeMarker(rec.marker);
+    if (this.editingOriginal) {
+      this.editingOriginal.marker.visible = !this.editingOriginal.field.hidden; // show the live field again
+      this.editingOriginal = null;
+    }
     this.onFieldChange?.();
+  }
+
+  /** Deep copy a field so the draft can be edited without touching the original. */
+  private cloneField(f: Field): Field {
+    const c: Field = {
+      id: f.id, kind: f.kind, shape: f.shape,
+      pos: f.pos.clone(), quat: f.quat.clone(), size: f.size.clone(),
+      strength: f.strength, hidden: f.hidden,
+    };
+    if (f.path) c.path = {
+      spec: { ...f.path.spec }, label: f.path.label, scale: f.path.scale, swirl: f.path.swirl,
+      pts: f.path.pts.slice(), tans: f.path.tans.slice(), closed: f.path.closed,
+    };
+    return c;
+  }
+
+  /** Write a draft's editable settings onto the live field (kind is fixed and never changes). */
+  private copyFieldInto(src: Field, dst: Field) {
+    dst.shape = src.shape;
+    dst.pos.copy(src.pos); dst.quat.copy(src.quat); dst.size.copy(src.size);
+    dst.strength = src.strength; dst.hidden = src.hidden;
+    dst.path = src.path ? {
+      spec: { ...src.path.spec }, label: src.path.label, scale: src.path.scale, swirl: src.path.swirl,
+      pts: src.path.pts.slice(), tans: src.path.tans.slice(), closed: src.path.closed,
+    } : undefined;
   }
 
   /** Select a live field for editing (null clears). */
@@ -1020,7 +1094,20 @@ export class Sandbox {
   /** The field the gizmo/keys currently drive: the ghost being placed, else the selected one. */
   get activeField(): FieldRec | null { return this.placing ?? this.selectedField; }
   get isPlacing(): boolean { return this.placing !== null; }
+  get isEditing(): boolean { return this.editingOriginal !== null; } // editing a live field via a draft
+  get editingField(): FieldRec | null { return this.editingOriginal; } // the live field being edited
   get placementValid(): boolean { return this.placeValid; }
+
+  /** Delete whatever the editor is pointed at: the field being edited, else the plain selection. */
+  removeActiveField() {
+    if (this.editingOriginal) {
+      const orig = this.editingOriginal;
+      this.cancelPlace(); // discard the draft + restore the original's marker, then remove it
+      this.removeField(orig);
+    } else if (this.selectedField && !this.placing) {
+      this.removeField(this.selectedField);
+    }
+  }
   get lockedAxis(): 'x' | 'y' | 'z' | null { return this.axisLock; }
   get gizmoMode(): string { return this.transform.mode; }
 
@@ -1497,9 +1584,9 @@ export class Sandbox {
     this.pointerDownAt = { x: e.clientX, y: e.clientY };
     this.setPointer(e);
 
-    // a field's core is a click target: selecting one puts the gizmo + keys on it
+    // a field's core is a click target: clicking one opens it for editing (via a preview draft)
     const field = this.pickField();
-    if (field) { this.selectField(field); return; }
+    if (field) { this.beginEdit(field); return; }
     if (this.selectedField && !this.placing) this.selectField(null); // clicked away → drop the gizmo
 
     // non-grab tools act on the picked object (or empty space) and never start a drag
@@ -1622,7 +1709,7 @@ export class Sandbox {
     } else if (k === 'Escape') {
       if (this.placing) this.cancelPlace(); else this.selectField(null);
     } else if (k === 'Delete' || k === 'Backspace') {
-      if (this.selectedField && !this.placing) this.removeField(this.selectedField);
+      this.removeActiveField();
     } else if (lower === 'r' && (rec.field.kind === 'wind' || rec.field.kind === 'path' || rec.field.shape !== 'sphere')) {
       this.transform.setMode(this.transform.mode === 'rotate' ? 'translate' : 'rotate'); // aim wind / turn the region or path
       this.onFieldChange?.();

@@ -236,9 +236,39 @@ Roulettes (cardioid/nephroid/deltoid/astroid/lemniscate/**butterfly**), Space cu
 seam), log/rose/toroidal spirals. All verified to sample OK headlessly. NB the shape-creator's "More…"
 button ALSO has class `.more`, so `querySelector('button.more')` is ambiguous — scope to the path
 editor. NB `CurveSpec` has no `closed` field anymore (auto-detected), and PATH_PRESETS dropped it too.
+Field editing = PREVIEW-THEN-APPLY + live equation preview (2026-07-16): fixed two reported bugs.
+(1) Custom flow equations gave NO preview (you typed into a void, had to press "Apply equations" to
+see anything), and (2) editing an already-placed field mutated the LIVE sim on every click, while the
+f(t) box showed STALE defaults (`cos/0/sin`) instead of the field's real curve — so an Apply/preset
+click silently overwrote it. Both fixed by making EDITING a live field reuse the placement GHOST
+machinery: `Sandbox.beginEdit(rec)` spawns a **draft** = `cloneField(rec.field)` (a ghost, NOT in
+`fields`, exerts zero force), hides the original's marker so the draft stands in, and points every
+editor control at the draft. The original keeps running its CURRENT force untouched; `commitPlace`
+(now the "Apply" button when `editingOriginal` is set) writes the draft back via `copyFieldInto` and
+rebuilds the live marker; `cancelPlace`/Esc discards the draft and restores the original (verified:
+draft→Loop preview, list stays "Path·custom", Esc snaps back to the helix; Apply→"Path·Circle").
+New state: `editingOriginal: FieldRec|null`, getters `isEditing`/`editingField`; `commitPlace` now
+branches on it and both commit paths DESELECT afterwards (a placed field is no longer left live-
+editable — the old bug's root). `removeActiveField()` deletes whatever the editor targets. Clicking a
+field's core / list row → `beginEdit` (was `selectField`). UI: the f(t) editor now PREVIEWS live as
+you type (debounced 200ms `applyCustom` on the mathfield `input` + t-range; the "Apply equations"
+button is GONE — a status line reads "curve updated" / parse error). Presets/catalog use `pickCurve`
+= `setCurveFields` (mirror equations into the mathfields) + `applySpec`. `refresh` repopulates the
+mathfields ONLY on active-field IDENTITY change (`shownField` guard) so live typing isn't clobbered by
+the refresh it triggers, and `mathField.set` uses `silenceNotifications` so it never re-fires input.
+Verified live (path curves + region shapes), 60 fps, no console errors. `selectField(non-null)` now
+has no callers — `selectedField` stays null; `activeField` = `placing` during any edit.
 Next: joint MOTORS (spin a hinge) + more tools (blow, duplicate), per-object gravity, or buoyancy;
 then Phase 7 save/load + time controls (pause/step/rewind). Also still open: superformula /
 freehand creators, GLTF/STL import (V-HACD), texture upload, alloy composer.
+QUEUED new FIELD kinds (Rafael picked 2026-07-16, build ONE at a time, each its own commit+push):
+**Turbulence** (curl-noise region — objects jitter/swirl like leaves in gusty air), **Magnetic**
+(F=q·v×B, force ⊥ velocity so movers curve into circles/helices — distinct from the positional
+vortex), **Drag zone** (damps velocity → terminal-velocity / slow-mo pockets; bridges the roadmap's
+wind→relative-velocity drag), **Gravity well** (true 1/r² Newtonian falloff → real orbits, Cosmos
+on-ramp). All fit the existing `fieldForce` target-velocity model except magnetic/drag which act on
+`vel` directly (already passed in). Harmonic trap + one-shot Explosion are the "Other" runners-up.
+STANDING RULE (Rafael, 2026-07-16): git commit AND push after EVERY build — don't wait to be asked.
 
 Stability hardening (2026-07-13): dynamic bodies now spawn with CCD enabled and reject deeply-
 overlapping drop points — previously, an overlapping spawn could make Rapier's solver inject a huge

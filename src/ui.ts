@@ -9,7 +9,7 @@ import katex from 'katex';
 import 'katex/dist/katex.min.css';
 import { MathfieldElement } from 'mathlive';
 import 'mathlive/fonts.css';
-import type { Entity, Sandbox } from './sandbox';
+import type { Entity, Sandbox, FieldRec } from './sandbox';
 import { buildRevolution, buildParamCurve, buildParamSurface, REV_PRESETS, CURVE_PRESETS, SURFACE_PRESETS } from './systems/shapes';
 import { buildImplicit, IMPLICIT_PRESETS } from './systems/implicit';
 import {
@@ -966,16 +966,25 @@ function buildFieldsSection(panel: HTMLElement, sandbox: Sandbox) {
   const wrapA = labeled('r', szA), wrapB = labeled('y', szB), wrapC = labeled('z', szC);
   sizeRow.append(wrapA, wrapB, wrapC);
 
-  // path-field controls (shown only for a Path field): which flow curve, its scale + tube, its swirl
-  const applySpec = (spec: { xt: string; yt: string; zt: string; t0: number; t1: number }, label: string) => {
+  // path-field controls (shown only for a Path field): which flow curve, its scale + tube, its swirl.
+  // These edit the DRAFT (a preview that exerts no force) — the live field only changes when you Apply.
+  type Spec = { xt: string; yt: string; zt: string; t0: number; t1: number };
+  const applySpec = (spec: Spec, label: string) => {
     const r = sandbox.activeField; if (r) sandbox.setPathSpec(r, spec, label);
   };
+  // mirror a curve's equations into the f(t) inputs (so the editor always reflects the real field)
+  const setCurveFields = (spec: Spec) => {
+    mf.xt.set(spec.xt); mf.yt.set(spec.yt); mf.zt.set(spec.zt);
+    ct0.value = String(spec.t0); ct1.value = String(spec.t1);
+    customErr.textContent = '';
+  };
+  const pickCurve = (spec: Spec, label: string) => { setCurveFields(spec); applySpec(spec, label); };
   const pathRow = el('div', '', 'row wrap');
   const pathBtns: Record<string, HTMLButtonElement> = {};
   for (const key of PATH_PRESET_KEYS) {
     const p = PATH_PRESETS[key];
     const b = el('button', p.label, 'mini');
-    b.onclick = () => applySpec({ xt: p.xt, yt: p.yt, zt: p.zt, t0: p.t0, t1: p.t1 }, p.label);
+    b.onclick = () => pickCurve({ xt: p.xt, yt: p.yt, zt: p.zt, t0: p.t0, t1: p.t1 }, p.label);
     pathBtns[key] = b;
     pathRow.append(b);
   }
@@ -990,7 +999,8 @@ function buildFieldsSection(panel: HTMLElement, sandbox: Sandbox) {
   const swirlIn = numInput(0, 'Swirl around the path (0 = flow along it, ~1 = corkscrew)');
   pathNums.append(labeled('curve size', scaleIn), labeled('tube', tubeIn), labeled('swirl', swirlIn));
 
-  // custom-equation editor: type your own x(t), y(t), z(t) (Desmos-style MathLive, only "t" allowed)
+  // custom-equation editor: type your own x(t), y(t), z(t) (Desmos-style MathLive, only "t" allowed).
+  // It PREVIEWS live as you type — the draft curve redraws on every valid edit (no Apply-to-see step).
   const customBox = el('div', '', 'hidden');
   const mf = { xt: mathField('cos(t)'), yt: mathField('0'), zt: mathField('sin(t)') };
   for (const [key, label] of [['xt', 'x(t)'], ['yt', 'y(t)'], ['zt', 'z(t)']] as const) {
@@ -1002,14 +1012,22 @@ function buildFieldsSection(panel: HTMLElement, sandbox: Sandbox) {
   const ct0 = numInput(0, 'from t'), ct1 = numInput(6.283, 'to t');
   customT.append(labeled('from t', ct0), labeled('to t', ct1));
   const customErr = el('div', '', 'preview');
-  const bApply = el('button', 'Apply equations', 'mini');
-  bApply.onclick = () => {
-    const r = sandbox.activeField; if (!r) return;
-    const spec = { xt: mf.xt.value(), yt: mf.yt.value(), zt: mf.zt.value(), t0: parseFloat(ct0.value) || 0, t1: parseFloat(ct1.value) || 6.283 };
-    customErr.textContent = sandbox.setPathSpec(r, spec, 'custom') ? '' : 'Could not parse — check the equations (only "t" is allowed).';
-  };
-  customBox.append(customT, bApply, customErr);
+  customBox.append(customT, customErr);
   bCustom.onclick = () => customBox.classList.toggle('hidden');
+
+  // live preview: re-sample the draft curve as the equations are typed (debounced so fast typing is
+  // cheap). A partial/invalid expression just leaves the last good curve up and flags the status line.
+  let customTimer = 0;
+  const applyCustom = () => {
+    const r = sandbox.activeField; if (!r) return;
+    const spec: Spec = { xt: mf.xt.value(), yt: mf.yt.value(), zt: mf.zt.value(), t0: parseFloat(ct0.value) || 0, t1: parseFloat(ct1.value) || 6.283 };
+    const ok = sandbox.setPathSpec(r, spec, 'custom');
+    customErr.className = ok ? 'preview' : 'preview err';
+    customErr.textContent = ok ? 'curve updated' : 'Could not parse — check the equations (only “t” is allowed).';
+  };
+  const applyCustomSoon = () => { clearTimeout(customTimer); customTimer = window.setTimeout(applyCustom, 200); };
+  for (const k of ['xt', 'yt', 'zt'] as const) mf[k].el.addEventListener('input', applyCustomSoon);
+  ct0.oninput = applyCustomSoon; ct1.oninput = applyCustomSoon;
 
   // the curve library popup (the "More…" 100-curve picker), grouped like the shape library
   const lib = el('div', '', 'hidden'); lib.id = 'curve-library';
@@ -1025,7 +1043,7 @@ function buildFieldsSection(panel: HTMLElement, sandbox: Sandbox) {
       const row = el('div', '', 'row wrap');
       for (const e of list) {
         const b = el('button', e.name, 'mini');
-        b.onclick = () => { applySpec({ xt: e.xt, yt: e.yt, zt: e.zt, t0: e.t0, t1: e.t1 }, e.name); lib.classList.add('hidden'); };
+        b.onclick = () => { pickCurve({ xt: e.xt, yt: e.yt, zt: e.zt, t0: e.t0, t1: e.t1 }, e.name); lib.classList.add('hidden'); };
         row.append(b);
       }
       libPage.append(row);
@@ -1081,17 +1099,17 @@ function buildFieldsSection(panel: HTMLElement, sandbox: Sandbox) {
   bHide.onclick = () => { const r = sandbox.activeField; if (r) sandbox.setFieldHidden(r, !r.field.hidden); };
   bPlace.onclick = () => sandbox.commitPlace();
   bCancel.onclick = () => sandbox.cancelPlace();
-  bDelete.onclick = () => { const r = sandbox.selectedField; if (r) sandbox.removeField(r); };
+  bDelete.onclick = () => sandbox.removeActiveField();
 
   const renderList = () => {
     list.innerHTML = '';
     for (const rec of sandbox.fieldList) {
       const row = el('div', '', 'fieldrow');
-      if (rec === sandbox.selectedField) row.classList.add('on');
+      if (rec === sandbox.editingField) row.classList.add('on');
       const dot = `<i class="dot" style="background:#${FIELD_INFO[rec.field.kind].color.toString(16).padStart(6, '0')}"></i>`;
       const sub = rec.field.kind === 'path' ? rec.field.path!.label : rec.field.shape;
       const name = el('button', `${dot}${FIELD_INFO[rec.field.kind].label} · ${sub}`, 'flabel');
-      name.onclick = () => sandbox.selectField(rec);
+      name.onclick = () => sandbox.beginEdit(rec);
       const eye = el('button', rec.field.hidden ? 'show' : 'hide', 'mini eye');
       eye.onclick = (e) => { e.stopPropagation(); sandbox.setFieldHidden(rec, !rec.field.hidden); };
       row.append(name, eye);
@@ -1113,16 +1131,25 @@ function buildFieldsSection(panel: HTMLElement, sandbox: Sandbox) {
     else { set(wrapA, szA, 'x', s.x, true); set(wrapB, szB, 'y', s.y, true); set(wrapC, szC, 'z', s.z, true); }
   };
 
+  let shownField: FieldRec | null = null; // which field the equation/number inputs were last filled for
   const refresh = () => {
     const rec = sandbox.activeField;
     updateInfo();
     renderList();
     editor.classList.toggle('hidden', !rec);
-    if (!rec) return;
-    const placing = sandbox.isPlacing;
-    const bad = placing && !sandbox.placementValid;
+    if (!rec) { shownField = null; return; }
+    // A different field just became active (a new draft/ghost) → mirror ITS settings into the inputs,
+    // so the editor always reflects the real field (never leaves a stale equation from the last one).
+    // We do this only on identity change so live typing isn't clobbered by the refresh it triggers.
+    if (rec !== shownField) {
+      shownField = rec;
+      if (rec.field.path) setCurveFields(rec.field.path.spec);
+    }
+    const editing = sandbox.isEditing; // editing a live field via a draft (vs placing a brand-new one)
+    const placing = sandbox.isPlacing; // true for both — the editor always drives a draft/ghost
+    const bad = !sandbox.placementValid;
     const isPath = rec.field.kind === 'path';
-    title.innerHTML = `${placing ? 'Placing' : 'Editing'} <b>${FIELD_INFO[rec.field.kind].label}</b>`
+    title.innerHTML = `${editing ? 'Editing' : 'Placing'} <b>${FIELD_INFO[rec.field.kind].label}</b>`
       + (rec.field.hidden ? ' · <b>hidden</b>' : '')
       + (bad ? ' · <b style="color:#dc4a4a">off-world / below floor</b>' : '');
     // path fields swap the shape/size controls for the flow-curve controls
@@ -1153,10 +1180,12 @@ function buildFieldsSection(panel: HTMLElement, sandbox: Sandbox) {
       + (sandbox.gizmoMode === 'rotate' ? ' · <b>turning</b>' : '')
       + '<br><b>X/Y/Z</b> lock · <b>arrows</b>/<b>PgUp</b>/<b>PgDn</b> nudge · <b>Shift</b> fine'
       + (canRotate ? ` · <b>R</b> ${rec.field.kind === 'wind' ? 'aim' : 'turn'}` : '')
-      + (placing ? '<br><b>Enter</b> place · <b>Esc</b> cancel' : '<br><b>Del</b> remove · <b>Esc</b> deselect');
+      + (editing ? '<br><b>Enter</b> apply · <b>Esc</b> cancel · <b>Del</b> delete' : '<br><b>Enter</b> place · <b>Esc</b> cancel');
+    // one Apply/Place gate: edits only reach the live field here (nothing mutates the sim mid-edit)
+    bPlace.textContent = editing ? 'Apply' : 'Place';
     bPlace.classList.toggle('hidden', !placing);
     bCancel.classList.toggle('hidden', !placing);
-    bDelete.classList.toggle('hidden', placing);
+    bDelete.classList.toggle('hidden', !editing); // only a live field can be deleted
     bPlace.disabled = bad;
   };
   sandbox.onFieldChange = refresh;
