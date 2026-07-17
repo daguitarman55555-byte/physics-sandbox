@@ -113,6 +113,12 @@ A checklist so nothing is lost. `[x]` = in Phase 1 today · `[ ]` = planned (wit
       don't need it). Verified: captured bodies climb a rising spiral/Viviani curve into an airborne arc
       (top-Y up, mean speed ~2.5× on Viviani). Honest limit: it helps the bodies a curve *captures*;
       whether a sparse 3D curve captures a compact floor pile still depends on sizing the curve to it.
+- [x] **Fit field to objects** (`Fit to objects` button) — auto-centre and size any field to reach the
+      whole crowd: covers the 92nd-percentile radius (robust to stray escapees) + a margin, so the region
+      actually encloses the objects instead of under-reaching a wide pile (the manual fix from the
+      500-object test). A gravity well is also lifted so its orbits clear the floor; a path field is
+      centred and its curve scaled to span the crowd. Verified: on 200 spread objects it grew the well
+      to enclose them and lifted moving-fraction 81% → 93%.
 - [x] **Turbulence** (`systems/fields.ts`) — a **curl-of-noise** velocity field: bodies are steered
       toward the local curl of a 3D noise potential, which is **divergence-free**, so they churn and
       **eddy like leaves in gusty air** (scattered directions, no net push) instead of piling at a

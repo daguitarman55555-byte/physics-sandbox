@@ -1072,10 +1072,13 @@ function buildFieldsSection(panel: HTMLElement, sandbox: Sandbox) {
   const hint = el('div', '', 'preview');
   const btns = el('div', '', 'row wrap');
   const bHide = el('button', 'Hide', 'mini');
+  const bFit = el('button', 'Fit to objects', 'mini');
+  bFit.title = 'Centre and size this field to reach the whole crowd of objects.';
+  bFit.onclick = () => { const r = sandbox.activeField; if (r) sandbox.fitFieldToObjects(r); };
   const bPlace = el('button', 'Place', 'mini');
   const bCancel = el('button', 'Cancel', 'mini');
   const bDelete = el('button', 'Delete field', 'danger');
-  btns.append(bHide, bPlace, bCancel, bDelete);
+  btns.append(bHide, bFit, bPlace, bCancel, bDelete);
   editor.append(title, shapeRow, sizeRow, pathRow, pathNums, pathLift, customBox, strRow, hint, btns);
   panel.append(editor);
 

@@ -1055,6 +1055,38 @@ export class Sandbox {
     this.onFieldChange?.();
   }
 
+  /**
+   * Auto-size and centre a field to the current crowd, so it actually reaches everything (the manual
+   * fix from the 500-object test, where the default region under-reached a wide pile). Covers ~92% of
+   * the objects (ignoring stray outliers) plus a margin. A region field gets that as its radius; a
+   * gravity well is also lifted so its orbits clear the floor; a path field is centred and its curve
+   * scaled to span the crowd. Operates on whatever the editor targets (a ghost/draft or a live field).
+   */
+  fitFieldToObjects(rec: FieldRec) {
+    const ents = this.entities;
+    if (!ents.length) return;
+    let cx = 0, cy = 0, cz = 0;
+    for (const e of ents) { const t = e.body.translation(); cx += t.x; cy += t.y; cz += t.z; }
+    const n = ents.length; cx /= n; cy /= n; cz /= n;
+    const dists = ents.map((e) => { const t = e.body.translation(); return Math.hypot(t.x - cx, t.y - cy, t.z - cz); }).sort((a, b) => a - b);
+    const cover = dists[Math.floor(0.92 * (dists.length - 1))]; // 92nd percentile — robust to stray escapees
+    const f = rec.field;
+    if (f.kind === 'path') {
+      f.pos.set(cx, Math.max(cy, 1.5), cz);
+      rec.marker.position.copy(f.pos);
+      this.setPathScale(rec, Math.max(2, cover));
+      this.setFieldSize(rec, new THREE.Vector3(Math.max(2, cover * 0.4), f.size.y, f.size.z)); // tube = size.x
+    } else {
+      const r = Math.max(3, cover + 3); // + margin so the soft boundary shell still covers the edge bodies
+      const posY = f.kind === 'gravitywell' ? Math.max(cy + r * 0.4, 8) : cy; // lift a well so orbits clear the floor
+      f.pos.set(cx, posY, cz);
+      rec.marker.position.copy(f.pos);
+      this.setFieldSize(rec, new THREE.Vector3(r, r, r));
+    }
+    if (this.transform.object === rec.marker) this.transform.attach(rec.marker);
+    this.onFieldChange?.();
+  }
+
   /** Hide/show a field's region marker. Hidden = invisible in the scene but STILL exerting force. */
   setFieldHidden(rec: FieldRec, hidden: boolean) {
     rec.field.hidden = hidden;
