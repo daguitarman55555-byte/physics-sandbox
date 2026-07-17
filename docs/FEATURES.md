@@ -113,6 +113,14 @@ A checklist so nothing is lost. `[x]` = in Phase 1 today · `[ ]` = planned (wit
       don't need it). Verified: captured bodies climb a rising spiral/Viviani curve into an airborne arc
       (top-Y up, mean speed ~2.5× on Viviani). Honest limit: it helps the bodies a curve *captures*;
       whether a sparse 3D curve captures a compact floor pile still depends on sizing the curve to it.
+- [x] **Force brush** (`Brush` tool: Push / Pull / Swirl) — hold and drag to shove objects live, no
+      placed field (the Powder-Toy-style interaction). Each step, every dynamic body within a radius of
+      the cursor point is steered toward a target velocity — **away** (push), **toward** (pull), or
+      **tangential** (swirl) — eased by distance, using the same velocity-target model as the fields so
+      it's a controlled shove, not a launch. The cursor point tracks the object under it, else a
+      horizontal plane at the camera focus. Verified: push cleared a crater (48→5 bodies near the point),
+      pull held them gathered, swirl spun them (tangential speed 4.5 vs ~0), camera control restored on
+      release, no console errors.
 - [x] **Fit field to objects** (`Fit to objects` button) — auto-centre and size any field to reach the
       whole crowd: covers the 92nd-percentile radius (robust to stray escapees) + a margin, so the region
       actually encloses the objects instead of under-reaching a wide pile (the manual fix from the

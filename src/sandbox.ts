@@ -54,7 +54,8 @@ export interface Entity {
   frozen?: boolean; // Phase 4 freeze tool: body switched to Fixed (held in place until unfrozen)
 }
 
-export type Tool = 'grab' | 'connect' | 'freeze' | 'push' | 'draw';
+export type Tool = 'grab' | 'connect' | 'freeze' | 'push' | 'draw' | 'brush';
+export type BrushMode = 'push' | 'pull' | 'swirl';
 
 interface JointRec {
   id: number; kind: JointKind; a: Entity; b: Entity;
@@ -86,6 +87,9 @@ const MAX_SPEED = 60; // m/s hard cap — guards against solver-injected energy 
 const VOID_Y = -20; // below this, an entity fell off the world edge — it gets removed (no respawn)
 const PICK_PIXEL_TOLERANCE = 18; // px — fallback nearest-entity radius when the exact ray misses
 const _UP = new THREE.Vector3(0, 1, 0); // world up — the draw tool's sketch plane normal
+const BRUSH_RADIUS = 4.5; // metres — the force brush affects bodies within this of the cursor point
+const BRUSH_SPEED = 12; // target speed (m/s) the brush drives bodies toward
+const BRUSH_RESPONSE = 8; // how hard the brush steers toward that target velocity (1/s)
 
 const PALETTE = ['#5b8def', '#4fb89a', '#c9bb3a', '#e89948', '#dc4a4a', '#a978e0'];
 
@@ -152,6 +156,10 @@ export class Sandbox {
   // freehand "draw a flow" tool: a stroke sketched on a horizontal plane, turned into a path field
   private stroke: { pts: THREE.Vector3[]; line: THREE.Line } | null = null;
   private drawPlane = new THREE.Plane();
+  // force brush: hold + drag to push / pull / swirl objects near the cursor, live (no placed field)
+  private brushActive = false;
+  private brushMode: BrushMode = 'push';
+  private brushPoint = new THREE.Vector3();
 
   // stats
   private acc = 0;
@@ -1476,6 +1484,9 @@ export class Sandbox {
     // weld/hinge docking: draw pending pairs gently together until their colliders touch, then lock
     if (this.docks.length) this.stepDocks();
 
+    // force brush: while the user holds + drags the brush, shove nearby bodies each step
+    if (this.brushActive) this.applyBrush();
+
     // force fields: sum each field's force on every awake dynamic body, apply as impulse = F·dt
     if (this.fields.length) {
       for (const e of this.entities) {
@@ -1662,6 +1673,12 @@ export class Sandbox {
     // draw tool: left-drag sketches a flow curve on a horizontal plane; nothing else claims the click
     if (this.tool === 'draw') { this.beginStroke(); return; }
 
+    // brush tool: hold + drag to push / pull / swirl nearby objects live (force applied each step)
+    if (this.tool === 'brush') {
+      if (this.updateBrushPoint()) { this.brushActive = true; this.controls.enabled = false; }
+      return;
+    }
+
     // a field's core is a click target: clicking one opens it for editing (via a preview draft)
     const field = this.pickField();
     if (field) { this.beginEdit(field); return; }
@@ -1756,6 +1773,7 @@ export class Sandbox {
 
   private onPointerMove = (e: PointerEvent) => {
     if (this.stroke) { this.extendStroke(e); return; }
+    if (this.brushActive) { this.setPointer(e); this.updateBrushPoint(); return; }
     if (!this.grab) return;
     this.setPointer(e);
     const hit = this.raycaster.ray.intersectPlane(this.grab.plane, this._p.clone());
@@ -1764,8 +1782,50 @@ export class Sandbox {
 
   private onPointerUp = (_e: PointerEvent) => {
     if (this.stroke) { this.finishStroke(); return; }
+    if (this.brushActive) { this.brushActive = false; this.controls.enabled = true; return; }
     this.releaseGrab();
   };
+
+  /** Set the brush's cursor point: the object under the cursor if any, else a horizontal plane at the
+   *  camera focus height. Returns false if the ray hits nothing usable. */
+  private updateBrushPoint(): boolean {
+    const hit = this.pick();
+    if (hit) { this.brushPoint.copy(hit.point); return true; }
+    this.drawPlane.setFromNormalAndCoplanarPoint(_UP, new THREE.Vector3(0, this.controls.target.y, 0));
+    const p = this.raycaster.ray.intersectPlane(this.drawPlane, new THREE.Vector3());
+    if (p) { this.brushPoint.copy(p); return true; }
+    return false;
+  }
+
+  setBrushMode(mode: BrushMode) { this.brushMode = mode; }
+  get brush(): BrushMode { return this.brushMode; }
+
+  /** Apply the force brush for one step: every dynamic body within BRUSH_RADIUS of the cursor point is
+   *  steered toward a target velocity (away for push, toward for pull, tangential for swirl), eased by
+   *  distance. Same velocity-target model as the fields, so it's a controlled shove, not a launch. */
+  private applyBrush() {
+    for (const e of this.entities) {
+      if (e.frozen) continue;
+      const t = e.body.translation();
+      const dx = t.x - this.brushPoint.x, dy = t.y - this.brushPoint.y, dz = t.z - this.brushPoint.z;
+      const d = Math.hypot(dx, dy, dz);
+      if (d > BRUSH_RADIUS) continue;
+      const falloff = 1 - d / BRUSH_RADIUS;
+      let tx: number, ty: number, tz: number;
+      if (this.brushMode === 'swirl') {
+        const inv = 1 / (Math.hypot(dx, dz) || 1); // tangential about the vertical axis through the point
+        tx = -dz * inv * BRUSH_SPEED; ty = 0; tz = dx * inv * BRUSH_SPEED;
+      } else {
+        const sign = this.brushMode === 'push' ? 1 : -1;
+        const inv = 1 / (d || 1);
+        tx = dx * inv * sign * BRUSH_SPEED; ty = dy * inv * sign * BRUSH_SPEED; tz = dz * inv * sign * BRUSH_SPEED;
+      }
+      const v = e.body.linvel();
+      const k = e.body.mass() * BRUSH_RESPONSE * falloff * FIXED;
+      e.body.applyImpulse({ x: (tx - v.x) * k, y: (ty - v.y) * k, z: (tz - v.z) * k }, true);
+      e.body.wakeUp();
+    }
+  }
 
   // ---------------------------------------------------------------- draw a flow (freehand path field)
   /** Start a stroke: sketch on a HORIZONTAL plane through the camera focus height, so the drawn flow

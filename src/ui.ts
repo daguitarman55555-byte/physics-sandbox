@@ -20,7 +20,7 @@ import { exprToLatex } from './systems/expr';
 import { PLAIN, PRESETS as MATERIALS, type Material } from './systems/materials';
 import { FIELD_INFO, FIELD_SHAPES, PATH_PRESETS, PATH_PRESET_KEYS, type FieldKind, type FieldShape } from './systems/fields';
 import { JOINT_INFO, type JointKind } from './systems/joints';
-import type { Tool } from './sandbox';
+import type { Tool, BrushMode } from './sandbox';
 
 // fonts come from the CSS import above; no sounds, no popup keyboard — it's a typed input
 MathfieldElement.fontsDirectory = null;
@@ -885,16 +885,18 @@ function buildImplicitCreator(
 
 /** Tools section: the left-click mode (Grab / Connect / Freeze / Push) + the joint-type picker. */
 function buildToolsSection(panel: HTMLElement, sandbox: Sandbox) {
-  const toolDefs: Array<[Tool, string]> = [['grab', 'Grab'], ['connect', 'Connect'], ['freeze', 'Freeze'], ['push', 'Push'], ['draw', 'Draw flow']];
+  const toolDefs: Array<[Tool, string]> = [['grab', 'Grab'], ['connect', 'Connect'], ['freeze', 'Freeze'], ['push', 'Push'], ['draw', 'Draw flow'], ['brush', 'Brush']];
   const toolHints: Record<Tool, string> = {
     grab: 'Left-drag an object to move & throw it.',
     connect: 'Click two objects to link them, using the joint below.',
     freeze: 'Click an object to pin it in place; click again to release.',
     push: 'Click an object to shove it away from the camera.',
     draw: 'Drag on the scene to sketch a flow curve; release and objects follow your line.',
+    brush: 'Hold & drag to push / pull / swirl nearby objects, using the mode below.',
   };
   const hint = el('div', '', 'preview');
   const jointRow = el('div', '', 'row wrap');
+  const brushRow = el('div', '', 'row wrap');
   const toolBtns = {} as Record<Tool, HTMLButtonElement>;
 
   const setTool = (t: Tool) => {
@@ -902,6 +904,7 @@ function buildToolsSection(panel: HTMLElement, sandbox: Sandbox) {
     for (const k of Object.keys(toolBtns) as Tool[]) toolBtns[k].classList.toggle('primary', k === t);
     hint.textContent = toolHints[t];
     jointRow.style.display = t === 'connect' ? '' : 'none'; // joint picker only matters for Connect
+    brushRow.style.display = t === 'brush' ? '' : 'none'; // brush-mode chips only matter for Brush
   };
 
   const toolRow = el('div', '', 'row wrap');
@@ -924,8 +927,23 @@ function buildToolsSection(panel: HTMLElement, sandbox: Sandbox) {
     jointBtns[k] = b;
     jointRow.append(b);
   }
-  panel.append(jointRow, hint);
+
+  const brushDefs: Array<[BrushMode, string]> = [['push', 'Push'], ['pull', 'Pull'], ['swirl', 'Swirl']];
+  const brushBtns = {} as Record<BrushMode, HTMLButtonElement>;
+  const setBrush = (m: BrushMode) => {
+    sandbox.setBrushMode(m);
+    for (const mm of Object.keys(brushBtns) as BrushMode[]) brushBtns[mm].classList.toggle('on', mm === m);
+  };
+  for (const [m, label] of brushDefs) {
+    const b = el('button', label, 'mini chip');
+    b.onclick = () => setBrush(m);
+    brushBtns[m] = b;
+    brushRow.append(b);
+  }
+
+  panel.append(jointRow, brushRow, hint);
   setJoint(sandbox.jointKind);
+  setBrush(sandbox.brush);
   setTool('grab');
 }
 

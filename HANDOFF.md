@@ -327,10 +327,22 @@ finite-diff curl of three offset noise potentials → a divergence-free unit swi
 of a crowd churning at default strength 8) instead of a net push. Tunables TURB_FREQ/TURB_TIMESCALE/
 TURB_EPS. Auto-wired into the UI (FIELD_INFO iteration → button; generic region controls). Verified live,
 30fps, no console errors.
-STILL OPEN from Rafael's picks (build next — the LAST one): (4) FORCE BRUSH (a live drag-to-push/pull/
-swirl tool, Powder-Toy style) + AUTO-FIT (a button that sizes a field's region to the current crowd —
-the 500-object test showed the default well under-reaches a wide pile). Rafael also asked for true-3D
-drawing (per-point depth: draw-then-lift or scroll-to-height) — a natural follow-up to build 1.
+Build 4 (last of the 4) shipped as TWO commits (2026-07-17):
+ 4a AUTO-FIT — `Sandbox.fitFieldToObjects(rec)` + "Fit to objects" button in the field editor. Covers the
+    92nd-percentile object radius (+margin) so a region stops under-reaching a wide crowd; a well is also
+    lifted (orbits clear the floor); a path field is centred + its curve scaled to span the crowd. NB
+    rebuildMarker keeps the marker's OWN position, so fit copies field.pos into rec.marker.position before
+    resizing. Verified: 200 spread objects, well grew to enclose them, movingFrac 81%→93%.
+ 4b FORCE BRUSH — a `'brush'` Tool + `BrushMode` ('push'|'pull'|'swirl') with mode chips. onPointerDown
+    (brush) → `updateBrushPoint` (object under cursor, else horizontal plane at controls.target.y) + sets
+    `brushActive`, suspends OrbitControls; move updates the point; up clears it. `applyBrush()` runs in
+    stepPhysics (after stepDocks) — bodies within BRUSH_RADIUS steered toward a target velocity (away/
+    toward/tangential) via the shared velocity-target model, eased by distance. Verified via synthetic
+    pointer events + direct stepping: push cleared 48→5 near the point, pull held them, swirl gave
+    tangential speed 4.5; controls restored on pointerup; no console errors.
+ALL FOUR of Rafael's picks are now DONE (draw-a-force, lift, turbulence, brush+auto-fit).
+STILL OPEN (Rafael asked, not yet built): TRUE-3D DRAWING for the draw tool — per-point depth so a single
+stroke isn't planar (draw-then-lift, or scroll-wheel-sets-height while drawing). Natural follow-up to build 1.
 STANDING RULE (Rafael, 2026-07-16): git commit AND push after EVERY build — don't wait to be asked.
 
 Stability hardening (2026-07-13): dynamic bodies now spawn with CCD enabled and reject deeply-
