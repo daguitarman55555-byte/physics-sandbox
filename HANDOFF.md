@@ -319,11 +319,18 @@ because the real ceiling is CAPTURE — a compact floor pile doesn't fill a big 
 compact scale (~6) sitting in the pile, helix/sphere-spiral already hit ~90% with OR without lift. So
 lift = a real opt-in "zero-g flow tube", not a capture fix (capture ≈ curve scale vs pile size → that's
 what build 4's auto-fit is for). Verified live, 30fps, no console errors.
-STILL OPEN from Rafael's picks (build next, one at a time, each its own commit+push): (3) TURBULENCE
-field (curl-of-noise, the queued kind), (4) FORCE BRUSH (drag to push/pull/swirl live) + AUTO-FIT
-(button to size a field's region to the crowd — the 500-object test showed the default well under-reaches
-a wide pile). Rafael also asked for true-3D drawing (per-point depth: draw-then-lift or scroll-to-height)
-— a natural follow-up to build 1.
+Turbulence field shipped (2026-07-17, build 3 of 4): the 6th field kind `'turbulence'` — a curl-of-noise
+velocity field (all in fields.ts: `turbHash`/`turbNoise` sin-scramble value noise, `curlNoise` takes the
+finite-diff curl of three offset noise potentials → a divergence-free unit swirl direction,
+`turbulenceForce` steers toward it via the shared target-velocity model). Time drifts via `performance.now()`
+(guarded for headless). Bodies eddy in scattered directions (measured heading-scatter 0.84–0.94, ~84%
+of a crowd churning at default strength 8) instead of a net push. Tunables TURB_FREQ/TURB_TIMESCALE/
+TURB_EPS. Auto-wired into the UI (FIELD_INFO iteration → button; generic region controls). Verified live,
+30fps, no console errors.
+STILL OPEN from Rafael's picks (build next — the LAST one): (4) FORCE BRUSH (a live drag-to-push/pull/
+swirl tool, Powder-Toy style) + AUTO-FIT (a button that sizes a field's region to the current crowd —
+the 500-object test showed the default well under-reaches a wide pile). Rafael also asked for true-3D
+drawing (per-point depth: draw-then-lift or scroll-to-height) — a natural follow-up to build 1.
 STANDING RULE (Rafael, 2026-07-16): git commit AND push after EVERY build — don't wait to be asked.
 
 Stability hardening (2026-07-13): dynamic bodies now spawn with CCD enabled and reject deeply-

@@ -113,6 +113,12 @@ A checklist so nothing is lost. `[x]` = in Phase 1 today · `[ ]` = planned (wit
       don't need it). Verified: captured bodies climb a rising spiral/Viviani curve into an airborne arc
       (top-Y up, mean speed ~2.5× on Viviani). Honest limit: it helps the bodies a curve *captures*;
       whether a sparse 3D curve captures a compact floor pile still depends on sizing the curve to it.
+- [x] **Turbulence** (`systems/fields.ts`) — a **curl-of-noise** velocity field: bodies are steered
+      toward the local curl of a 3D noise potential, which is **divergence-free**, so they churn and
+      **eddy like leaves in gusty air** (scattered directions, no net push) instead of piling at a
+      source. The pattern drifts over time so it's alive. Same target-velocity model — `strength` is the
+      drift speed, mass-independent — confined + eased by the region like every field. Verified: heading
+      scatter 0.84–0.94 (genuinely chaotic, not directional), ~84% of a crowd churning at default.
 - [x] **Gravity well** (`systems/fields.ts`) — a **true Newtonian 1/r²** pull (Plummer-softened so
       it's finite at the centre). Unlike the attractor it is **conservative — no velocity-target
       damping** — so bodies keep their sideways speed and **ORBIT** instead of collapsing into a dead,

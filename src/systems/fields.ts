@@ -24,7 +24,7 @@
 import * as THREE from 'three';
 import { parseExpression } from './expr';
 
-export type FieldKind = 'attractor' | 'repeller' | 'wind' | 'vortex' | 'path' | 'gravitywell';
+export type FieldKind = 'attractor' | 'repeller' | 'wind' | 'vortex' | 'path' | 'gravitywell' | 'turbulence';
 export type FieldShape = 'sphere' | 'box' | 'cylinder';
 
 /**
@@ -73,6 +73,8 @@ export const FIELD_INFO: Record<FieldKind, { strength: number; size: number; col
   // big so it actually REACHES a spread-out crowd (100 objects settle across a wide floor patch) and
   // draws it all in — a small well would only grab the few bodies right under it.
   gravitywell: { strength: 8, size: 16, color: 0xe05aa0, label: 'Gravity well' },
+  // turbulence: `strength` is the drift speed of the eddies (target-velocity model, so mass-independent)
+  turbulence: { strength: 8, size: 6, color: 0xe8d44d, label: 'Turbulence' },
 };
 
 export const FIELD_SHAPES: FieldShape[] = ['sphere', 'box', 'cylinder'];
@@ -271,6 +273,7 @@ export function fieldForce(
   out.set(0, 0, 0);
   if (field.kind === 'path') return field.path ? pathForce(field, bodyPos, vel, mass, gain, out) : out;
   if (field.kind === 'gravitywell') return wellForce(field, bodyPos, vel, mass, gain, out);
+  if (field.kind === 'turbulence') return turbulenceForce(field, bodyPos, vel, mass, gain, out);
   const inf = fieldInfluence(field, bodyPos);
   if (inf <= 0) return out;
   const speed = field.strength * gain; // target speed (m/s) — SAME meaning for every kind
@@ -320,6 +323,63 @@ function wellForce(
   out.y += WELL_SWIRL * (_ax.z * vel.x - _ax.x * vel.z);
   out.z += WELL_SWIRL * (_ax.x * vel.y - _ax.y * vel.x);
   return out.multiplyScalar(mass * inf);
+}
+
+// ---- Turbulence: a curl-of-noise velocity field. The curl of a vector potential is divergence-free,
+// so bodies swirl in eddies (like leaves in gusty air) instead of piling up at sources/sinks. -------
+const TURB_FREQ = 0.22; // spatial frequency of the eddies (smaller = bigger, lazier swirls)
+const TURB_TIMESCALE = 0.35; // how fast the eddy pattern churns over time
+const TURB_EPS = 0.7; // finite-difference step used to take the curl of the noise potential
+
+/** Cheap deterministic value-noise hash → [-1, 1] (the classic sin-scramble; quality is unimportant). */
+function turbHash(i: number, j: number, k: number): number {
+  const s = Math.sin(i * 127.1 + j * 311.7 + k * 74.7) * 43758.5453;
+  return 2 * (s - Math.floor(s)) - 1;
+}
+
+/** Smooth 3D value noise in [-1, 1] (trilinear blend of lattice hashes, smoothstep weights). */
+function turbNoise(x: number, y: number, z: number): number {
+  const xi = Math.floor(x), yi = Math.floor(y), zi = Math.floor(z);
+  const xf = x - xi, yf = y - yi, zf = z - zi;
+  const u = xf * xf * (3 - 2 * xf), v = yf * yf * (3 - 2 * yf), w = zf * zf * (3 - 2 * zf);
+  const L = (a: number, b: number, t: number) => a + (b - a) * t;
+  const c00 = L(turbHash(xi, yi, zi), turbHash(xi + 1, yi, zi), u);
+  const c10 = L(turbHash(xi, yi + 1, zi), turbHash(xi + 1, yi + 1, zi), u);
+  const c01 = L(turbHash(xi, yi, zi + 1), turbHash(xi + 1, yi, zi + 1), u);
+  const c11 = L(turbHash(xi, yi + 1, zi + 1), turbHash(xi + 1, yi + 1, zi + 1), u);
+  return L(L(c00, c10, v), L(c01, c11, v), w);
+}
+
+// three near-independent scalar potentials (same noise, large lattice offsets)
+const _psi1 = (x: number, y: number, z: number) => turbNoise(x, y, z);
+const _psi2 = (x: number, y: number, z: number) => turbNoise(x + 31.4, y + 11.7, z + 47.2);
+const _psi3 = (x: number, y: number, z: number) => turbNoise(x + 5.2, y + 63.1, z + 21.9);
+
+/** Unit swirl direction = normalized curl of the noise potential (∇×Ψ) at (x,y,z), drifting with t. */
+function curlNoise(x: number, y: number, z: number, t: number, out: THREE.Vector3): THREE.Vector3 {
+  const e = TURB_EPS, Z = z + t; // scroll the field along z over time so the eddies churn
+  const cx = (_psi3(x, y + e, Z) - _psi3(x, y - e, Z)) - (_psi2(x, y, Z + e) - _psi2(x, y, Z - e));
+  const cy = (_psi1(x, y, Z + e) - _psi1(x, y, Z - e)) - (_psi3(x + e, y, Z) - _psi3(x - e, y, Z));
+  const cz = (_psi2(x + e, y, Z) - _psi2(x - e, y, Z)) - (_psi1(x, y + e, Z) - _psi1(x, y - e, Z));
+  const len = Math.hypot(cx, cy, cz) || 1;
+  return out.set(cx / len, cy / len, cz / len);
+}
+
+/**
+ * Turbulence: steer each body toward the local curl-noise velocity — an incompressible swirl that
+ * varies over space and drifts over time, so a crowd churns and eddies (leaves in gusty air) rather
+ * than being pushed one way. Same target-velocity model as the other fields, so `strength` is the
+ * drift speed and it's mass-independent; confined + eased by the region influence like everything else.
+ */
+function turbulenceForce(
+  field: Field, bodyPos: THREE.Vector3, vel: THREE.Vector3, mass: number, gain: number, out: THREE.Vector3,
+): THREE.Vector3 {
+  const inf = fieldInfluence(field, bodyPos);
+  if (inf <= 0) return out;
+  const t = (typeof performance !== 'undefined' ? performance.now() * 0.001 : 0) * TURB_TIMESCALE;
+  curlNoise(bodyPos.x * TURB_FREQ, bodyPos.y * TURB_FREQ, bodyPos.z * TURB_FREQ, t, _tv);
+  _tv.multiplyScalar(field.strength * gain);
+  return out.set(_tv.x - vel.x, _tv.y - vel.y, _tv.z - vel.z).multiplyScalar(mass * RESPONSE * inf);
 }
 
 /**
