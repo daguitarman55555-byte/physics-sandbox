@@ -64,6 +64,9 @@ export interface Field {
   //               this is deliberately separate from `strength`'s SIGN: a NEGATIVE strength on a
   //               vortex both reverses the swirl and flips the inward draw outward (bodies fling
   //               out) — a liked, protected behavior — while `dir` only mirrors the handedness.
+  sole?: boolean; // gravity wells only: this well's centre is the ONLY gravity inside its region —
+  //                world gravity is FULLY suspended there (not eased by the soft edge), so "down"
+  //                is wherever the well is. Other wells/attractors still add their own pull.
 }
 
 /** Per-kind defaults. Every `strength` is now a TARGET SPEED (m/s), so the scale is shared across all
@@ -339,15 +342,33 @@ function rankine(r: number, R: number): number {
 
 // Tornado shape constants: how the three flow components (swirl / inflow / updraft) are distributed.
 const TORNADO_INFLOW = 0.7; // ground-level radial inflow fraction of `speed` (decays with height²)
-const TORNADO_LIFT = 0.85; // funnel-wall updraft fraction of `speed` (fades with height)
+const TORNADO_LIFT = 1.15; // funnel-wall updraft fraction of `speed` (fades with height). Must be
+//                            comfortably >1: the net climb is target·(wall·gust·(1−hf)) − g/RESPONSE,
+//                            and at 0.7 the product dropped below gravity by mid-column, so all the
+//                            debris hovered in the bottom third (measured: nothing above y=6)
 // The updraft lives in the funnel WALL — an annulus around rf≈0.5, zero at the axis and the rim. A
 // core-centred updraft never lifted anything (measured: maxY 1.6): centrifugal balance FORBIDS the
 // core — a body circling at Rankine speed near the axis needs ~45 m/s² centripetal but the inflow
 // supplies ~19, so debris settles in an equilibrium annulus at rf≈0.5. Real tornadoes are the same:
 // calm core, debris spiralling up the wall. Put the lift where the debris actually is.
-const TORNADO_WALL_BOT = 0.3; // funnel radius at the GROUND (fraction of the radial extent)
-const TORNADO_WALL_TOP = 0.78; // funnel radius at the TOP — the classic widening cone
-const TORNADO_WALL_W = 0.3; // half-width of the wall annulus the updraft lives in
+// NB the marker's funnel is drawn POINTIER (0.06·R tip) than this physics cone: the visible funnel
+// of a real tornado is condensation, while the DEBRIS CLOUD swirls wider around it — and here that's
+// forced by the physics: at ground level, centrifugal balance against the Rankine swirl parks debris
+// at rf≈0.35–0.5, so a lift annulus at a pointy tip radius acts where debris cannot exist and nothing
+// rises (measured: 2 airborne with BOT=0.06 — same bug class as the original core-centred updraft).
+const TORNADO_WALL_BOT = 0.3; // physics cone radius at the GROUND (where debris CAN orbit)
+const TORNADO_WALL_TOP = 0.85; // physics cone radius at the TOP
+const TORNADO_WALL_W = 0.35; // half-width of the wall annulus the updraft lives in
+const TORNADO_GUST = 0.45; // lift modulation depth from drifting noise (varies each body's stall height)
+// Suction sub-vortices: real tornadoes carry 2–5 smaller vortices orbiting the main funnel, and
+// they're what scatters debris AROUND the cone. Without an azimuth-dependent term every body at a
+// given height gets the IDENTICAL steering target, so collisions bead the debris into one rotating
+// chain on one side of the funnel (reported: "objects holding in one line" — the gust noise varies
+// with position, so a tight clump shares one gust value and stays a clump). A wave traveling around
+// the azimuth pushes each angular position differently, shearing chains apart over the surface.
+const TORNADO_SUBV = 0.22; // sub-vortex strength (radial ripple) as a fraction of `speed`
+const TORNADO_SUBV_N = 3; // how many sub-vortices ride around the funnel
+const TORNADO_SUBV_RATE = 2.4; // rad/s — how fast they orbit the main axis
 
 /**
  * A tornado: the vortex's Rankine swirl PLUS the vertical structure of a real twister. The radial
@@ -381,11 +402,26 @@ function tornadoForce(
   // cone shape still holds up high without crushing the swirl.
   const coneR = TORNADO_WALL_BOT + (TORNADO_WALL_TOP - TORNADO_WALL_BOT) * hf;
   const coef = TORNADO_INFLOW * (0.35 + 0.65 * (1 - hf) * (1 - hf));
-  const vRad = speed * coef * THREE.MathUtils.clamp((coneR - rf) * 3, -1, 1);
+  // sub-vortex traveling wave (see constants above): each azimuth gets a different radial push, and
+  // the pattern itself orbits the axis, so debris shears apart around the cone instead of beading
+  // into one rotating chain. The snap gain is soft (1.5, was 3) for the same reason — a hard pin
+  // onto the exact cone radius put every body on the same rail.
+  const theta = Math.atan2(_d.z, _d.x);
+  const tSec = typeof performance !== 'undefined' ? performance.now() * 0.001 : 0;
+  const wave = Math.sin(TORNADO_SUBV_N * theta - dir * TORNADO_SUBV_RATE * tSec + hf * 3);
+  // snap gain is TIGHT near the ground (the funnel tip must hold debris against full Rankine swirl)
+  // and LOOSE aloft (a soft shell up high lets the sub-vortices spread debris over the cone surface)
+  const snap = 1.5 + 1.8 * (1 - hf);
+  const vRad = speed * (coef * THREE.MathUtils.clamp((coneR - rf) * snap, -1, 1) + TORNADO_SUBV * wave);
   // updraft on the funnel WALL (the annulus around the cone surface — the core is centrifugally
-  // forbidden and the eye is calm), fading LINEARLY with height so debris tops out around ¾ of the
-  // column instead of launching off the top at full climb speed (the previous behavior, reported).
-  const lift = speed * TORNADO_LIFT
+  // forbidden and the eye is calm), fading LINEARLY with height so debris tops out inside the column
+  // instead of launching off the top. The lift is MODULATED by slowly-drifting noise (±TORNADO_GUST
+  // around a 0.65 mean → gusts of 0.2×…1.1×): with uniform lift every object stalled at the SAME
+  // equilibrium height and the debris collapsed into one flat ring (reported); gusty lift gives every
+  // location and moment a different stall height, so debris spreads over the whole cone surface and
+  // visibly churns up and down it.
+  const gust = 0.8 + TORNADO_GUST * turbNoise(bodyPos.x * 0.25, bodyPos.y * 0.25 + tSec * 0.5, bodyPos.z * 0.25);
+  const lift = speed * TORNADO_LIFT * gust
     * Math.max(0, 1 - Math.abs(rf - coneR) / TORNADO_WALL_W)
     * (1 - hf);
 

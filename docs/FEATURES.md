@@ -75,6 +75,17 @@ A checklist so nothing is lost. `[x]` = in Phase 1 today · `[ ]` = planned (wit
       Rankine swirl + ground inflow + **funnel-wall updraft** (the core is centrifugally forbidden, so
       lift lives in the wall annulus like a real twister) with a steady-state recirculating debris
       fountain (verified stable over 17 s), wireframe funnel-cone marker.
+- [x] **Tornado surface spread + sub-vortices** — a traveling wave around the azimuth (the real
+      thing's 2–5 *suction vortices*) gives each angular position a different radial push, so debris
+      rings the whole funnel (verified 8/8 azimuth bins; it used to bead into one rotating chain). The
+      visible funnel is **pointier** (0.06R tip) than the physics cone (0.3R) — deliberately: at ground
+      level centrifugal balance parks debris at rf≈0.35–0.5, so the lift annulus must live there; real
+      tornadoes are the same (narrow condensation funnel, wider debris cloud). Lift tuned so the column
+      fills to ~¾ height without launching (radius grows with height — true cone form).
+- [x] **☉ Sole gravity** (gravity-well editor button) — the well's centre becomes the *only* gravity
+      inside its region: world gravity fully suspended there (binary, not eased by the soft edge), so
+      "down" is toward the well; other wells/attractors still add their own pull. Fixes edge-of-region
+      floor friction killing orbits (verified: orbits die without it in the y=8 config, live with it).
 - [x] **⇄ Reverse flow** — vortex / tornado / gravity well / path fields carry a `dir` handedness flag
       with an editor button: clockwise ↔ counter-clockwise, path flow forwards ↔ backwards, orbit
       insertion handedness. Separate from (and protective of) the **negative-strength** trick, which

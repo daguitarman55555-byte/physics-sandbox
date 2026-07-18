@@ -473,9 +473,39 @@ VORTEX PILLAR + TORNADO FORM PASS (2026-07-18, Rafael's reports — measured & f
    eyeCount 0 throughout, 47/50 retained, ring rides the funnel wall on screen.
  • Removed the 🌪 quick-scene (Tornado is a kind button now — two buttons read as duplicates). Rafael
    plans FUTURE CUSTOM KINDS for wind tunnel + black hole (quick scenes stay as tunings until then).
-LIKELY NEXT (Rafael said "then we can talk about more upgrades"): motion STREAKS for tracers; affected-
-object glow/tint; per-object trails; drawpad per-axis ortho cam. NB screenshotting a 500ms shockwave: pin
-`S.shocks[0].born = now-190` on an interval. Research dossier: docs/FORCES_RESEARCH.md (started).
+TORNADO SPREAD + SOLE GRAVITY (2026-07-18, round 2 of Rafael's feedback):
+ • "Objects holding in ONE LINE" on the funnel — root cause: every body at a given height gets the
+   IDENTICAL steering target, so collisions bead debris into a single rotating chain (the gust noise
+   is positional — a tight clump shares one gust and stays a clump). Fix = SUCTION SUB-VORTICES (real
+   tornadoes carry 2–5 of them): a traveling wave around the azimuth, sin(3θ − dir·2.4·t + 3hf),
+   added to vRad (±0.22·speed) — each angular position gets a different push, shearing chains apart.
+   Verified: azimuth occupancy 2/8 bins → 8/8, sustained.
+ • POINTIER cone: marker funnel is now 0.06R tip → 0.9R top (visual). The PHYSICS cone stays 0.3→0.85
+   (W 0.35): setting the physics tip to 0.06 dropped airborne to 2 — at ground level centrifugal
+   balance vs the Rankine swirl parks debris at rf≈0.35-0.5, so a lift annulus at a pointy radius acts
+   where debris CANNOT exist (same bug class as the original core updraft). Real tornadoes match: the
+   visible funnel is condensation; the debris cloud swirls WIDER around it. Snap gain is now height-
+   dependent (3.3 ground → 1.5 top: tip holds debris, top is a loose shell for the sub-vortices).
+ • TORNADO_LIFT 0.7 → 1.15 + gust base 0.65 → 0.8: net climb = target·(wall·gust·(1−hf)) − g/RESPONSE,
+   and at 0.7 the product fell below gravity by mid-column → everything hovered under y=6. Verified
+   after: low 19 + mid 17 bodies, rLow 6.5 → rMid 7.6 (radius grows with height = cone form), maxY
+   8.7 (no launching), 8/8 azimuth, 30 fps.
+ • SOLE GRAVITY (Rafael's ask): `Field.sole` + "☉ Sole gravity" editor button (gravitywell only) —
+   world gravity FULLY suspended (binary, not soft-edge-eased) anywhere inside the region, so the
+   well's centre is the only "down"; other wells/attractors still add their pull. Copied in cloneField/
+   copyFieldInto. Verified in the y=8 friction-prone config: sole OFF → orbits die (1 moving), ON →
+   orbits alive (15 moving, meanTang −2.17). Still scaled by the global-strength clamp path (gain 0 =
+   fully off — the suspension reads liftInf which is gated in stepPhysics).
+QUEUED (Rafael, 2026-07-18): MUTUAL ATTRACTION between objects (N-body) so his current sim — 995
+objects orbiting one giant well (median r 4.3, disc at the well plane, tail to r 28 — observed live)
+— can evolve into STAR SYSTEMS with planets: moons around planets around the star. Plan sketch:
+opt-in "self gravity" toggle; direct O(n²) is fine to ~300 bodies at 60 Hz (pairwise force loop in
+stepPhysics before world.step), Barnes-Hut octree if more; G scaled so two 1 kg spheres 2 m apart
+drift together in ~seconds (visible); wake management matters (mutual pull keeps everything awake —
+maybe only apply between awake bodies + bodies above a mass threshold, e.g. "planets" only).
+LIKELY NEXT: motion STREAKS for tracers; affected-object glow/tint; per-object trails; drawpad per-axis
+ortho cam. NB screenshotting a 500ms shockwave: pin `S.shocks[0].born = now-190` on an interval.
+Research dossier: docs/FORCES_RESEARCH.md.
 STANDING RULE (Rafael, 2026-07-16): git commit AND push after EVERY build — don't wait to be asked.
 
 Stability hardening (2026-07-13): dynamic bodies now spawn with CCD enabled and reject deeply-

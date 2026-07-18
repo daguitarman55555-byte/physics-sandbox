@@ -1045,6 +1045,13 @@ export class Sandbox {
     this.onFieldChange?.();
   }
 
+  /** Toggle a gravity well's SOLE-gravity mode: its centre becomes the only gravity in its region. */
+  setFieldSole(rec: FieldRec, sole: boolean) {
+    rec.field.sole = sole;
+    for (const e of this.entities) e.body.wakeUp();
+    this.onFieldChange?.();
+  }
+
   // ---------------------------------------------------------------- explosions (one-shot blasts)
   private shocks: Array<{ mesh: THREE.Mesh; ring: THREE.Mesh; born: number; radius: number }> = [];
   private shake = 0; // camera-shake amplitude, decays each frame
@@ -1137,7 +1144,7 @@ export class Sandbox {
     const c: Field = {
       id: f.id, kind: f.kind, shape: f.shape,
       pos: f.pos.clone(), quat: f.quat.clone(), size: f.size.clone(),
-      strength: f.strength, hidden: f.hidden, lift: f.lift, dir: f.dir,
+      strength: f.strength, hidden: f.hidden, lift: f.lift, dir: f.dir, sole: f.sole,
     };
     if (f.path) c.path = {
       spec: { ...f.path.spec }, label: f.path.label, scale: f.path.scale, swirl: f.path.swirl,
@@ -1151,7 +1158,7 @@ export class Sandbox {
   private copyFieldInto(src: Field, dst: Field) {
     dst.shape = src.shape;
     dst.pos.copy(src.pos); dst.quat.copy(src.quat); dst.size.copy(src.size);
-    dst.strength = src.strength; dst.hidden = src.hidden; dst.lift = src.lift; dst.dir = src.dir;
+    dst.strength = src.strength; dst.hidden = src.hidden; dst.lift = src.lift; dst.dir = src.dir; dst.sole = src.sole;
     dst.path = src.path ? {
       spec: { ...src.path.spec }, label: src.path.label, scale: src.path.scale, swirl: src.path.swirl,
       pts: src.path.pts.slice(), tans: src.path.tans.slice(), closed: src.path.closed,
@@ -1456,11 +1463,11 @@ export class Sandbox {
         ring.rotation.x = Math.PI / 2;
         g.add(ring);
       } else if (field.kind === 'tornado') {
-        // the funnel: a wireframe tapered tube matching the physics' cone — narrow at the ground
-        // (0.3·R), widening to 0.78·R at the top. This is the surface debris actually rides.
+        // the funnel: a wireframe tapered tube matching the physics' cone — a pointy tip at the
+        // ground (0.06·R — nearly a point) flaring to 0.9·R at the top: the debris-riding surface.
         const H = field.size.y * 2;
         const funnel = new THREE.Mesh(
-          new THREE.CylinderGeometry(field.size.x * 0.78, field.size.x * 0.3, H, 24, 6, true),
+          new THREE.CylinderGeometry(field.size.x * 0.9, field.size.x * 0.06, H, 24, 6, true),
           new THREE.MeshBasicMaterial({ color: info.color, transparent: true, opacity: 0.12, side: THREE.DoubleSide, depthWrite: false, wireframe: true }),
         );
         g.add(funnel);
@@ -1662,8 +1669,12 @@ export class Sandbox {
         for (const { field } of this.fields) {
           fieldForce(field, this._p, this._fieldV, mass, this.fieldStrength, this._fieldF);
           this._s.add(this._fieldF);
-          if (field.kind === 'gravitywell') liftInf = Math.max(liftInf, fieldInfluence(field, this._p));
-          else if (field.kind === 'path' && field.lift) liftInf = Math.max(liftInf, pathInfluence(field, this._p));
+          if (field.kind === 'gravitywell') {
+            const fi = fieldInfluence(field, this._p);
+            // a SOLE-gravity well suspends world gravity FULLY anywhere inside its region (binary,
+            // not eased by the soft edge): its centre is the only "down" — planetary gravity mode
+            liftInf = Math.max(liftInf, field.sole && fi > 0 ? 1 : fi);
+          } else if (field.kind === 'path' && field.lift) liftInf = Math.max(liftInf, pathInfluence(field, this._p));
         }
         // Suspend world gravity (∝ influence, so it fades at the boundary) inside a gravity well OR a
         // lift-enabled flow tube: the field's own force becomes the only thing acting, so bodies lift

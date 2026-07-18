@@ -1134,10 +1134,13 @@ function buildFieldsSection(panel: HTMLElement, sandbox: Sandbox) {
   const bReverse = el('button', '⇄ Reverse flow', 'mini');
   bReverse.title = 'Mirror this field’s flow direction (clockwise ↔ counter-clockwise / forwards ↔ backwards).';
   bReverse.onclick = () => { const r = sandbox.activeField; if (r) sandbox.setFieldDir(r, (r.field.dir ?? 1) === 1 ? -1 : 1); };
+  const bSole = el('button', '☉ Sole gravity', 'mini');
+  bSole.title = 'Make this well’s centre the only gravity inside its region — world gravity is fully off there, so “down” is toward the well. Other wells and attractors still add their own pull.';
+  bSole.onclick = () => { const r = sandbox.activeField; if (r) sandbox.setFieldSole(r, !r.field.sole); };
   const bPlace = el('button', 'Place', 'mini');
   const bCancel = el('button', 'Cancel', 'mini');
   const bDelete = el('button', 'Delete field', 'danger');
-  btns.append(bHide, bFit, bReverse, bPlace, bCancel, bDelete);
+  btns.append(bHide, bFit, bReverse, bSole, bPlace, bCancel, bDelete);
   editor.append(title, shapeRow, sizeRow, pathRow, pathNums, pathLift, customBox, strRow, hint, btns);
   panel.append(editor);
 
@@ -1248,6 +1251,9 @@ function buildFieldsSection(panel: HTMLElement, sandbox: Sandbox) {
     const hasFlow = ['vortex', 'tornado', 'gravitywell', 'path'].includes(rec.field.kind);
     bReverse.classList.toggle('hidden', !hasFlow);
     bReverse.classList.toggle('on', (rec.field.dir ?? 1) === -1);
+    // sole-gravity is a gravity-well concept only
+    bSole.classList.toggle('hidden', rec.field.kind !== 'gravitywell');
+    bSole.classList.toggle('on', !!rec.field.sole);
     const p = rec.field.pos;
     const lock = sandbox.lockedAxis;
     const canRotate = rec.field.kind === 'wind' || isPath || rec.field.shape !== 'sphere';
