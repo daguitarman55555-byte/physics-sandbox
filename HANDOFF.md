@@ -457,6 +457,22 @@ PHYSICS ACCURACY PASS (2026-07-18, from Rafael's bug reports — all measured & 
    separately: NEGATIVE STRENGTH still reverses swirl AND flips draw→outward fling (Rafael likes it;
    verified: strength −8 → tang −0.76, radial +1.8 outward; dir −1 → tang −3.76, radial inward 0.24).
    dir is copied in cloneField/copyFieldInto (draft/apply safe).
+VORTEX PILLAR + TORNADO FORM PASS (2026-07-18, Rafael's reports — measured & fixed):
+ • PILLAR BUG: well+vortex stacked (his scene: r=100 both, vortex strength 200, global ×3) crushed 986
+   objects into a standing column on the axis (median radius 1.6, heights to 87). Cause: the vortex's
+   inward draw was a CONSTANT 0.3·speed at every radius (= 180 m/s inward). Fix: draw ∝ the local
+   Rankine profile (`draw = 0.3·speed·prof`) — real vortices have calm cores/pressure-scaled inflow.
+   Same scene now → razor-thin orbital RING at radius 21.3 (all quartiles!), 49 m/s tangential, flat.
+   This is also why explosions "couldn't" eject things before — the 180 m/s recapture is gone.
+ • TORNADO EYE + FORM: objects trapped dead-centre in the eye (inward-only inflow pins them on the
+   axis) + wall debris launching off the top. Fix: radial steering is now SIGNED toward the FUNNEL
+   CONE surface at each height (coneR: rf 0.3 at ground → 0.78 at top; eye objects pushed OUT, stray
+   debris pulled IN; coef strong at ground, 35% aloft) and lift lives on that cone annulus fading
+   LINEARLY with height → debris stalls ~¾ up and recirculates. Marker = matching tapered wireframe
+   tube (CylinderGeometry 0.78R top / 0.3R bottom). Verified: 46/50 airborne dead-stable over 19 s,
+   eyeCount 0 throughout, 47/50 retained, ring rides the funnel wall on screen.
+ • Removed the 🌪 quick-scene (Tornado is a kind button now — two buttons read as duplicates). Rafael
+   plans FUTURE CUSTOM KINDS for wind tunnel + black hole (quick scenes stay as tunings until then).
 LIKELY NEXT (Rafael said "then we can talk about more upgrades"): motion STREAKS for tracers; affected-
 object glow/tint; per-object trails; drawpad per-axis ortho cam. NB screenshotting a 500ms shockwave: pin
 `S.shocks[0].born = now-190` on an interval. Research dossier: docs/FORCES_RESEARCH.md (started).

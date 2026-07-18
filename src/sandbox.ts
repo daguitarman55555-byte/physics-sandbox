@@ -1456,15 +1456,14 @@ export class Sandbox {
         ring.rotation.x = Math.PI / 2;
         g.add(ring);
       } else if (field.kind === 'tornado') {
-        // the funnel: a wireframe cone, narrow at the ground, wide at the top — instantly reads
-        // "tornado" and shows where the core updraft column lives
+        // the funnel: a wireframe tapered tube matching the physics' cone — narrow at the ground
+        // (0.3·R), widening to 0.78·R at the top. This is the surface debris actually rides.
         const H = field.size.y * 2;
-        const cone = new THREE.Mesh(
-          new THREE.ConeGeometry(field.size.x * 0.75, H, 24, 6, true),
+        const funnel = new THREE.Mesh(
+          new THREE.CylinderGeometry(field.size.x * 0.78, field.size.x * 0.3, H, 24, 6, true),
           new THREE.MeshBasicMaterial({ color: info.color, transparent: true, opacity: 0.12, side: THREE.DoubleSide, depthWrite: false, wireframe: true }),
         );
-        cone.rotation.x = Math.PI; // apex down — narrow at the ground
-        g.add(cone);
+        g.add(funnel);
       } else if (field.kind === 'gravitywell') {
         // concentric orbit rings in the well's spin plane — reads as "things circle here"
         for (const f of [0.35, 0.62, 0.85]) {

@@ -302,11 +302,18 @@ export function fieldForce(
     const dir = field.dir ?? 1;
     const rDist = Math.hypot(_d.x, _d.z);
     const invd = 1 / (rDist || 1);
-    const vt = rankine(rDist, Math.max(field.size.x, 1e-3)) * speed * dir; // tangential target speed
+    const prof = rankine(rDist, Math.max(field.size.x, 1e-3)); // local swirl fraction (0 at the axis)
+    const vt = prof * speed * dir; // tangential target speed
+    // the inward draw follows the LOCAL swirl strength (∝ the Rankine profile), like the pressure
+    // inflow of a real vortex — NOT a constant fraction of `speed`. A constant draw at high strength
+    // crushed everything onto the axis into a standing pillar (measured: 986 objects at median
+    // radius 1.6 under a strength-600 target): the axis is calm in a real vortex, and with the draw
+    // fading in the core, strong swirl and inward draw balance at a finite radius → rings and orbits.
+    const draw = 0.3 * speed * prof;
     _tv.set(
-      -_d.z * invd * vt - _d.x * invd * 0.3 * speed,
+      -_d.z * invd * vt - _d.x * invd * draw,
       0,
-      _d.x * invd * vt - _d.z * invd * 0.3 * speed,
+      _d.x * invd * vt - _d.z * invd * draw,
     );
     _tv.applyQuaternion(field.quat); // target velocity back into world space
   } else {
@@ -338,17 +345,18 @@ const TORNADO_LIFT = 0.85; // funnel-wall updraft fraction of `speed` (fades wit
 // core — a body circling at Rankine speed near the axis needs ~45 m/s² centripetal but the inflow
 // supplies ~19, so debris settles in an equilibrium annulus at rf≈0.5. Real tornadoes are the same:
 // calm core, debris spiralling up the wall. Put the lift where the debris actually is.
-const TORNADO_WALL = 0.5; // annulus centre (fraction of radial extent)
-const TORNADO_WALL_W = 0.35; // annulus half-width
+const TORNADO_WALL_BOT = 0.3; // funnel radius at the GROUND (fraction of the radial extent)
+const TORNADO_WALL_TOP = 0.78; // funnel radius at the TOP — the classic widening cone
+const TORNADO_WALL_W = 0.3; // half-width of the wall annulus the updraft lives in
 
 /**
- * A tornado: the vortex's Rankine swirl PLUS the vertical structure of a real twister — a convergent
- * inflow layer near the ground (friction robs the swirl of centrifugal balance, so air spirals IN
- * along the floor: that's why debris gets dragged toward a tornado), and a buoyant CORE UPDRAFT that
- * carries what reaches the axis upward. The updraft eases off with height, so debris decelerates near
- * the top, tumbles out, falls OUTSIDE the funnel, and is dragged back in at the ground — a continuous
- * recirculating debris fountain rather than a one-way ejection out the top (the first version's bug:
- * constant-with-height lift launched everything off the top at full speed and it never came back).
+ * A tornado: the vortex's Rankine swirl PLUS the vertical structure of a real twister. The radial
+ * flow steers debris toward the FUNNEL SURFACE — a cone, narrow at the ground and widening with
+ * height: bodies outside it are drawn in, and bodies caught in the EYE are pushed OUT to the wall
+ * (the eye of a real tornado is calm, and an inward-only inflow trapped objects dead-centre on the
+ * axis forever — reported). The updraft rides that wall and fades linearly with height, so debris
+ * STALLS around ¾ height, arcs outward, falls outside the funnel, and the ground inflow drags it
+ * back in — a recirculating fountain in the SHAPE of the funnel, not a one-way launcher off the top.
  * `dir` mirrors the swirl handedness; negative strength reverses swirl and blows debris outward.
  */
 function tornadoForce(
@@ -367,15 +375,24 @@ function tornadoForce(
   const hf = THREE.MathUtils.clamp((_d.y + H) / (2 * H), 0, 1); // 0 at the ground … 1 at the top
 
   const vt = rankine(rDist, R) * speed * dir; // Rankine swirl, same as the vortex
-  const inflow = speed * TORNADO_INFLOW * (1 - hf) * (1 - hf); // boundary-layer convergence, ground-hugging
+  // signed radial steering toward the funnel surface at this height: + = outward (a body in the eye
+  // is expelled to the wall), − = inward (stray debris is gathered). Strongest in the ground layer
+  // (boundary-layer convergence — why debris gets dragged toward a twister), gentler aloft so the
+  // cone shape still holds up high without crushing the swirl.
+  const coneR = TORNADO_WALL_BOT + (TORNADO_WALL_TOP - TORNADO_WALL_BOT) * hf;
+  const coef = TORNADO_INFLOW * (0.35 + 0.65 * (1 - hf) * (1 - hf));
+  const vRad = speed * coef * THREE.MathUtils.clamp((coneR - rf) * 3, -1, 1);
+  // updraft on the funnel WALL (the annulus around the cone surface — the core is centrifugally
+  // forbidden and the eye is calm), fading LINEARLY with height so debris tops out around ¾ of the
+  // column instead of launching off the top at full climb speed (the previous behavior, reported).
   const lift = speed * TORNADO_LIFT
-    * Math.max(0, 1 - Math.abs(rf - TORNADO_WALL) / TORNADO_WALL_W) // funnel-wall annulus
-    * (1 - hf * hf); // eases toward the top so debris arcs out instead of rocketing off
+    * Math.max(0, 1 - Math.abs(rf - coneR) / TORNADO_WALL_W)
+    * (1 - hf);
 
   _tv.set(
-    -_d.z * invd * vt - _d.x * invd * inflow,
+    -_d.z * invd * vt + _d.x * invd * vRad,
     lift,
-    _d.x * invd * vt - _d.z * invd * inflow,
+    _d.x * invd * vt + _d.z * invd * vRad,
   );
   _tv.applyQuaternion(field.quat);
   return out.set(_tv.x - vel.x, _tv.y - vel.y, _tv.z - vel.z).multiplyScalar(mass * RESPONSE * inf);

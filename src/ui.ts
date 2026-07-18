@@ -969,8 +969,10 @@ function buildFieldsSection(panel: HTMLElement, sandbox: Sandbox) {
   // NB region centres are LOW so each region is sunk well into the floor: the influence smoothstep
   // fades over the outer 45% of a region, so a region that merely touches the floor exerts ~2% of its
   // force on floor bodies (measured — the tornado looked dead until it was sunk).
+  // (no 🌪 here — Tornado is a full field kind now, so its own button already places one; a quick
+  // entry too made TWO tornado buttons, which read as a duplicate. Wind tunnel & Black hole stay as
+  // quick tunings of wind/gravitywell until they graduate to custom kinds of their own.)
   const quicks: Quick[] = [
-    { label: '🌪 Tornado', kind: 'tornado', size: [10, 9, 10], y: 6, strength: 10 },
     { label: '🌬 Wind tunnel', kind: 'wind', shape: 'box', size: [14, 4, 8], y: 2, strength: 10 },
     { label: '🕳 Black hole', kind: 'gravitywell', size: [14, 14, 14], y: 8, strength: 25 },
   ];
