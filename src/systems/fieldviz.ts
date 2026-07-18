@@ -66,8 +66,10 @@ export class FieldFlow {
   setEnabled(on: boolean) { this.enabled = on; this.group.visible = on; }
   get isEnabled(): boolean { return this.enabled; }
 
-  /** Advance every field's tracer cloud one frame. Pass the live fields plus (optionally) the ghost. */
-  update(fields: Field[], gain: number) {
+  /** Advance every field's tracer cloud one frame. Pass the live fields plus (optionally) the ghost —
+   *  identify the ghost via `ghostId` and its cloud renders dimmed, so a mere preview never reads as a
+   *  force that's already live. */
+  update(fields: Field[], gain: number, ghostId = -1) {
     const now = performance.now();
     const dt = Math.min((now - this.last) / 1000, 0.05); // clamp so a hitch doesn't fling tracers
     this.last = now;
@@ -79,6 +81,7 @@ export class FieldFlow {
       seen.add(field.id);
       let v = this.viz.get(field.id);
       if (!v) { v = this.make(field); this.viz.set(field.id, v); }
+      (v.points.material as THREE.PointsMaterial).opacity = field.id === ghostId ? 0.35 : 1;
       this.advect(field, v, gain, dt);
     }
     // drop clouds whose field is gone (deleted / committed-away / hidden)

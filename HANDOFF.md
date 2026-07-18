@@ -411,9 +411,26 @@ Polish round 2 (2026-07-17, after Rafael: "everything looks good… turbulence i
    wind 14×4×8 @y4 s10), 🕳 Black hole (well s25 sz12 @y10): beginPlace + setFieldShape/Size/StrengthOf +
    pos on BOTH field.pos and marker.position (the marker gotcha) + commitPlace. Verified tornado: cylinder
    column of tracers, 51% of 70 objects spinning. All: 30fps, no console errors.
-LIKELY NEXT (only if Rafael wants more): motion STREAKS for tracers; affected-object glow/tint; per-object
-trails; vortex UPDRAFT so the tornado also lifts (it currently only swirls — maxHeight stayed 0.8); drawpad
-per-axis ortho cam. NB screenshotting a 500ms shockwave: pin `S.shocks[0].born = now-190` on an interval.
+Polish round 3 (2026-07-17, Rafael: "add tornado updraft; some forces appear the moment you click without
+letting you edit first"):
+ • QUICK SCENES now open a pre-configured GHOST (removed the commitPlace() from their onclick) — same
+   commit-or-cancel flow as every field; that was the "appears on click" report. Regular kind buttons
+   always ghosted (verified). Ghost TRACER clouds now render DIMMED (FieldFlow.update takes ghostId →
+   material.opacity 0.35 vs 1) so a preview never reads as live.
+ • TORNADO UPDRAFT — took THREE attempts; the failures matter:
+   (1) lift fading to zero at the radial edge → nothing rose (swirl slings bodies outward to where lift=0).
+   (2) widened lift profile still dead — REAL root cause was placement: the influence smoothstep fades over
+       a region's outer 45% (SOFT_EDGE 0.55), and the preset cylinder's bottom cap KISSED the floor → floor
+       bodies sat at ~96% axial extent → ~2% force. Regions must be SUNK INTO the floor. All three quick
+       scenes lowered: tornado y=6 (was 12), wind tunnel y=2 (was 4), black hole y=8 r=14.
+   (3) ALSO required a RANKINE profile: constant-speed swirl near the axis demands v²/r ≫ the inward pull →
+       bodies slung out of the region before lift acts. Now tangential target *= min(1, rf/0.6) (solid-body
+       core), inward draw 0.35, lift = speed·VORTEX_LIFT(0.6)·(1−0.7·rf). Result: bodies collect at the
+       axis and ride up — verified maxHeight 19.3 (was 0.8), 7 airborne at once, fountain out the top.
+   LESSON for every floor-adjacent field: sink the region, don't kiss the floor.
+LIKELY NEXT (Rafael said "then we can talk about more upgrades"): motion STREAKS for tracers; affected-
+object glow/tint; per-object trails; drawpad per-axis ortho cam. NB screenshotting a 500ms shockwave: pin
+`S.shocks[0].born = now-190` on an interval.
 STANDING RULE (Rafael, 2026-07-16): git commit AND push after EVERY build — don't wait to be asked.
 
 Stability hardening (2026-07-13): dynamic bodies now spawn with CCD enabled and reject deeply-

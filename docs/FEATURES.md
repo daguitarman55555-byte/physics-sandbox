@@ -72,8 +72,17 @@ A checklist so nothing is lost. `[x]` = in Phase 1 today · `[ ]` = planned (wit
       random **spin kick** so it tumbles. Juice: an expanding **shockwave shell + ground ring** that fade
       over ~0.5 s, and a **camera shake** scaled by blast strength (render-only offset — OrbitControls
       state is never disturbed). Leaves no field behind. Verified: pile mean speed 1.0→9.3 m/s.
-- [x] **Quick scenes** (one-click presets) — 🌪 Tornado (tall cylinder vortex), 🌬 Wind tunnel (box wind),
-      🕳 Black hole (strength-25 gravity well): pre-tuned field setups placed instantly at the view centre.
+- [x] **Quick scenes** (pre-tuned presets) — 🌪 Tornado (tall cylinder vortex), 🌬 Wind tunnel (box wind),
+      🕳 Black hole (strength-25 gravity well). Each opens as a pre-configured **ghost** in the normal
+      commit-or-cancel flow (position/edit it, then Place/Enter) — nothing goes live on click. Regions are
+      **sunk into the floor**: the influence smoothstep fades over a region's outer 45%, so a region that
+      merely touches the floor exerts ~2% of its force on floor bodies (measured; the tornado looked dead).
+- [x] **Tornado updraft (Rankine vortex)** — the vortex now has **solid-body rotation in the core**
+      (tangential target grows with radius, full swirl past 60%) plus an **updraft strongest at the axis**
+      easing to ~30% at the rim. The old constant-speed swirl demanded impossibly tight orbits near the
+      axis (v²/r ≫ the inward pull) and slung everything out before lift could act. Now bodies collect at
+      the axis and ride the column: verified debris to **height 19.3** on the tornado preset (was 0.8).
+- [x] **Ghost tracer clouds render dimmed** (opacity 0.35 vs 1) — a field preview never reads as live.
 - [x] **Turbulence tamed** — turbulence steers with its own gentle response (1.6/s vs the shared 5/s):
       its target velocity keeps changing direction, so a body is always far from target and the shared
       response never let up (felt like a blender, reported by Rafael). Default eddy speed 8→6 too.

@@ -1709,7 +1709,7 @@ export class Sandbox {
     for (const r of this.fields) if (r !== this.editingOriginal) this._flowList.push(r.field);
     // (explosion ghosts excluded: they exert no steady force, so a tracer cloud would just sit dead)
     if (this.placing && this.placing.field.kind !== 'explosion') this._flowList.push(this.placing.field);
-    this.fieldFlow.update(this._flowList, this.fieldStrength);
+    this.fieldFlow.update(this._flowList, this.fieldStrength, this.placing?.field.id ?? -1);
   }
   private _flowList: Field[] = []; // reused each frame to feed the flow viz without allocating
 

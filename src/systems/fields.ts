@@ -198,6 +198,12 @@ function planeNormal(pts: Float32Array, n: number, out: THREE.Vector3): boolean 
 }
 
 const RESPONSE = 5; // how hard any field steers a body toward its target velocity (1/s) — uniform
+// Vortex updraft: target lift = speed·VORTEX_LIFT at the centreline, easing to ~30% of that at the
+// radial edge — NOT to zero, because the swirl slings bodies outward, and if the lift died at the rim
+// nothing ever rose (measured: max height 1.5 with an edge-zero profile). Net rise ≈ target − g/RESPONSE
+// (the steering must beat gravity), so the whole column becomes a debris fountain: fast up the middle,
+// gentle at the rim, falling back once a body tops out of the region.
+const VORTEX_LIFT = 0.6;
 const SOFT_EDGE = 0.55; // full strength inside this fraction of the region; smoothstep to 0 by the edge
 const PATH_LOOKAHEAD = 4; // samples ahead the flow steers toward (follows curvature + draws onto the path)
 const SWIRL_GAIN = 0.7; // path swirl scales with radius (0 at the centreline) and this cap — keeps it gentle
@@ -286,11 +292,24 @@ export function fieldForce(
   if (field.kind === 'wind') {
     _tv.set(1, 0, 0).applyQuaternion(field.quat).multiplyScalar(speed); // blow toward wind velocity
   } else if (field.kind === 'vortex') {
-    // swirl about the field's own axis (quat·+Y): work in region-local space so a tilted vortex
-    // spins in its tilted plane. tangential swirl + a gentle inward draw = a stable tornado.
+    // swirl about the field's own axis (quat·+Y): work in region-local space so a tilted vortex spins
+    // in its tilted plane. RANKINE profile: solid-body rotation in the core (tangential target grows
+    // with radius, full swirl past ~60% of the region) — a constant-speed swirl near the axis demanded
+    // impossibly tight orbits (v²/r far beyond the inward pull), so bodies were slung straight out of
+    // the region and the updraft never got to act (measured: nothing airborne). With the slow core, a
+    // gentle inward draw collects bodies at the axis and the UPDRAFT — strongest at the centreline,
+    // easing toward the rim — carries them up: a real debris fountain, up the middle, out the top.
     _d.copy(bodyPos).sub(field.pos).applyQuaternion(_iq.copy(field.quat).invert());
-    const invd = 1 / (Math.hypot(_d.x, _d.z) || 1);
-    _tv.set((-_d.z * invd - _d.x * invd * 0.3) * speed, 0, (_d.x * invd - _d.z * invd * 0.3) * speed);
+    const rDist = Math.hypot(_d.x, _d.z);
+    const invd = 1 / (rDist || 1);
+    const rf = rDist / Math.max(field.size.x, 1e-3); // 0 at the axis, 1 at the region's radial edge
+    const swirlFrac = Math.min(1, rf / 0.6); // Rankine: solid-body core, full swirl beyond 60% radius
+    const lift = speed * VORTEX_LIFT * Math.max(0, 1 - 0.7 * rf);
+    _tv.set(
+      (-_d.z * invd * swirlFrac - _d.x * invd * 0.35) * speed,
+      lift,
+      (_d.x * invd * swirlFrac - _d.z * invd * 0.35) * speed,
+    );
     _tv.applyQuaternion(field.quat); // target velocity back into world space
   } else {
     // attractor / repeller — toward / away from the centre

@@ -966,14 +966,19 @@ function buildFieldsSection(panel: HTMLElement, sandbox: Sandbox) {
   // --- quick scenes: one-click, pre-tuned fun setups (a preset beats hand-configuring every time) ---
   const quickRow = el('div', '', 'row wrap');
   type Quick = { label: string; kind: FieldKind; shape?: FieldShape; size: [number, number, number]; y: number; strength: number };
+  // NB region centres are LOW so each region is sunk well into the floor: the influence smoothstep
+  // fades over the outer 45% of a region, so a region that merely touches the floor exerts ~2% of its
+  // force on floor bodies (measured — the tornado looked dead until it was sunk).
   const quicks: Quick[] = [
-    { label: '🌪 Tornado', kind: 'vortex', shape: 'cylinder', size: [6, 12, 6], y: 12, strength: 12 },
-    { label: '🌬 Wind tunnel', kind: 'wind', shape: 'box', size: [14, 4, 8], y: 4, strength: 10 },
-    { label: '🕳 Black hole', kind: 'gravitywell', size: [12, 12, 12], y: 10, strength: 25 },
+    { label: '🌪 Tornado', kind: 'vortex', shape: 'cylinder', size: [6, 12, 6], y: 6, strength: 12 },
+    { label: '🌬 Wind tunnel', kind: 'wind', shape: 'box', size: [14, 4, 8], y: 2, strength: 10 },
+    { label: '🕳 Black hole', kind: 'gravitywell', size: [14, 14, 14], y: 8, strength: 25 },
   ];
   for (const q of quicks) {
     const b = el('button', q.label, 'mini');
     b.onclick = () => {
+      // opens a pre-configured GHOST — same commit-or-cancel flow as every field, so nothing goes
+      // live until you position it and press Place/Enter (a quick scene must still be editable first)
       sandbox.beginPlace(q.kind);
       const rec = sandbox.activeField!;
       if (q.shape) sandbox.setFieldShape(rec, q.shape);
@@ -981,7 +986,6 @@ function buildFieldsSection(panel: HTMLElement, sandbox: Sandbox) {
       sandbox.setFieldStrengthOf(rec, q.strength);
       rec.field.pos.y = q.y;
       rec.marker.position.copy(rec.field.pos); // marker follows (setting pos alone doesn't move it)
-      sandbox.commitPlace();
     };
     quickRow.append(b);
   }
