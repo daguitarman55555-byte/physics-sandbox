@@ -428,9 +428,38 @@ letting you edit first"):
        core), inward draw 0.35, lift = speed·VORTEX_LIFT(0.6)·(1−0.7·rf). Result: bodies collect at the
        axis and ride up — verified maxHeight 19.3 (was 0.8), 7 airborne at once, fountain out the top.
    LESSON for every floor-adjacent field: sink the region, don't kiss the floor.
+PHYSICS ACCURACY PASS (2026-07-18, from Rafael's bug reports — all measured & fixed):
+ • "ORBITING AROUND NOTHING" root causes, BOTH real: (1) the gravity-suspension in stepPhysics didn't
+   scale with the GLOBAL strength slider — wells at global 0 exerted zero pull but still cancelled
+   gravity, so 816 objects coasted forever in zero-g at 57 m/s (vy≈0, y≈52 — measured live). Fix:
+   suspend ∝ liftInf · clamp(fieldStrength, 0, 1). (2) the well's Coriolis "orbit seed" k·(axis×v) is
+   CYCLOTRON dynamics — it circles bodies around wherever they are, not the centre. REMOVED. Orbits now
+   come from ORBITAL INSERTION (insertOrbits, on well place/apply): each captured body's tangential
+   velocity component is set to √(a_eff·r) about the well axis (wellOrbitalVelocity in fields.ts) —
+   real satellite insertion. a_eff MUST include fieldInfluence (soft edge) or edge bodies are 1.5× too
+   fast and fling out (measured). Well default y=8→5: at y=8 the floor crowd sat in the soft edge →
+   partial gravity → floor friction ground orbits dead; at y=5 floor is full-influence → frictionless.
+   Verified: meanTang −7.7 → −5.3 over 10 s (sustained; residual decay = honest collision loss).
+ • VORTEX ≠ TORNADO — split into two kinds (Rafael: vortices must not lift). VORTEX = flat Rankine
+   whirlpool (rankine(): solid-body core ∝ r, free vortex ∝ 1/r outside — constant-speed-at-all-radii
+   demanded impossible centripetal force near the axis) + gentle inward draw, ZERO vertical. Verified
+   maxY 0.6. TORNADO (new kind, cylinder default, SUNK 3 below floor — soft edge would zero the ground
+   inflow if the bottom sat at y=0): Rankine swirl + ground-hugging inflow ∝ (1−hf)² + funnel-WALL
+   updraft. Two hard-won findings: (a) a core-centred updraft lifts NOTHING — centrifugal balance
+   forbids the core (needs ~45 m/s², inflow gives ~19); debris settles in an annulus at rf≈0.5, so the
+   lift lives there (TORNADO_WALL 0.5 ± 0.35) — same as real tornadoes (calm core, debris up the wall).
+   (b) the recirculation loop must close INSIDE the region: radius 6 shed everything (landed outside,
+   never recaptured); radius 10 (wall still at ~5, funnel cone visual at 0.75·r) + inflow 0.7 →
+   STEADY STATE: airborne 30→27→29 over 17 s, 46/50 retained. Marker = wireframe cone, apex down.
+ • REVERSE FLOW — `Field.dir: 1|-1` + ⇄ Reverse-flow button (editor, only for vortex/tornado/
+   gravitywell/path). dir mirrors HANDEDNESS only: vortex/tornado tangential ×dir, well insertion
+   handedness, path look-ahead ±dir (open-path reverse extrapolates past the START). PROTECTED
+   separately: NEGATIVE STRENGTH still reverses swirl AND flips draw→outward fling (Rafael likes it;
+   verified: strength −8 → tang −0.76, radial +1.8 outward; dir −1 → tang −3.76, radial inward 0.24).
+   dir is copied in cloneField/copyFieldInto (draft/apply safe).
 LIKELY NEXT (Rafael said "then we can talk about more upgrades"): motion STREAKS for tracers; affected-
 object glow/tint; per-object trails; drawpad per-axis ortho cam. NB screenshotting a 500ms shockwave: pin
-`S.shocks[0].born = now-190` on an interval.
+`S.shocks[0].born = now-190` on an interval. Research dossier: docs/FORCES_RESEARCH.md (started).
 STANDING RULE (Rafael, 2026-07-16): git commit AND push after EVERY build — don't wait to be asked.
 
 Stability hardening (2026-07-13): dynamic bodies now spawn with CCD enabled and reject deeply-

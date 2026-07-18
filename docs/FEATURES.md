@@ -66,6 +66,19 @@ A checklist so nothing is lost. `[x]` = in Phase 1 today · `[ ]` = planned (wit
       single object. Visual-only (never touches physics), advected render-side with a light drag + snug
       respawn bound so the cloud reads as "the field," fading in/out over a short life so it breathes.
       Truthful: a tracer is a unit-mass probe, so what you watch is exactly what an object will feel.
+- [x] **Physics-accuracy pass** (2026-07-18) — every field audited after live bug reports: the global
+      strength slider now scales the well/lift **gravity suspension** too (at 0 a field does *nothing*;
+      it used to leave objects coasting in zero-g, "orbiting nothing"); the well's Coriolis orbit-seed
+      (cyclotron circles around arbitrary points) is **gone**, replaced by true **orbital insertion**
+      (tangential v = √(a_eff·r) at placement, like a real satellite); **Vortex** is now a flat Rankine
+      whirlpool (solid-body core, 1/r outside, zero vertical); **Tornado is its own field kind** —
+      Rankine swirl + ground inflow + **funnel-wall updraft** (the core is centrifugally forbidden, so
+      lift lives in the wall annulus like a real twister) with a steady-state recirculating debris
+      fountain (verified stable over 17 s), wireframe funnel-cone marker.
+- [x] **⇄ Reverse flow** — vortex / tornado / gravity well / path fields carry a `dir` handedness flag
+      with an editor button: clockwise ↔ counter-clockwise, path flow forwards ↔ backwards, orbit
+      insertion handedness. Separate from (and protective of) the **negative-strength** trick, which
+      still reverses swirl *and* flips the draw outward so bodies fling out.
 - [x] **Explosion** (one-shot 💥) — position the ghost like any field, but **Place = Detonate**: every
       body in the region gets a radial impulse away from the centre (∝ mass, eased by the region
       influence — a box/cylinder charge blasts in that shape), an **upward bias** so debris arcs, and a

@@ -24,7 +24,7 @@
 import * as THREE from 'three';
 import { parseExpression } from './expr';
 
-export type FieldKind = 'attractor' | 'repeller' | 'wind' | 'vortex' | 'path' | 'gravitywell' | 'turbulence' | 'explosion';
+export type FieldKind = 'attractor' | 'repeller' | 'wind' | 'vortex' | 'tornado' | 'path' | 'gravitywell' | 'turbulence' | 'explosion';
 export type FieldShape = 'sphere' | 'box' | 'cylinder';
 
 /**
@@ -59,6 +59,11 @@ export interface Field {
   path?: FieldPath; // present only for kind 'path'; .size.x is the tube (capture) radius
   lift?: boolean; // path fields only: suspend world gravity inside the tube so bodies can follow a 3D
   //                 curve up into the air (like the gravity well does) instead of falling out of it
+  dir?: 1 | -1; // flow direction for rotational/path kinds (vortex, tornado, gravity well, path):
+  //               1 = default handedness, -1 = reversed (the editor's ⇄ Reverse-flow button). NOTE
+  //               this is deliberately separate from `strength`'s SIGN: a NEGATIVE strength on a
+  //               vortex both reverses the swirl and flips the inward draw outward (bodies fling
+  //               out) — a liked, protected behavior — while `dir` only mirrors the handedness.
 }
 
 /** Per-kind defaults. Every `strength` is now a TARGET SPEED (m/s), so the scale is shared across all
@@ -69,6 +74,9 @@ export const FIELD_INFO: Record<FieldKind, { strength: number; size: number; col
   repeller: { strength: 8, size: 10, color: 0xdc4a4a, label: 'Repel' },
   wind: { strength: 8, size: 10, color: 0x4fb89a, label: 'Wind' },
   vortex: { strength: 8, size: 10, color: 0xa978e0, label: 'Vortex' },
+  // tornado: Rankine swirl + ground-level inflow + a core updraft that eases off with height, so
+  // debris recirculates (up the core, out the top, falls outside, drawn back in at the ground).
+  tornado: { strength: 10, size: 10, color: 0x8fd0e8, label: 'Tornado' },
   path: { strength: 8, size: 4, color: 0xe0a04f, label: 'Path' }, // size.x = tube (capture) radius; the
   //                                curve's own base size is 10 (set in beginPlace), the tube stays snug at 4
   // the well's `strength` is its MASS (how hard it pulls), not a target speed.
@@ -198,22 +206,13 @@ function planeNormal(pts: Float32Array, n: number, out: THREE.Vector3): boolean 
 }
 
 const RESPONSE = 5; // how hard any field steers a body toward its target velocity (1/s) — uniform
-// Vortex updraft: target lift = speed·VORTEX_LIFT at the centreline, easing to ~30% of that at the
-// radial edge — NOT to zero, because the swirl slings bodies outward, and if the lift died at the rim
-// nothing ever rose (measured: max height 1.5 with an edge-zero profile). Net rise ≈ target − g/RESPONSE
-// (the steering must beat gravity), so the whole column becomes a debris fountain: fast up the middle,
-// gentle at the rim, falling back once a body tops out of the region.
-const VORTEX_LIFT = 0.6;
 const SOFT_EDGE = 0.55; // full strength inside this fraction of the region; smoothstep to 0 by the edge
 const PATH_LOOKAHEAD = 4; // samples ahead the flow steers toward (follows curvature + draws onto the path)
 const SWIRL_GAIN = 0.7; // path swirl scales with radius (0 at the centreline) and this cap — keeps it gentle
 // Gravity well: GM = strength·gain·WELL_GM sets how hard the 1/r² pull is; WELL_SOFT (metres) is a
-// Plummer softening length so the force stays finite at the centre (no singular slingshot); WELL_SWIRL
-// (rad/s) is a Coriolis-like curl about the region axis that bends radial infall into orbits — it acts
-// perpendicular to velocity so it does NO work (a resting pile forms a spinning disc without runaway spin).
+// Plummer softening length so the force stays finite at the centre (no singular slingshot).
 const WELL_GM = 60;
 const WELL_SOFT = 1.5;
-const WELL_SWIRL = 1.4;
 const _d = new THREE.Vector3();
 const _ax = new THREE.Vector3(); // gravity well's local spin axis in world space
 const _iq = new THREE.Quaternion();
@@ -285,6 +284,7 @@ export function fieldForce(
   if (field.kind === 'path') return field.path ? pathForce(field, bodyPos, vel, mass, gain, out) : out;
   if (field.kind === 'gravitywell') return wellForce(field, bodyPos, vel, mass, gain, out);
   if (field.kind === 'turbulence') return turbulenceForce(field, bodyPos, vel, mass, gain, out);
+  if (field.kind === 'tornado') return tornadoForce(field, bodyPos, vel, mass, gain, out);
   const inf = fieldInfluence(field, bodyPos);
   if (inf <= 0) return out;
   const speed = field.strength * gain; // target speed (m/s) — SAME meaning for every kind
@@ -292,23 +292,21 @@ export function fieldForce(
   if (field.kind === 'wind') {
     _tv.set(1, 0, 0).applyQuaternion(field.quat).multiplyScalar(speed); // blow toward wind velocity
   } else if (field.kind === 'vortex') {
-    // swirl about the field's own axis (quat·+Y): work in region-local space so a tilted vortex spins
-    // in its tilted plane. RANKINE profile: solid-body rotation in the core (tangential target grows
-    // with radius, full swirl past ~60% of the region) — a constant-speed swirl near the axis demanded
-    // impossibly tight orbits (v²/r far beyond the inward pull), so bodies were slung straight out of
-    // the region and the updraft never got to act (measured: nothing airborne). With the slow core, a
-    // gentle inward draw collects bodies at the axis and the UPDRAFT — strongest at the centreline,
-    // easing toward the rim — carries them up: a real debris fountain, up the middle, out the top.
+    // A pure whirlpool: swirl about the field's own axis (quat·+Y) — NO vertical motion (that's the
+    // tornado's job). Work in region-local space so a tilted vortex spins in its tilted plane.
+    // RANKINE profile — the standard model of a real vortex: solid-body rotation in the core
+    // (tangential speed ∝ r) and a free, decaying swirl outside it (∝ 1/r) — plus a gentle inward
+    // draw. `dir` mirrors the handedness (the ⇄ Reverse button); a NEGATIVE strength still reverses
+    // swirl AND flips the draw outward (bodies fling out) — a deliberate, protected behavior.
     _d.copy(bodyPos).sub(field.pos).applyQuaternion(_iq.copy(field.quat).invert());
+    const dir = field.dir ?? 1;
     const rDist = Math.hypot(_d.x, _d.z);
     const invd = 1 / (rDist || 1);
-    const rf = rDist / Math.max(field.size.x, 1e-3); // 0 at the axis, 1 at the region's radial edge
-    const swirlFrac = Math.min(1, rf / 0.6); // Rankine: solid-body core, full swirl beyond 60% radius
-    const lift = speed * VORTEX_LIFT * Math.max(0, 1 - 0.7 * rf);
+    const vt = rankine(rDist, Math.max(field.size.x, 1e-3)) * speed * dir; // tangential target speed
     _tv.set(
-      (-_d.z * invd * swirlFrac - _d.x * invd * 0.35) * speed,
-      lift,
-      (_d.x * invd * swirlFrac - _d.z * invd * 0.35) * speed,
+      -_d.z * invd * vt - _d.x * invd * 0.3 * speed,
+      0,
+      _d.x * invd * vt - _d.z * invd * 0.3 * speed,
     );
     _tv.applyQuaternion(field.quat); // target velocity back into world space
   } else {
@@ -317,6 +315,69 @@ export function fieldForce(
     const sign = field.kind === 'attractor' ? 1 : -1;
     _tv.copy(_d).divideScalar(_d.length() || 1).multiplyScalar(sign * speed);
   }
+  return out.set(_tv.x - vel.x, _tv.y - vel.y, _tv.z - vel.z).multiplyScalar(mass * RESPONSE * inf);
+}
+
+/**
+ * Rankine vortex tangential-speed profile, normalized to peak 1 at the core radius: v ∝ r inside the
+ * core (solid-body rotation — the fluid turns as one piece, so the very axis is calm), v ∝ 1/r
+ * outside it (a free vortex, conserving circulation). This is the standard first-order model of real
+ * whirlpools and tornado winds, and it's also what makes the sim stable: a constant-speed swirl at
+ * tiny radius would demand impossible centripetal force and sling bodies straight out.
+ */
+function rankine(r: number, R: number): number {
+  const rc = 0.35 * R; // core radius — solid-body inside, free vortex outside
+  return r <= rc ? r / rc : rc / Math.max(r, 1e-6);
+}
+
+// Tornado shape constants: how the three flow components (swirl / inflow / updraft) are distributed.
+const TORNADO_INFLOW = 0.7; // ground-level radial inflow fraction of `speed` (decays with height²)
+const TORNADO_LIFT = 0.85; // funnel-wall updraft fraction of `speed` (fades with height)
+// The updraft lives in the funnel WALL — an annulus around rf≈0.5, zero at the axis and the rim. A
+// core-centred updraft never lifted anything (measured: maxY 1.6): centrifugal balance FORBIDS the
+// core — a body circling at Rankine speed near the axis needs ~45 m/s² centripetal but the inflow
+// supplies ~19, so debris settles in an equilibrium annulus at rf≈0.5. Real tornadoes are the same:
+// calm core, debris spiralling up the wall. Put the lift where the debris actually is.
+const TORNADO_WALL = 0.5; // annulus centre (fraction of radial extent)
+const TORNADO_WALL_W = 0.35; // annulus half-width
+
+/**
+ * A tornado: the vortex's Rankine swirl PLUS the vertical structure of a real twister — a convergent
+ * inflow layer near the ground (friction robs the swirl of centrifugal balance, so air spirals IN
+ * along the floor: that's why debris gets dragged toward a tornado), and a buoyant CORE UPDRAFT that
+ * carries what reaches the axis upward. The updraft eases off with height, so debris decelerates near
+ * the top, tumbles out, falls OUTSIDE the funnel, and is dragged back in at the ground — a continuous
+ * recirculating debris fountain rather than a one-way ejection out the top (the first version's bug:
+ * constant-with-height lift launched everything off the top at full speed and it never came back).
+ * `dir` mirrors the swirl handedness; negative strength reverses swirl and blows debris outward.
+ */
+function tornadoForce(
+  field: Field, bodyPos: THREE.Vector3, vel: THREE.Vector3, mass: number, gain: number, out: THREE.Vector3,
+): THREE.Vector3 {
+  const inf = fieldInfluence(field, bodyPos);
+  if (inf <= 0) return out;
+  const speed = field.strength * gain;
+  const dir = field.dir ?? 1;
+  _d.copy(bodyPos).sub(field.pos).applyQuaternion(_iq.copy(field.quat).invert()); // region-local
+  const R = Math.max(field.size.x, 1e-3);
+  const H = Math.max(field.size.y, 1e-3); // half-height: local y runs -H (ground end) … +H (top)
+  const rDist = Math.hypot(_d.x, _d.z);
+  const invd = 1 / (rDist || 1);
+  const rf = rDist / R; // 0 at the axis … 1 at the radial edge
+  const hf = THREE.MathUtils.clamp((_d.y + H) / (2 * H), 0, 1); // 0 at the ground … 1 at the top
+
+  const vt = rankine(rDist, R) * speed * dir; // Rankine swirl, same as the vortex
+  const inflow = speed * TORNADO_INFLOW * (1 - hf) * (1 - hf); // boundary-layer convergence, ground-hugging
+  const lift = speed * TORNADO_LIFT
+    * Math.max(0, 1 - Math.abs(rf - TORNADO_WALL) / TORNADO_WALL_W) // funnel-wall annulus
+    * (1 - hf * hf); // eases toward the top so debris arcs out instead of rocketing off
+
+  _tv.set(
+    -_d.z * invd * vt - _d.x * invd * inflow,
+    lift,
+    _d.x * invd * vt - _d.z * invd * inflow,
+  );
+  _tv.applyQuaternion(field.quat);
   return out.set(_tv.x - vel.x, _tv.y - vel.y, _tv.z - vel.z).multiplyScalar(mass * RESPONSE * inf);
 }
 
@@ -338,15 +399,38 @@ function wellForce(
   const gm = field.strength * gain * WELL_GM;
   const a = gm / (r * r + WELL_SOFT * WELL_SOFT); // 1/r² pull, softened so it never blows up at r→0
   _d.divideScalar(r); // unit vector toward the centre
-  // central pull: force = m·a (⇒ acceleration a, mass-independent). No `vel` term ⇒ conservative ⇒ orbits.
-  out.set(_d.x * a, _d.y * a, _d.z * a);
-  // orbital seed: k·(axis × v). Perpendicular to velocity, so it does no work — it only bends the path,
-  // turning a dead-straight fall into a spiral so a resting crowd winds up as a spinning disc.
-  _ax.set(0, 1, 0).applyQuaternion(field.quat); // region's spin axis (tilts if you turn the region)
-  out.x += WELL_SWIRL * (_ax.y * vel.z - _ax.z * vel.y);
-  out.y += WELL_SWIRL * (_ax.z * vel.x - _ax.x * vel.z);
-  out.z += WELL_SWIRL * (_ax.x * vel.y - _ax.y * vel.x);
-  return out.multiplyScalar(mass * inf);
+  // central pull: force = m·a (⇒ acceleration a, mass-independent). No `vel` term ⇒ conservative ⇒
+  // orbits. This is the ONLY force a well exerts — it used to add a Coriolis-style k·(axis × v) term
+  // to "seed" orbits, but that is cyclotron dynamics: it curves a body into a circle of radius v/k
+  // around WHEREVER IT HAPPENS TO BE, so objects visibly orbited empty space instead of the well
+  // (reported by Rafael, and physically inevitable in hindsight). Orbits are now seeded honestly, by
+  // a one-time tangential ORBITAL-INSERTION kick when the well is placed (wellOrbitalVelocity below),
+  // after which pure Newtonian gravity does the rest — everything orbits the actual centre.
+  return out.set(_d.x * a, _d.y * a, _d.z * a).multiplyScalar(mass * inf);
+}
+
+/**
+ * The circular-orbit velocity at `bodyPos` around a well: magnitude √(a·r) (the speed at which the
+ * softened 1/r² pull exactly supplies the centripetal force), direction tangential — perpendicular to
+ * the radius, in the plane normal to the well's axis (quat·+Y), handedness set by `dir`. Used by the
+ * Sandbox for ORBITAL INSERTION: when a well is placed, each captured body's tangential velocity
+ * component is set to this, so a resting crowd immediately orbits the centre — real orbital mechanics
+ * (v = √(GM/r) is exactly how satellites are inserted), not a fudge force.
+ */
+export function wellOrbitalVelocity(field: Field, bodyPos: THREE.Vector3, gain: number, out: THREE.Vector3): THREE.Vector3 {
+  _d.subVectors(bodyPos, field.pos);
+  const r = _d.length() || 1e-3;
+  const gm = field.strength * gain * WELL_GM;
+  // the EFFECTIVE pull includes the region's soft-edge influence (wellForce scales by it), so the
+  // balancing circular speed must too — inserting at full-strength speed near the edge overshoots
+  // by √(1/inf) and flings bodies straight out of the region (measured: orbits died in ~4 s)
+  const a = (gm / (r * r + WELL_SOFT * WELL_SOFT)) * fieldInfluence(field, bodyPos);
+  const vCirc = Math.sqrt(a * r);
+  _ax.set(0, 1, 0).applyQuaternion(field.quat); // orbit plane normal = the well's axis
+  out.crossVectors(_ax, _d); // tangential direction (axis × radius)
+  const len = out.length();
+  if (len < 1e-6) return out.set(0, 0, 0); // on the axis — no defined tangent
+  return out.multiplyScalar(((field.dir ?? 1) * vCirc) / len);
 }
 
 // ---- Turbulence: a curl-of-noise velocity field. The curl of a vector potential is divergence-free,
@@ -437,25 +521,30 @@ function pathForce(
   const inf = n <= SOFT_EDGE ? 1 : 1 - smoothstep01((n - SOFT_EDGE) / (1 - SOFT_EDGE));
 
   const speed = field.strength * gain;
-  // LOOK-AHEAD steering: aim the target velocity at a point a few samples ahead ON the curve. That
-  // one vector both follows the curve's bends (centripetal, so fast flow on a tight loop doesn't fly
-  // out) AND draws a stray body back onto the path — no separate radial pull term needed. At an OPEN
-  // path's end we EXTRAPOLATE the ahead-point past the last sample along the final tangent, so bodies
-  // flow out the end and leave the tube instead of piling up there.
+  const dir = field.dir ?? 1; // -1 = the ⇄ Reverse button: flow runs the curve backwards
+  // LOOK-AHEAD steering: aim the target velocity at a point a few samples ahead ON the curve (behind,
+  // when reversed). That one vector both follows the curve's bends (centripetal, so fast flow on a
+  // tight loop doesn't fly out) AND draws a stray body back onto the path — no separate radial pull
+  // term needed. At an OPEN path's end we EXTRAPOLATE the ahead-point past the last sample along the
+  // final tangent, so bodies flow out the end and leave the tube instead of piling up there.
   const nSamples = pts.length / 3;
   const si = bi / 3;
   const last = nSamples - 1;
+  const look = PATH_LOOKAHEAD * dir;
   let ax: number, ay: number, az: number;
   if (path.closed) {
-    const ai = ((si + PATH_LOOKAHEAD) % nSamples) * 3;
+    const ai = (((si + look) % nSamples + nSamples) % nSamples) * 3;
     ax = pts[ai]; ay = pts[ai + 1]; az = pts[ai + 2];
-  } else if (si + PATH_LOOKAHEAD <= last) {
-    const ai = (si + PATH_LOOKAHEAD) * 3;
+  } else if (si + look <= last && si + look >= 0) {
+    const ai = (si + look) * 3;
     ax = pts[ai]; ay = pts[ai + 1]; az = pts[ai + 2];
-  } else {
-    const over = si + PATH_LOOKAHEAD - last; // samples past the end
+  } else if (dir > 0) {
+    const over = si + look - last; // samples past the far end
     const L = last * 3;
     ax = pts[L] + tans[L] * over; ay = pts[L + 1] + tans[L + 1] * over; az = pts[L + 2] + tans[L + 2] * over;
+  } else {
+    const over = -(si + look); // samples past the START (reversed flow exits there)
+    ax = pts[0] - tans[0] * over; ay = pts[1] - tans[1] * over; az = pts[2] - tans[2] * over;
   }
   const dx = ax - _pl.x, dy = ay - _pl.y, dz = az - _pl.z;
   const dl = Math.hypot(dx, dy, dz) || 1;

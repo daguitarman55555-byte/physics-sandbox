@@ -23,7 +23,7 @@ import {
 } from './systems/shapes';
 import { buildImplicit, type ImplicitSpec } from './systems/implicit';
 import { PLAIN, type Material } from './systems/materials';
-import { fieldForce, fieldInfluence, pathInfluence, FIELD_INFO, samplePath, PATH_PRESETS, type Field, type FieldKind, type FieldShape, type CurveSpec } from './systems/fields';
+import { fieldForce, fieldInfluence, pathInfluence, wellOrbitalVelocity, FIELD_INFO, samplePath, PATH_PRESETS, type Field, type FieldKind, type FieldShape, type CurveSpec } from './systems/fields';
 import { FieldFlow } from './systems/fieldviz';
 import { buildJoint, anchorWorld, JOINT_INFO, type JointKind } from './systems/joints';
 
@@ -900,7 +900,11 @@ export class Sandbox {
     // A gravity well is spawned up in the air (its big region still reaches down past the floor to
     // capture bodies resting there): with the orbit centre elevated, captured bodies lift off and
     // circle it instead of grinding their orbits into the floor. Other fields keep their low default.
-    const minY = kind === 'gravitywell' ? 8 : 2;
+    // A gravity well sits at y=5: high enough that orbits clear the floor, LOW enough that floor
+    // debris is deep inside the region (full influence → full gravity suspension → no floor friction).
+    // At y=8 with the base size-10 region, the floor crowd sat in the soft edge — gravity only ~43%
+    // suspended, so friction ground every inserted orbit to a halt in seconds (measured).
+    const minY = kind === 'gravitywell' ? 5 : 2;
     const field: Field = {
       id: this.nextFieldId++, kind, shape: 'sphere',
       pos: new THREE.Vector3(Math.round(c.x), Math.max(Math.round(c.y), minY), Math.round(c.z)),
@@ -914,6 +918,17 @@ export class Sandbox {
       const spec: CurveSpec = { xt: q.xt, yt: q.yt, zt: q.zt, t0: q.t0, t1: q.t1 };
       const s = samplePath(spec, scale)!;
       field.path = { spec, label: q.label, scale, swirl: 0, pts: s.pts, tans: s.tans, closed: s.closed };
+    }
+    if (kind === 'tornado') {
+      // a tornado is a COLUMN: tall cylinder, SUNK a little below the floor — the region's soft edge
+      // means a bottom exactly at the floor exerts ~0 influence there, which would kill the ground
+      // inflow layer (the part that drags floor debris in). Sinking it 3 puts the floor at ~80%.
+      // The region is WIDER than the visible funnel (radius 10 vs wall at ~5): debris flung out the
+      // top lands inside the region's ground inflow and gets dragged back in — the recirculation loop
+      // has to close INSIDE the region, or the funnel sheds everything within seconds (measured).
+      field.shape = 'cylinder';
+      field.size.set(10, 9, 10); // radius 10, half-height 9 → 18 tall
+      field.pos.y = 6; // bottom at y = -3, floor debris well inside the inflow layer
     }
     const rec: FieldRec = { field, marker: this.makeFieldMarker(field) };
     this.fieldGroup.add(rec.marker);
@@ -963,6 +978,7 @@ export class Sandbox {
       this.axisLock = null;
       this.fieldGroup.remove(rec.marker);
       this.disposeMarker(rec.marker);
+      if (orig.field.kind === 'gravitywell') this.insertOrbits(orig.field); // re-seed orbits at the new spot
       for (const e of this.entities) e.body.wakeUp();
       this.onFieldChange?.();
       return;
@@ -986,7 +1002,46 @@ export class Sandbox {
     this.selectedField = null; // done placing — close the editor (click it again to edit)
     this.transform.detach();
     this.axisLock = null;
+    if (rec.field.kind === 'gravitywell') this.insertOrbits(rec.field); // seed real orbits at placement
     for (const e of this.entities) e.body.wakeUp();
+    this.onFieldChange?.();
+  }
+
+  /**
+   * ORBITAL INSERTION for a newly placed (or just-edited) gravity well: set each captured body's
+   * tangential velocity component to the local circular-orbit speed √(GM·r/(r²+s²)) about the well's
+   * axis — exactly how a real satellite is inserted into orbit. After this one-time kick the well's
+   * pure Newtonian pull sustains the orbit by itself, so everything circles the actual CENTRE (the
+   * old Coriolis "seed" force produced cyclotron circles around arbitrary points — orbits around
+   * nothing). Radial/vertical velocity components are left alone: a body already falling keeps
+   * falling, it just also starts circling — which reads as a natural spiral capture.
+   */
+  private insertOrbits(field: Field) {
+    for (const e of this.entities) {
+      if (e.frozen) continue;
+      const t = e.body.translation();
+      this._p.set(t.x, t.y, t.z);
+      if (fieldInfluence(field, this._p) <= 0) continue;
+      wellOrbitalVelocity(field, this._p, this.fieldStrength, this._s);
+      if (this._s.lengthSq() < 1e-8) continue; // on the axis — no defined orbit direction
+      const v = e.body.linvel();
+      // decompose: replace only the tangential component (along the orbit direction) with v_circ
+      const tHat = this._fieldF.copy(this._s).normalize();
+      const vTan = v.x * tHat.x + v.y * tHat.y + v.z * tHat.z;
+      e.body.setLinvel({
+        x: v.x + this._s.x - vTan * tHat.x,
+        y: v.y + this._s.y - vTan * tHat.y,
+        z: v.z + this._s.z - vTan * tHat.z,
+      }, true);
+      e.body.wakeUp();
+    }
+  }
+
+  /** Flip a rotational/path field's flow handedness (the editor's ⇄ Reverse-flow button). */
+  setFieldDir(rec: FieldRec, dir: 1 | -1) {
+    rec.field.dir = dir;
+    for (const e of this.entities) e.body.wakeUp();
+    if (this.placing === rec) this.refreshPlaceValidity();
     this.onFieldChange?.();
   }
 
@@ -1082,7 +1137,7 @@ export class Sandbox {
     const c: Field = {
       id: f.id, kind: f.kind, shape: f.shape,
       pos: f.pos.clone(), quat: f.quat.clone(), size: f.size.clone(),
-      strength: f.strength, hidden: f.hidden, lift: f.lift,
+      strength: f.strength, hidden: f.hidden, lift: f.lift, dir: f.dir,
     };
     if (f.path) c.path = {
       spec: { ...f.path.spec }, label: f.path.label, scale: f.path.scale, swirl: f.path.swirl,
@@ -1096,7 +1151,7 @@ export class Sandbox {
   private copyFieldInto(src: Field, dst: Field) {
     dst.shape = src.shape;
     dst.pos.copy(src.pos); dst.quat.copy(src.quat); dst.size.copy(src.size);
-    dst.strength = src.strength; dst.hidden = src.hidden; dst.lift = src.lift;
+    dst.strength = src.strength; dst.hidden = src.hidden; dst.lift = src.lift; dst.dir = src.dir;
     dst.path = src.path ? {
       spec: { ...src.path.spec }, label: src.path.label, scale: src.path.scale, swirl: src.path.swirl,
       pts: src.path.pts.slice(), tans: src.path.tans.slice(), closed: src.path.closed,
@@ -1400,6 +1455,16 @@ export class Sandbox {
         );
         ring.rotation.x = Math.PI / 2;
         g.add(ring);
+      } else if (field.kind === 'tornado') {
+        // the funnel: a wireframe cone, narrow at the ground, wide at the top — instantly reads
+        // "tornado" and shows where the core updraft column lives
+        const H = field.size.y * 2;
+        const cone = new THREE.Mesh(
+          new THREE.ConeGeometry(field.size.x * 0.75, H, 24, 6, true),
+          new THREE.MeshBasicMaterial({ color: info.color, transparent: true, opacity: 0.12, side: THREE.DoubleSide, depthWrite: false, wireframe: true }),
+        );
+        cone.rotation.x = Math.PI; // apex down — narrow at the ground
+        g.add(cone);
       } else if (field.kind === 'gravitywell') {
         // concentric orbit rings in the well's spin plane — reads as "things circle here"
         for (const f of [0.35, 0.62, 0.85]) {
@@ -1605,7 +1670,12 @@ export class Sandbox {
         // lift-enabled flow tube: the field's own force becomes the only thing acting, so bodies lift
         // off the floor and follow it — orbiting a well's centre, or riding a 3D flow curve up into the
         // air instead of falling out the bottom of the tube and stalling on floor friction.
-        if (liftInf > 0) this._s.y += -this.gravityY * mass * liftInf;
+        // Scaled by the GLOBAL strength slider (clamped ≤1 — above 1 would be anti-gravity): at
+        // strength 0 a field must do NOTHING. This used to leak — wells at global 0 still cancelled
+        // gravity while pulling with zero force, so hundreds of objects coasted forever in perfect
+        // zero-g, "orbiting around nothing" (Rafael's report; measured vy≈0 at 57 m/s, y≈52).
+        const suspend = liftInf * Math.min(Math.max(this.fieldStrength, 0), 1);
+        if (suspend > 0) this._s.y += -this.gravityY * mass * suspend;
         if (this._s.x || this._s.y || this._s.z) {
           e.body.applyImpulse({ x: this._s.x * FIXED, y: this._s.y * FIXED, z: this._s.z * FIXED }, true);
         }

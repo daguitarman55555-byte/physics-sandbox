@@ -970,7 +970,7 @@ function buildFieldsSection(panel: HTMLElement, sandbox: Sandbox) {
   // fades over the outer 45% of a region, so a region that merely touches the floor exerts ~2% of its
   // force on floor bodies (measured — the tornado looked dead until it was sunk).
   const quicks: Quick[] = [
-    { label: '🌪 Tornado', kind: 'vortex', shape: 'cylinder', size: [6, 12, 6], y: 6, strength: 12 },
+    { label: '🌪 Tornado', kind: 'tornado', size: [10, 9, 10], y: 6, strength: 10 },
     { label: '🌬 Wind tunnel', kind: 'wind', shape: 'box', size: [14, 4, 8], y: 2, strength: 10 },
     { label: '🕳 Black hole', kind: 'gravitywell', size: [14, 14, 14], y: 8, strength: 25 },
   ];
@@ -1129,10 +1129,13 @@ function buildFieldsSection(panel: HTMLElement, sandbox: Sandbox) {
   const bFit = el('button', 'Fit to objects', 'mini');
   bFit.title = 'Centre and size this field to reach the whole crowd of objects.';
   bFit.onclick = () => { const r = sandbox.activeField; if (r) sandbox.fitFieldToObjects(r); };
+  const bReverse = el('button', '⇄ Reverse flow', 'mini');
+  bReverse.title = 'Mirror this field’s flow direction (clockwise ↔ counter-clockwise / forwards ↔ backwards).';
+  bReverse.onclick = () => { const r = sandbox.activeField; if (r) sandbox.setFieldDir(r, (r.field.dir ?? 1) === 1 ? -1 : 1); };
   const bPlace = el('button', 'Place', 'mini');
   const bCancel = el('button', 'Cancel', 'mini');
   const bDelete = el('button', 'Delete field', 'danger');
-  btns.append(bHide, bFit, bPlace, bCancel, bDelete);
+  btns.append(bHide, bFit, bReverse, bPlace, bCancel, bDelete);
   editor.append(title, shapeRow, sizeRow, pathRow, pathNums, pathLift, customBox, strRow, hint, btns);
   panel.append(editor);
 
@@ -1239,6 +1242,10 @@ function buildFieldsSection(panel: HTMLElement, sandbox: Sandbox) {
     }
     if (document.activeElement !== sIn) sIn.value = String(+rec.field.strength.toFixed(2));
     bHide.textContent = rec.field.hidden ? 'Show' : 'Hide';
+    // reverse-flow only exists for kinds with a flow direction to mirror
+    const hasFlow = ['vortex', 'tornado', 'gravitywell', 'path'].includes(rec.field.kind);
+    bReverse.classList.toggle('hidden', !hasFlow);
+    bReverse.classList.toggle('on', (rec.field.dir ?? 1) === -1);
     const p = rec.field.pos;
     const lock = sandbox.lockedAxis;
     const canRotate = rec.field.kind === 'wind' || isPath || rec.field.shape !== 'sphere';
