@@ -503,6 +503,25 @@ opt-in "self gravity" toggle; direct O(n²) is fine to ~300 bodies at 60 Hz (pai
 stepPhysics before world.step), Barnes-Hut octree if more; G scaled so two 1 kg spheres 2 m apart
 drift together in ~seconds (visible); wake management matters (mutual pull keeps everything awake —
 maybe only apply between awake bodies + bodies above a mass threshold, e.g. "planets" only).
+TORNADO LINE ROUND 3 + BIG MAP + APPLY-SPIN FIX (2026-07-18):
+ • The line CAME BACK (Rafael, with 100+ objects, enlarged tornado, minutes of runtime). Root cause of
+   the recurrence: bodies PHASE-LOCK onto a single traveling wave — its equilibrium azimuths co-rotate
+   with it and debris surfs them, re-forming rotating arms. Fix: TWO incommensurate counter-traveling
+   waves (0.6·sin(3θ−2.4t·dir+3hf) + 0.4·sin(2θ+1.7t·dir+40)) — no rotating frame makes both static,
+   so no equilibria to lock onto. ALSO the waves now die toward the rim (×clamp(2(1−rf),0,1)): a full-
+   strength outward half-wave at the rim was ACTIVELY ejecting borderline bodies ("objects fall off
+   way too much"). VERIFIED THE WAY RAFAEL ASKED: 120 objects, enlarged tornado (16,13,16 @y10), TWO
+   FULL SIM-MINUTES chunked: airborne 107→106→107→107 (dead constant), retained 112→111→111→111,
+   azimuth 12/12 bins the whole run, circular concentration r̄ 0.09–0.19 (a line reads ~0.7+), maxY≈16
+   (no launching), 30 fps. Long runs + big crowds are REQUIRED for tornado testing — short small tests
+   passed twice while the line still formed at scale.
+ • MAP ×2: floor 1000×1000 (collider half-extents 500, plane 1040, grid 1000 w/ 2 m cells), fog
+   pushed 80,400 → 250,1200, camera far 500 → 1600, grab/place clamps 245 → 495.
+ • APPLY-FLIPPED-SPIN BUG (Rafael: vortex-spun blocks inside a well reversed direction after delete-
+   vortex → open well editor → Apply): commitPlace re-runs insertOrbits, which snapped every body's
+   tangential velocity to the WELL's dir. insertOrbits is now HANDEDNESS-PRESERVING: |vTan|>0.4 keeps
+   its own sign (speed topped up to circular), only near-rest bodies get the well's dir. Verified:
+   flipped crowd +3.72 stays + after Apply (was: flipped back to −).
 LIKELY NEXT: motion STREAKS for tracers; affected-object glow/tint; per-object trails; drawpad per-axis
 ortho cam. NB screenshotting a 500ms shockwave: pin `S.shocks[0].born = now-190` on an interval.
 Research dossier: docs/FORCES_RESEARCH.md.

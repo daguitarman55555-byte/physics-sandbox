@@ -192,9 +192,9 @@ export class Sandbox {
 
     this.scene = new THREE.Scene();
     this.scene.background = new THREE.Color('#0a0a0f');
-    this.scene.fog = new THREE.Fog('#0a0a0f', 80, 400); // light haze only — the whole floor stays visible
+    this.scene.fog = new THREE.Fog('#0a0a0f', 250, 1200); // faint distant haze — you can see clear across the map
 
-    this.camera = new THREE.PerspectiveCamera(55, innerWidth / innerHeight, 0.1, 500);
+    this.camera = new THREE.PerspectiveCamera(55, innerWidth / innerHeight, 0.1, 1600);
     this.camera.position.set(14, 11, 18);
 
     this.controls = new OrbitControls(this.camera, canvas);
@@ -262,26 +262,27 @@ export class Sandbox {
   }
 
   private addGround() {
-    // A huge floor matching the 500×500 physics floor; its edge is visible far off, honestly.
+    // A huge floor matching the 1000×1000 physics floor; its edge is visible far off, honestly.
     const plane = new THREE.Mesh(
-      new THREE.PlaneGeometry(520, 520),
+      new THREE.PlaneGeometry(1040, 1040),
       new THREE.MeshStandardMaterial({ color: '#141826', roughness: 0.95, metalness: 0 }),
     );
     plane.rotation.x = -Math.PI / 2;
     plane.receiveShadow = true;
     this.scene.add(plane);
-    // Grid covers the full physics floor (500×500); with the light fog its far edge reads as the
-    // actual world edge — which it is (objects thrown past ±250 fall off).
-    const grid = new THREE.GridHelper(500, 500, 0x2b3550, 0x1c2233);
+    // Grid covers the full physics floor (1000×1000, 2 m cells — 1 m cells at this size double the
+    // line count for no visible gain); with the faint fog its far edge reads as the actual world
+    // edge — which it is (objects thrown past ±500 fall off).
+    const grid = new THREE.GridHelper(1000, 500, 0x2b3550, 0x1c2233);
     (grid.material as THREE.Material).opacity = 0.5;
     (grid.material as THREE.Material).transparent = true;
     this.scene.add(grid);
   }
 
   private addGroundCollider() {
-    // 500×500 physics floor (half-extents 250) — objects can't realistically be thrown off it.
+    // 1000×1000 physics floor (half-extents 500) — objects can't realistically be thrown off it.
     const ground = this.world.createRigidBody(RAPIER.RigidBodyDesc.fixed().setTranslation(0, -0.5, 0));
-    this.world.createCollider(RAPIER.ColliderDesc.cuboid(250, 0.5, 250).setFriction(0.7).setRestitution(0.1), ground);
+    this.world.createCollider(RAPIER.ColliderDesc.cuboid(500, 0.5, 500).setFriction(0.7).setRestitution(0.1), ground);
   }
 
   /**
@@ -1025,13 +1026,19 @@ export class Sandbox {
       wellOrbitalVelocity(field, this._p, this.fieldStrength, this._s);
       if (this._s.lengthSq() < 1e-8) continue; // on the axis — no defined orbit direction
       const v = e.body.linvel();
-      // decompose: replace only the tangential component (along the orbit direction) with v_circ
       const tHat = this._fieldF.copy(this._s).normalize();
       const vTan = v.x * tHat.x + v.y * tHat.y + v.z * tHat.z;
+      // HANDEDNESS-PRESERVING: a body already circling keeps ITS direction — only its speed is
+      // topped up to circular. Only a body with no real tangential motion gets the well's default
+      // handedness. Without this, pressing Apply on a well re-inserted every body toward the well's
+      // own `dir` and flipped crowds that a vortex had spun the other way (reported: "pressed Apply
+      // to get out of the editor and the direction of the blocks changed").
+      const vCirc = this._s.length();
+      const target = Math.abs(vTan) > 0.4 ? Math.sign(vTan) * vCirc : vCirc; // vCirc is dir-signed via tHat
       e.body.setLinvel({
-        x: v.x + this._s.x - vTan * tHat.x,
-        y: v.y + this._s.y - vTan * tHat.y,
-        z: v.z + this._s.z - vTan * tHat.z,
+        x: v.x + (target - vTan) * tHat.x,
+        y: v.y + (target - vTan) * tHat.y,
+        z: v.z + (target - vTan) * tHat.z,
       }, true);
       e.body.wakeUp();
     }
@@ -1360,7 +1367,7 @@ export class Sandbox {
     const rec = this.placing;
     if (!rec) return;
     const p = rec.field.pos;
-    this.placeValid = p.y >= 0.3 && Math.abs(p.x) <= 245 && Math.abs(p.z) <= 245;
+    this.placeValid = p.y >= 0.3 && Math.abs(p.x) <= 495 && Math.abs(p.z) <= 495;
     this.tintMarker(rec.marker, this.placeValid ? FIELD_INFO[rec.field.kind].color : 0xdc4a4a);
   }
 
@@ -1638,9 +1645,9 @@ export class Sandbox {
       const k = this.grab.kin.translation();
       const hangBelow = Math.max(0, k.y - this.bodyBottomY(this.grab.entity));
       const tgt = this.grab.target;
-      tgt.x = THREE.MathUtils.clamp(tgt.x, -245, 245);
+      tgt.x = THREE.MathUtils.clamp(tgt.x, -495, 495);
       tgt.y = Math.max(tgt.y, hangBelow + 0.02);
-      tgt.z = THREE.MathUtils.clamp(tgt.z, -245, 245);
+      tgt.z = THREE.MathUtils.clamp(tgt.z, -495, 495);
       const want = this._p.set(tgt.x, tgt.y, tgt.z)
         .sub(this._s.set(k.x, k.y, k.z));
       const maxStep = 40 * FIXED; // ≤ 40 m/s anchor speed

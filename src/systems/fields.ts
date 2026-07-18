@@ -408,11 +408,21 @@ function tornadoForce(
   // onto the exact cone radius put every body on the same rail.
   const theta = Math.atan2(_d.z, _d.x);
   const tSec = typeof performance !== 'undefined' ? performance.now() * 0.001 : 0;
-  const wave = Math.sin(TORNADO_SUBV_N * theta - dir * TORNADO_SUBV_RATE * tSec + hf * 3);
+  // TWO incommensurate, counter-traveling waves. A single traveling wave has equilibrium azimuths
+  // that co-rotate with it, and bodies PHASE-LOCK onto them — they surf the wave, which re-formed
+  // the rotating line/arms it was supposed to break up (reported twice). With two waves at different
+  // counts running in opposite directions there is no rotating frame in which the pattern is static,
+  // so there are no equilibria to lock onto and the crowd stays sheared apart.
+  const wave = 0.6 * Math.sin(TORNADO_SUBV_N * theta - dir * TORNADO_SUBV_RATE * tSec + hf * 3)
+    + 0.4 * Math.sin(2 * theta + dir * 1.7 * tSec + 40);
+  // …and the waves die toward the RIM: near the region edge the inward steering is weak, and a full-
+  // strength outward half-wave there shoved borderline bodies over the edge (the "objects fall off
+  // way too much" report — they were being actively ejected, not just escaping).
+  const rim = THREE.MathUtils.clamp(2 * (1 - rf), 0, 1);
   // snap gain is TIGHT near the ground (the funnel tip must hold debris against full Rankine swirl)
   // and LOOSE aloft (a soft shell up high lets the sub-vortices spread debris over the cone surface)
   const snap = 1.5 + 1.8 * (1 - hf);
-  const vRad = speed * (coef * THREE.MathUtils.clamp((coneR - rf) * snap, -1, 1) + TORNADO_SUBV * wave);
+  const vRad = speed * (coef * THREE.MathUtils.clamp((coneR - rf) * snap, -1, 1) + TORNADO_SUBV * wave * rim);
   // updraft on the funnel WALL (the annulus around the cone surface — the core is centrifugally
   // forbidden and the eye is calm), fading LINEARLY with height so debris tops out inside the column
   // instead of launching off the top. The lift is MODULATED by slowly-drifting noise (±TORNADO_GUST

@@ -75,9 +75,12 @@ A checklist so nothing is lost. `[x]` = in Phase 1 today · `[ ]` = planned (wit
       Rankine swirl + ground inflow + **funnel-wall updraft** (the core is centrifugally forbidden, so
       lift lives in the wall annulus like a real twister) with a steady-state recirculating debris
       fountain (verified stable over 17 s), wireframe funnel-cone marker.
-- [x] **Tornado surface spread + sub-vortices** — a traveling wave around the azimuth (the real
-      thing's 2–5 *suction vortices*) gives each angular position a different radial push, so debris
-      rings the whole funnel (verified 8/8 azimuth bins; it used to bead into one rotating chain). The
+- [x] **Tornado surface spread + sub-vortices** — TWO incommensurate counter-traveling azimuth waves
+      (the real thing's *suction vortices*) give each angular position a different radial push, so
+      debris rings the whole funnel; one wave alone re-formed the line at scale (bodies phase-lock and
+      surf its co-rotating equilibria), and the waves fade at the rim so they can't eject borderline
+      bodies. Verified at Rafael's scale: 120 objects, enlarged funnel, 2 full sim-minutes — airborne
+      constant (~107), 111/120 retained, 12/12 azimuth bins, concentration r̄ ≤ 0.19 throughout. The
       visible funnel is **pointier** (0.06R tip) than the physics cone (0.3R) — deliberately: at ground
       level centrifugal balance parks debris at rf≈0.35–0.5, so the lift annulus must live there; real
       tornadoes are the same (narrow condensation funnel, wider debris cloud). Lift tuned so the column
