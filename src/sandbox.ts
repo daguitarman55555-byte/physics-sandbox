@@ -24,6 +24,7 @@ import {
 import { buildImplicit, type ImplicitSpec } from './systems/implicit';
 import { PLAIN, type Material } from './systems/materials';
 import { fieldForce, fieldInfluence, pathInfluence, FIELD_INFO, samplePath, PATH_PRESETS, type Field, type FieldKind, type FieldShape, type CurveSpec } from './systems/fields';
+import { FieldFlow } from './systems/fieldviz';
 import { buildJoint, anchorWorld, JOINT_INFO, type JointKind } from './systems/joints';
 
 export type Kind = 'box' | 'sphere' | 'custom';
@@ -117,6 +118,7 @@ export class Sandbox {
   private fields: FieldRec[] = [];
   private fieldStrength = 1; // live global multiplier over every field's base strength
   private fieldGroup = new THREE.Group(); // holds the translucent field markers
+  private fieldFlow!: FieldFlow; // glowing tracer particles that make each field's force visible
   // field placement/editing: the gizmo, the ghost awaiting confirmation, and the live selection
   private transform!: TransformControls;
   private placing: FieldRec | null = null; // ghost being positioned — NOT in `fields`, exerts no force
@@ -210,6 +212,7 @@ export class Sandbox {
     this.addGroundCollider();
 
     this.scene.add(this.fieldGroup, this.jointGroup); // Phase 4 visuals live here
+    this.fieldFlow = new FieldFlow(this.scene); // tracer particles visualizing every field's flow
 
     // --- field placement gizmo ---
     // Axis-constrained handles are the honest answer to "a 2D mouse can't pick a 3D point": each
@@ -1604,7 +1607,19 @@ export class Sandbox {
     if (this.placing?.core) {
       this.placing.core.scale.setScalar(1 + Math.sin(performance.now() * 0.005) * 0.18);
     }
+
+    // live flow tracers: the live fields, plus the ghost being placed (so you preview its flow), minus
+    // the one you're mid-edit on (its draft ghost stands in for it) — advected by each field's real force
+    this._flowList.length = 0;
+    for (const r of this.fields) if (r !== this.editingOriginal) this._flowList.push(r.field);
+    if (this.placing) this._flowList.push(this.placing.field);
+    this.fieldFlow.update(this._flowList, this.fieldStrength);
   }
+  private _flowList: Field[] = []; // reused each frame to feed the flow viz without allocating
+
+  /** Toggle the glowing flow tracers on/off (they're a visual read-out, never affect the physics). */
+  setFlowViz(on: boolean) { this.fieldFlow.setEnabled(on); }
+  get flowViz(): boolean { return this.fieldFlow.isEnabled; }
 
   // ---------------------------------------------------------------- interaction
   private setPointer(e: PointerEvent) {

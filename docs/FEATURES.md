@@ -59,6 +59,13 @@ A checklist so nothing is lost. `[x]` = in Phase 1 today · `[ ]` = planned (wit
 
 ## Forces & fields — `systems/fields.ts` (Phase 4)
 - [ ] Gravity direction/strength/per-object/zero-G
+- [x] **Live flow tracers** (`systems/fieldviz.ts`, `✦ Flow tracers` toggle, on by default) — every field
+      (and the ghost you're placing) grows a cloud of ~260 glowing, additive-blended tracer motes that
+      **drift by the field's OWN `fieldForce`** — so you SEE the wind blow, the vortex swirl, the attractor
+      suck inward, the gravity well orbit, turbulence churn, and a flow curve stream, *before* dropping a
+      single object. Visual-only (never touches physics), advected render-side with a light drag + snug
+      respawn bound so the cloud reads as "the field," fading in/out over a short life so it breathes.
+      Truthful: a tracer is a unit-mass probe, so what you watch is exactly what an object will feel.
 - [x] **Field placement & editing** — picking a kind spawns a translucent **hologram** at the view
       centre that exerts **no force** until you confirm it (the commit-or-cancel pattern every 3D
       builder uses). Position it with an axis-constrained **gizmo** (three.js TransformControls,

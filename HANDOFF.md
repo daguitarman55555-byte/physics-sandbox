@@ -379,9 +379,20 @@ then only WRITES INTO the existing zero-length buffer and silently drops every p
 even with 22 pts). Fix = `updateLine()` sets a FRESH BufferAttribute each time (never setFromPoints).
 Verified live: window opens/moves/resizes, orange loop visible while drawing, X/Y/Z snap + gnomon, 2-view
 3D curve, Place makes a 'Drawn' path field moving objects, no console errors.
-STILL OPEN: Rafael said "we will polish everything forces and field related after we fix this" — so NEXT is
-a polish pass over all forces/fields. Possible drawpad nice-to-haves: fatter line (Line2) for visibility,
-snap-line preview, per-axis ortho camera.
+Forces/fields POLISH PASS started (2026-07-17): first deliverable = LIVE FLOW TRACERS (`systems/fieldviz.ts`,
+`FieldFlow` class). Research take: the fields were invisible until you dropped objects in — every great
+flow/particle sandbox makes the FORCE itself visible. So each field (+ the ghost being placed, minus the
+one mid-edit) gets ~260 glowing additive Points advected each frame by the field's REAL `fieldForce`
+(unit-mass probe → truthful), with light drag (DAMP 0.985), a speed cap, a snug respawn bound (~1.08×
+region so they don't coast off), and a sin-over-life fade so they breathe. Hooked in `syncRender` via
+`this._flowList` (no per-frame alloc); `sandbox.setFlowViz/flowViz`; UI toggle `✦ Flow tracers` in the
+Fields panel (on by default). Verified live: vortex fills with swirling purple motes, attractor pulls a
+bright core, 30fps, no console errors. GOTCHA during testing: setting `field.pos` after beginPlace does
+NOT move the marker (marker keeps its spawn pos) — a test artifact, not a bug; real placement uses the
+gizmo which moves both. Rafael will now FEEL it and decide on changes.
+LIKELY NEXT (only if Rafael wants more after feeling it): motion STREAKS (LineSegments prev→cur) so flow
+direction/speed reads in a still too; affected-OBJECT glow/tint in the field color; per-object motion
+trails; density/speed tuning. Also still open from before: drawpad fatter line (Line2), per-axis ortho cam.
 STANDING RULE (Rafael, 2026-07-16): git commit AND push after EVERY build — don't wait to be asked.
 
 Stability hardening (2026-07-13): dynamic bodies now spawn with CCD enabled and reject deeply-

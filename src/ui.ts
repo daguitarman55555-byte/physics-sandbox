@@ -1242,6 +1242,17 @@ function buildFieldsSection(panel: HTMLElement, sandbox: Sandbox) {
   sField.append(sLabel, sRange);
   panel.append(sField);
 
+  // toggle the glowing flow tracers that make each field's force visible (on by default)
+  const flowRow = el('div', '', 'row');
+  const bFlow = el('button', '✦ Flow tracers', 'mini primary');
+  bFlow.onclick = () => {
+    const on = !sandbox.flowViz;
+    sandbox.setFlowViz(on);
+    bFlow.classList.toggle('primary', on);
+  };
+  flowRow.append(bFlow);
+  panel.append(flowRow);
+
   const clearRow = el('div', '', 'row');
   const bClear = el('button', 'Clear fields', 'danger');
   bClear.onclick = () => sandbox.clearFields();
