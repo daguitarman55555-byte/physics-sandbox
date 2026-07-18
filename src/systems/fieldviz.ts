@@ -22,8 +22,9 @@ const DOT_SIZE = 0.55; // world-space size of a tracer dot
 const SPEED_CAP = 16; // clamp tracer speed so a strong field streaks stay watchable, not teleporting
 const DAMP = 0.985; // gentle drag so a tracer that coasts out of the region slows instead of flying off
 
-/** A soft radial dot so tracers read as glowing motes rather than hard squares. */
-function softDot(): THREE.Texture {
+/** A soft radial dot so tracers read as glowing motes rather than hard squares. (Shared with the
+ *  draw pad, which uses the same texture to make sketch strokes glow.) */
+export function softDot(): THREE.Texture {
   const s = 64;
   const c = document.createElement('canvas');
   c.width = c.height = s;

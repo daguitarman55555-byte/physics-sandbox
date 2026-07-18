@@ -13,6 +13,7 @@
  */
 import * as THREE from 'three';
 import type { Sandbox } from './sandbox';
+import { softDot } from './systems/fieldviz';
 
 const UP = new THREE.Vector3(0, 1, 0);
 const ORIGIN = new THREE.Vector3(0, 0, 0);
@@ -130,6 +131,14 @@ export class DrawPad {
     this.line = new THREE.Line(this.lineGeom, new THREE.LineBasicMaterial({ color: LINE_COLOR }));
     this.line.frustumCulled = false;
     this.scene.add(this.line);
+    // a glowing dot at every (smoothed) vertex, sharing the line's geometry — makes the stroke read
+    // as a thick luminous ribbon instead of a 1-px hairline (GPU line width is unreliable on Windows)
+    const glow = new THREE.Points(this.lineGeom, new THREE.PointsMaterial({
+      size: 0.5, map: softDot(), color: LINE_COLOR, transparent: true,
+      blending: THREE.AdditiveBlending, depthWrite: false, sizeAttenuation: true,
+    }));
+    glow.frustumCulled = false;
+    this.scene.add(glow);
 
     // pointer wiring — the canvas owns both buttons; move/up on window so a drag can leave the canvas
     this.canvas.addEventListener('pointerdown', this.onDown);
@@ -142,14 +151,20 @@ export class DrawPad {
     this.updateCamera();
   }
 
+  private smoothed: THREE.Vector3[] = []; // the display (and Place) curve — Chaikin-smoothed raw pts
+
   /** Rebuild the preview line's vertex buffer from `pts`. We set a fresh attribute every time (rather
    *  than BufferGeometry.setFromPoints) because that method reuses an existing zero-length buffer and
-   *  silently drops the points — so the drawn line would never appear. */
+   *  silently drops the points — so the drawn line would never appear. The displayed curve is the
+   *  SMOOTHED stroke (two rounds of Chaikin corner-cutting), so a wobbly mouse line turns silky — and
+   *  since Place uses the same smoothed points, what you see is exactly the flow you get. */
   private updateLine() {
-    const a = new Float32Array(this.pts.length * 3);
-    for (let i = 0; i < this.pts.length; i++) { a[i * 3] = this.pts[i].x; a[i * 3 + 1] = this.pts[i].y; a[i * 3 + 2] = this.pts[i].z; }
+    this.smoothed = chaikin(this.pts, 2);
+    const s = this.smoothed;
+    const a = new Float32Array(s.length * 3);
+    for (let i = 0; i < s.length; i++) { a[i * 3] = s[i].x; a[i * 3 + 1] = s[i].y; a[i * 3 + 2] = s[i].z; }
     this.lineGeom.setAttribute('position', new THREE.BufferAttribute(a, 3));
-    this.lineGeom.setDrawRange(0, this.pts.length);
+    this.lineGeom.setDrawRange(0, s.length);
     this.lineGeom.computeBoundingSphere();
   }
 
@@ -281,14 +296,15 @@ export class DrawPad {
   }
 
   // ---- commit -----------------------------------------------------------------------------------
-  /** Turn the sketch into a live flow field, centred on the main view's focus. */
+  /** Turn the sketch into a live flow field, centred on the main view's focus. Uses the SMOOTHED
+   *  curve — the exact line on screen — so the placed flow matches what was drawn. */
   private place() {
-    if (this.pts.length < 3) return;
+    if (this.smoothed.length < 3) return;
     const c = new THREE.Vector3();
-    for (const p of this.pts) c.add(p);
-    c.divideScalar(this.pts.length);
+    for (const p of this.smoothed) c.add(p);
+    c.divideScalar(this.smoothed.length);
     const offset = this.sandbox.controls.target.clone().sub(c); // drop it where the camera is looking
-    const world = this.pts.map((p) => p.clone().add(offset));
+    const world = this.smoothed.map((p) => p.clone().add(offset));
     this.sandbox.createDrawnPath(world);
     this.close();
   }
@@ -306,6 +322,25 @@ export class DrawPad {
     s.textContent = text;
     return s;
   }
+}
+
+/**
+ * Chaikin corner-cutting: each pass replaces every segment with two points at its 1/4 and 3/4 marks
+ * (endpoints kept), converging on a smooth quadratic B-spline of the stroke. Two passes are enough to
+ * turn mouse wobble into a silky curve while staying faithful to the drawn shape.
+ */
+function chaikin(pts: THREE.Vector3[], passes: number): THREE.Vector3[] {
+  let cur = pts;
+  for (let p = 0; p < passes && cur.length >= 3; p++) {
+    const next: THREE.Vector3[] = [cur[0].clone()];
+    for (let i = 0; i < cur.length - 1; i++) {
+      const a = cur[i], b = cur[i + 1];
+      next.push(a.clone().lerp(b, 0.25), a.clone().lerp(b, 0.75));
+    }
+    next.push(cur[cur.length - 1].clone());
+    cur = next;
+  }
+  return cur === pts ? pts.map((p) => p.clone()) : cur;
 }
 
 /** Drag the window by its header (a stripped-down clone of ui.ts's makeFloating). */

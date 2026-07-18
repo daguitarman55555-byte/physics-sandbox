@@ -967,6 +967,18 @@ export class Sandbox {
       this.onFieldChange?.();
       return;
     }
+    // an explosion is a ONE-SHOT: Place detonates it (impulse + shockwave + shake) and leaves nothing
+    if (rec.field.kind === 'explosion') {
+      this.placing = null;
+      this.selectedField = null;
+      this.transform.detach();
+      this.axisLock = null;
+      this.fieldGroup.remove(rec.marker);
+      this.disposeMarker(rec.marker);
+      this.detonate(rec.field);
+      this.onFieldChange?.();
+      return;
+    }
     rec.core?.scale.setScalar(1); // stop the ghost pulse
     this.tintMarker(rec.marker, FIELD_INFO[rec.field.kind].color);
     this.fields.push(rec);
@@ -976,6 +988,77 @@ export class Sandbox {
     this.axisLock = null;
     for (const e of this.entities) e.body.wakeUp();
     this.onFieldChange?.();
+  }
+
+  // ---------------------------------------------------------------- explosions (one-shot blasts)
+  private shocks: Array<{ mesh: THREE.Mesh; ring: THREE.Mesh; born: number; radius: number }> = [];
+  private shake = 0; // camera-shake amplitude, decays each frame
+  private _shakeOff = new THREE.Vector3();
+
+  /**
+   * Detonate a one-shot blast: every dynamic body inside the region gets a radial impulse away from
+   * the centre (∝ mass, eased by the region influence — so a box- or cylinder-shaped charge blasts in
+   * that shape), with a small upward bias so debris arcs like movie rubble, plus a random spin kick.
+   * Juice: an expanding shockwave shell + ground ring that fade out, and a camera shake scaled by the
+   * blast — the game-feel trio (flash, wave, shake) that makes an impact read as an impact.
+   */
+  detonate(field: Field) {
+    const c = field.pos;
+    for (const e of this.entities) {
+      if (e.frozen) continue;
+      const t = e.body.translation();
+      this._p.set(t.x, t.y, t.z);
+      const inf = fieldInfluence(field, this._p);
+      if (inf <= 0) continue;
+      this._s.set(t.x - c.x, t.y - c.y, t.z - c.z);
+      const d = this._s.length() || 1;
+      this._s.divideScalar(d);
+      this._s.y += 0.35; // upward bias: debris that arcs reads far better than a flat radial shove
+      this._s.normalize();
+      const m = e.body.mass();
+      const kick = field.strength * inf * m;
+      e.body.applyImpulse({ x: this._s.x * kick, y: this._s.y * kick, z: this._s.z * kick }, true);
+      e.body.applyTorqueImpulse({
+        x: (Math.random() - 0.5) * kick * 0.3, y: (Math.random() - 0.5) * kick * 0.3, z: (Math.random() - 0.5) * kick * 0.3,
+      }, true); // tumble — spinning debris sells the blast
+      e.body.wakeUp();
+    }
+    const radius = Math.max(field.size.x, field.size.y, field.size.z);
+    const color = FIELD_INFO.explosion.color;
+    const mesh = new THREE.Mesh(
+      new THREE.SphereGeometry(1, 32, 20),
+      new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.5, side: THREE.DoubleSide, depthWrite: false }),
+    );
+    mesh.position.copy(c);
+    const ring = new THREE.Mesh(
+      new THREE.TorusGeometry(1, 0.06, 8, 64),
+      new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.8, depthWrite: false }),
+    );
+    ring.position.set(c.x, Math.max(c.y - field.size.y * 0.0, 0.06), c.z);
+    ring.rotation.x = Math.PI / 2;
+    this.scene.add(mesh, ring);
+    this.shocks.push({ mesh, ring, born: performance.now(), radius });
+    this.shake = Math.min(0.5 + field.strength * 0.045, 1.4); // scaled, capped — a thump, not seasickness
+  }
+
+  /** Animate live shockwaves (expand + fade over ~0.5 s) and cull finished ones. */
+  private stepShocks(now: number) {
+    for (let i = this.shocks.length - 1; i >= 0; i--) {
+      const s = this.shocks[i];
+      const t = (now - s.born) / 500; // 0→1 over half a second
+      if (t >= 1) {
+        this.scene.remove(s.mesh, s.ring);
+        s.mesh.geometry.dispose(); (s.mesh.material as THREE.Material).dispose();
+        s.ring.geometry.dispose(); (s.ring.material as THREE.Material).dispose();
+        this.shocks.splice(i, 1);
+        continue;
+      }
+      const ease = 1 - (1 - t) * (1 - t) * (1 - t); // fast start, soft end (cubic out) — reads as a wave
+      s.mesh.scale.setScalar(Math.max(ease * s.radius, 0.01));
+      (s.mesh.material as THREE.MeshBasicMaterial).opacity = 0.5 * (1 - t);
+      s.ring.scale.setScalar(Math.max(ease * s.radius * 1.25, 0.01));
+      (s.ring.material as THREE.MeshBasicMaterial).opacity = 0.8 * (1 - t);
+    }
   }
 
   /** Throw the ghost away without placing anything — and, if editing, restore the original marker. */
@@ -1448,7 +1531,19 @@ export class Sandbox {
       const alpha = this.acc / FIXED;
       this.syncRender(alpha);
       this.controls.update();
+      if (this.shocks.length) this.stepShocks(now);
+      // camera shake: a decaying random offset applied only for the render, then removed — the
+      // camera's true position (and OrbitControls' state) is never disturbed
+      if (this.shake > 0.002) {
+        this._shakeOff.set((Math.random() - 0.5), (Math.random() - 0.5), (Math.random() - 0.5)).multiplyScalar(this.shake);
+        this.camera.position.add(this._shakeOff);
+        this.shake *= Math.pow(0.03, dt); // ~fully decayed in about a second
+      } else {
+        this._shakeOff.set(0, 0, 0);
+        this.shake = 0;
+      }
       this.renderer.render(this.scene, this.camera);
+      this.camera.position.sub(this._shakeOff);
 
       // fps
       this.fpsN++; this.fpsT += dt;
@@ -1612,7 +1707,8 @@ export class Sandbox {
     // the one you're mid-edit on (its draft ghost stands in for it) — advected by each field's real force
     this._flowList.length = 0;
     for (const r of this.fields) if (r !== this.editingOriginal) this._flowList.push(r.field);
-    if (this.placing) this._flowList.push(this.placing.field);
+    // (explosion ghosts excluded: they exert no steady force, so a tracer cloud would just sit dead)
+    if (this.placing && this.placing.field.kind !== 'explosion') this._flowList.push(this.placing.field);
     this.fieldFlow.update(this._flowList, this.fieldStrength);
   }
   private _flowList: Field[] = []; // reused each frame to feed the flow viz without allocating

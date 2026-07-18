@@ -963,6 +963,30 @@ function buildFieldsSection(panel: HTMLElement, sandbox: Sandbox) {
   }
   panel.append(addRow);
 
+  // --- quick scenes: one-click, pre-tuned fun setups (a preset beats hand-configuring every time) ---
+  const quickRow = el('div', '', 'row wrap');
+  type Quick = { label: string; kind: FieldKind; shape?: FieldShape; size: [number, number, number]; y: number; strength: number };
+  const quicks: Quick[] = [
+    { label: '🌪 Tornado', kind: 'vortex', shape: 'cylinder', size: [6, 12, 6], y: 12, strength: 12 },
+    { label: '🌬 Wind tunnel', kind: 'wind', shape: 'box', size: [14, 4, 8], y: 4, strength: 10 },
+    { label: '🕳 Black hole', kind: 'gravitywell', size: [12, 12, 12], y: 10, strength: 25 },
+  ];
+  for (const q of quicks) {
+    const b = el('button', q.label, 'mini');
+    b.onclick = () => {
+      sandbox.beginPlace(q.kind);
+      const rec = sandbox.activeField!;
+      if (q.shape) sandbox.setFieldShape(rec, q.shape);
+      sandbox.setFieldSize(rec, new THREE.Vector3(...q.size));
+      sandbox.setFieldStrengthOf(rec, q.strength);
+      rec.field.pos.y = q.y;
+      rec.marker.position.copy(rec.field.pos); // marker follows (setting pos alone doesn't move it)
+      sandbox.commitPlace();
+    };
+    quickRow.append(b);
+  }
+  panel.append(quickRow);
+
   // --- draw a flow: opens a movable, resizable mini 3D editor window to sketch a flow curve ---
   const drawStartRow = el('div', '', 'row');
   const bDrawStart = el('button', '✎ Draw a flow', 'mini');
@@ -1222,7 +1246,7 @@ function buildFieldsSection(panel: HTMLElement, sandbox: Sandbox) {
       + (canRotate ? ` · <b>R</b> ${rec.field.kind === 'wind' ? 'aim' : 'turn'}` : '')
       + (editing ? '<br><b>Enter</b> apply · <b>Esc</b> cancel · <b>Del</b> delete' : '<br><b>Enter</b> place · <b>Esc</b> cancel');
     // one Apply/Place gate: edits only reach the live field here (nothing mutates the sim mid-edit)
-    bPlace.textContent = editing ? 'Apply' : 'Place';
+    bPlace.textContent = editing ? 'Apply' : rec.field.kind === 'explosion' ? '💥 Detonate' : 'Place';
     bPlace.classList.toggle('hidden', !placing);
     bCancel.classList.toggle('hidden', !placing);
     bDelete.classList.toggle('hidden', !editing); // only a live field can be deleted

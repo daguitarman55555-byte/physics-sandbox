@@ -390,9 +390,30 @@ Fields panel (on by default). Verified live: vortex fills with swirling purple m
 bright core, 30fps, no console errors. GOTCHA during testing: setting `field.pos` after beginPlace does
 NOT move the marker (marker keeps its spawn pos) — a test artifact, not a bug; real placement uses the
 gizmo which moves both. Rafael will now FEEL it and decide on changes.
-LIKELY NEXT (only if Rafael wants more after feeling it): motion STREAKS (LineSegments prev→cur) so flow
-direction/speed reads in a still too; affected-OBJECT glow/tint in the field color; per-object motion
-trails; density/speed tuning. Also still open from before: drawpad fatter line (Line2), per-axis ortho cam.
+Polish round 2 (2026-07-17, after Rafael: "everything looks good… turbulence is too powerful"):
+ • TURBULENCE TAMED — root cause: with the shared RESPONSE(5) its ever-CHANGING target velocity means a
+   body is always far from target → the correction never lets up (wind settles at wind speed; turbulence
+   never settles) → blender. Fix: own TURB_RESPONSE=1.6 + default strength 8→6. Verified mean ~1 m/s.
+ • EXPLOSION (one-shot 💥, web research: shockwave/explosion is THE most-loved sandbox interaction; juice
+   trio = flash+wave+shake) — FieldKind 'explosion' (fieldForce returns 0; FIELD_INFO strength 14 = blast
+   m/s). commitPlace branches: kind==='explosion' → `detonate(field)` + dispose ghost, nothing pushed to
+   `fields`. detonate: radial impulse ∝ mass·strength·fieldInfluence (so SHAPED charges work), +0.35 up
+   bias (debris arcs), random torque kick (tumble), wake. Visual: sphere shell + flat ring expanding
+   cubic-out over 500ms, animated in `stepShocks` (this.shocks list, disposed when done). CAMERA SHAKE:
+   `this.shake` decaying offset added to camera.position ONLY around renderer.render then subtracted —
+   OrbitControls never sees it. UI: Place button reads "💥 Detonate". FieldFlow skips explosion ghosts
+   (no steady force → dead cloud). Verified: pile 1.0→9.3 m/s mean, shock dome+ring on screen, fields=0.
+ • DRAWPAD SMOOTHING + GLOW — `chaikin(pts,2)` corner-cutting → `this.smoothed` is what's displayed AND
+   what Place uses (see-what-you-get); glow = THREE.Points SHARING lineGeom with softDot() (now exported
+   from fieldviz) — thick luminous stroke without Line2 (GPU linewidth unreliable on Windows). Verified:
+   jagged zigzag renders silky + glowing.
+ • QUICK SCENES row in Fields panel — 🌪 Tornado (cylinder vortex 6×12×6 @y12 s12), 🌬 Wind tunnel (box
+   wind 14×4×8 @y4 s10), 🕳 Black hole (well s25 sz12 @y10): beginPlace + setFieldShape/Size/StrengthOf +
+   pos on BOTH field.pos and marker.position (the marker gotcha) + commitPlace. Verified tornado: cylinder
+   column of tracers, 51% of 70 objects spinning. All: 30fps, no console errors.
+LIKELY NEXT (only if Rafael wants more): motion STREAKS for tracers; affected-object glow/tint; per-object
+trails; vortex UPDRAFT so the tornado also lifts (it currently only swirls — maxHeight stayed 0.8); drawpad
+per-axis ortho cam. NB screenshotting a 500ms shockwave: pin `S.shocks[0].born = now-190` on an interval.
 STANDING RULE (Rafael, 2026-07-16): git commit AND push after EVERY build — don't wait to be asked.
 
 Stability hardening (2026-07-13): dynamic bodies now spawn with CCD enabled and reject deeply-

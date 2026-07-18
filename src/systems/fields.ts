@@ -24,7 +24,7 @@
 import * as THREE from 'three';
 import { parseExpression } from './expr';
 
-export type FieldKind = 'attractor' | 'repeller' | 'wind' | 'vortex' | 'path' | 'gravitywell' | 'turbulence';
+export type FieldKind = 'attractor' | 'repeller' | 'wind' | 'vortex' | 'path' | 'gravitywell' | 'turbulence' | 'explosion';
 export type FieldShape = 'sphere' | 'box' | 'cylinder';
 
 /**
@@ -73,8 +73,12 @@ export const FIELD_INFO: Record<FieldKind, { strength: number; size: number; col
   //                                curve's own base size is 10 (set in beginPlace), the tube stays snug at 4
   // the well's `strength` is its MASS (how hard it pulls), not a target speed.
   gravitywell: { strength: 8, size: 10, color: 0xe05aa0, label: 'Gravity well' },
-  // turbulence: `strength` is the drift speed of the eddies (target-velocity model, so mass-independent)
-  turbulence: { strength: 8, size: 10, color: 0xe8d44d, label: 'Turbulence' },
+  // turbulence: `strength` is the drift speed of the eddies (target-velocity model, so mass-independent).
+  // Softer default than the rest — its ever-shifting target makes the same number feel far stronger.
+  turbulence: { strength: 6, size: 10, color: 0xe8d44d, label: 'Turbulence' },
+  // explosion is a ONE-SHOT: position the ghost, and Place DETONATES it (radial impulse, shockwave,
+  // camera shake) instead of leaving a field behind. `strength` = blast speed (m/s) at the centre.
+  explosion: { strength: 14, size: 10, color: 0xff7a3d, label: 'Explosion' },
 };
 
 export const FIELD_SHAPES: FieldShape[] = ['sphere', 'box', 'cylinder'];
@@ -271,6 +275,7 @@ export function fieldForce(
   field: Field, bodyPos: THREE.Vector3, vel: THREE.Vector3, mass: number, gain: number, out: THREE.Vector3,
 ): THREE.Vector3 {
   out.set(0, 0, 0);
+  if (field.kind === 'explosion') return out; // one-shot: it detonates on Place, never acts as a field
   if (field.kind === 'path') return field.path ? pathForce(field, bodyPos, vel, mass, gain, out) : out;
   if (field.kind === 'gravitywell') return wellForce(field, bodyPos, vel, mass, gain, out);
   if (field.kind === 'turbulence') return turbulenceForce(field, bodyPos, vel, mass, gain, out);
@@ -330,6 +335,11 @@ function wellForce(
 const TURB_FREQ = 0.22; // spatial frequency of the eddies (smaller = bigger, lazier swirls)
 const TURB_TIMESCALE = 0.35; // how fast the eddy pattern churns over time
 const TURB_EPS = 0.7; // finite-difference step used to take the curl of the noise potential
+// Turbulence steers far more gently than the other fields. With the shared RESPONSE the field felt
+// like a blender: its target velocity keeps CHANGING DIRECTION, so a body is always far from target
+// and the correction force never lets up (wind settles once you reach wind speed — turbulence never
+// settles). A low response turns that into gusts that nudge rather than yank.
+const TURB_RESPONSE = 1.6;
 
 /** Cheap deterministic value-noise hash → [-1, 1] (the classic sin-scramble; quality is unimportant). */
 function turbHash(i: number, j: number, k: number): number {
@@ -379,7 +389,7 @@ function turbulenceForce(
   const t = (typeof performance !== 'undefined' ? performance.now() * 0.001 : 0) * TURB_TIMESCALE;
   curlNoise(bodyPos.x * TURB_FREQ, bodyPos.y * TURB_FREQ, bodyPos.z * TURB_FREQ, t, _tv);
   _tv.multiplyScalar(field.strength * gain);
-  return out.set(_tv.x - vel.x, _tv.y - vel.y, _tv.z - vel.z).multiplyScalar(mass * RESPONSE * inf);
+  return out.set(_tv.x - vel.x, _tv.y - vel.y, _tv.z - vel.z).multiplyScalar(mass * TURB_RESPONSE * inf);
 }
 
 /**

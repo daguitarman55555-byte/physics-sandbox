@@ -66,6 +66,17 @@ A checklist so nothing is lost. `[x]` = in Phase 1 today · `[ ]` = planned (wit
       single object. Visual-only (never touches physics), advected render-side with a light drag + snug
       respawn bound so the cloud reads as "the field," fading in/out over a short life so it breathes.
       Truthful: a tracer is a unit-mass probe, so what you watch is exactly what an object will feel.
+- [x] **Explosion** (one-shot 💥) — position the ghost like any field, but **Place = Detonate**: every
+      body in the region gets a radial impulse away from the centre (∝ mass, eased by the region
+      influence — a box/cylinder charge blasts in that shape), an **upward bias** so debris arcs, and a
+      random **spin kick** so it tumbles. Juice: an expanding **shockwave shell + ground ring** that fade
+      over ~0.5 s, and a **camera shake** scaled by blast strength (render-only offset — OrbitControls
+      state is never disturbed). Leaves no field behind. Verified: pile mean speed 1.0→9.3 m/s.
+- [x] **Quick scenes** (one-click presets) — 🌪 Tornado (tall cylinder vortex), 🌬 Wind tunnel (box wind),
+      🕳 Black hole (strength-25 gravity well): pre-tuned field setups placed instantly at the view centre.
+- [x] **Turbulence tamed** — turbulence steers with its own gentle response (1.6/s vs the shared 5/s):
+      its target velocity keeps changing direction, so a body is always far from target and the shared
+      response never let up (felt like a blender, reported by Rafael). Default eddy speed 8→6 too.
 - [x] **Field placement & editing** — picking a kind spawns a translucent **hologram** at the view
       centre that exerts **no force** until you confirm it (the commit-or-cancel pattern every 3D
       builder uses). Position it with an axis-constrained **gizmo** (three.js TransformControls,
