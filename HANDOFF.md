@@ -564,31 +564,51 @@ VERIFIED LIVE: 400 spread objects, Zero-G, one UI click → n: 400→1, "accrete
 mass 534.26 unchanged at every checkpoint; recipe test with a fitted gravity-well star (beginPlace →
 fitFieldToObjects → commitPlace, orbital insertion) → stable 5-body system (r=4.8 planet, r=1.7
 planet, 3 moonlets) orbiting for 60+ sim-s, mass 498.3 constant, console clean, screenshots taken.
-TEXTURES MERGE (2026-07-19, Rafael's ask): new `systems/planettex.ts`. Every accreted body carries
-`Entity.comp: CompEntry[]` = volume-weighted {mat, vol, color} of everything it ate (compOf gives a
-virgin body a single entry; mergeComp sums by mat.id and lerps Plain's per-entity palette color by
-volume). mergePair now branches: dominant ≥97% (or single entry) → the old cheap instanced-pool
-sphere, with e.color = blended palette color when the dominant is Plain (pool tint only shows for
-untextured mats — textured pools use WHITE base instanceColor, don't override those); genuinely
-mixed → a 'custom'-kind unique-mesh sphere via finishCustomEntity (dispose the material it auto-
-builds, swap in bakePlanetMaterial), collider friction/restitution = volume-weighted blends, density
-M/V as before. bakePlanetMaterial: 256×128 equirect canvas — dominant fills, each minor ingredient
-gets random-ellipse blotches until it covers ≈ its volume fraction (drawn thrice at x, x±W so the
-longitude seam wraps), fill = createPattern(albedo image, ~2 m/tile via pxPerM scale) or flat color
-for Plain/unloaded; scalar roughness/metalness/envMapIntensity = volume-weighted blends; CanvasTexture
-SRGB. Albedo images come from a module-level Image cache (warmed at import for all PRESETS — the
-URLs are already in the browser HTTP cache from the pools, so this is free). OWNERSHIP: baked
-material sets userData.ownedTex; deleteEntity/clear dispose mm.map only when that flag is set (pool
-maps are SHARED via texCache — never blanket-dispose a custom mesh's map). Console-testing tip:
-`import('/src/systems/materials.ts')` works in the Vite dev console for grabbing PRESETS/PLAIN to
-spawn specific materials. VERIFIED LIVE: 260 mixed (120 stone/60 steel/50 wood/30 plain) → one
-"accreted ×260" custom planet, comp 43.4/24.7/19.3/12.6% ≈ spawn mix, mottled surface on screen
-(stone base, wood/steel/pink-plain blotches), mass 941.29 → 941.29, ~259 bakes over the run with no
-stutter, console clean; plain-only run stayed kind 'sphere' (pool), comp 1 entry, blended color
-#b592a0. Honest notes: patch grain is soft at small radii (2 m/tile ≈ 20 px/tile on an r≈4 planet —
-bump the tile constant in styleFor if Rafael wants chunkier grain); normal/roughness MAPS aren't
-patch-masked (scalar blends only); the bake re-randomizes patch layout each merge (reads as the
-surface reshuffling as it eats — arguably a feature).
+TEXTURES MERGE v2 — IMPACT-SITED PLANET SKINS (2026-07-19, replaced the v1 random re-bake the same
+day at Rafael's ask for max detail + realistic accretion + patches where things land). `systems/
+planettex.ts` = `PlanetSkin`: a planet's PERSISTENT painted surface — four equirect canvases
+(albedo+normal up to 2048×1024, rough+metal at half; TARGET_PXM 96 px/m, TILE_M 2 matching pools)
+behind one MeshStandardMaterial (roughness/metalness scalars = 1, the painted maps carry values;
+steel's roughnessScale 0.62 / metalness 0.85 baked via ctx.filter brightness). `Entity.comp` =
+volume-weighted {mat, vol, color}; compOf/mergeComp as v1. REALISTIC MERGE SHAPE (mergePair): the
+LARGER body (by volume) SURVIVES — keeps entity identity, orientation, spin, and skin; grows in
+place; the smaller is painted at the impact point: centre-to-centre dir → big's LOCAL frame (quat
+inverse) → SphereGeometry UV. A pool sphere converts to a skinned 'custom' (unit SphereGeometry(1,
+64,48) × mesh.scale=R) on its first foreign bite once R ≥ SKIN_MIN_R (0.8) — smaller mixed pebbles
+stay pooled (splats invisible at that size; comp still tracked, minors scatter-painted at
+conversion). Splat = TRUE SPHERICAL CAP (cosΔφ = (cos α − cosθ·cosθ0)/(sinθ·sinθ0) per row; polar
+rows go full-circle), sized max(1.6·r_impactor, 2R√(volFrac)), faint crater rim (mid-lat only),
+impactor minors as jittered sub-blotches. FOUR hard-won traps, in order of pain:
+ (1) RAPIER: `Collider.setRadius()` does NOT recompute the body's mass properties in this build —
+     planets grew while mass froze (measured: r 3.9 @ 12.7 kg), the feather-weight giants then
+     flung everything into the void (mass 1265→27!). GROW BY REPLACING THE COLLIDER:
+     removeCollider + createCollider(ball(R).setDensity(M/V)) — that path is exact.
+ (2) CANVAS: pattern-fill of MANY 1-px rows re-tiles the pattern PER CALL — a big cap was ~12k
+     fillRects ≈ 1.2 s inside ONE mergePair (worst step 14 s!). Fill the cap as ONE Path2D polygon
+     (edge sampled per row, band rect for full-circle rows, ±W translated copies for the seam —
+     safe because fills snap to an integer tile count per width, so pattern phase survives ±W).
+     Worst step 14,270 ms → ~90–290 ms; live fps 28–30 through a 400-object merge storm.
+ (3) UV CONVENTION: SphereGeometry stores uv.y = 1−v and CanvasTexture flipY re-inverts — they
+     CANCEL: north pole = canvas row 0. (First guess painted the pole drop on the south pole; the
+     equator can't catch this bug — test with a pole drop.) u = atan2(z,−x)/2π matches; verified
+     +X and +Y impacts land on-screen where thrown.
+ (4) EDGE JITTER: wobble the LONGITUDE span only, long wavelength (~50 rows) & small (8%/4%) —
+     jittering the cap RADIUS per row slices it into streaks/rings, high frequency reads as comb.
+Anti-lag plumbing: splat/fill only mark `dirty`; `flushIfDue` (called from syncRender per custom
+entity) uploads all four textures at most every FLUSH_MS 300 — a planet eating 8 bodies/check
+uploads once. Skin BIRTHS (4 full canvas fills) budgeted ACCRETE_SKIN_BUDGET 1 per check — an
+over-budget pair merges next check. createPattern cached per (layer×mat×plainColor), cleared on
+ensureCapacity (which upscales canvases when R outgrows TARGET_PXM; pattern transforms are
+width-relative). Longitude seam fix: fills snap to whole tiles across W. deleteEntity/clear
+dispose ALL FOUR maps when userData.ownedTex. Console tip: `import('/src/systems/materials.ts')`
+in the dev console grabs PRESETS/PLAIN for spawning specific materials; NB dynamic import may get
+a DIFFERENT module instance than the app's (HMR query strings) — prototype patches won't stick.
+VERIFIED LIVE: pellet tests (steel→+X face, wood→north pole) land exactly on-screen with clean
+organic caps; 400 mixed collapse → one "accreted ×400" (stone 36/wood 27/steel 27/plain 11%),
+mass exact at every checkpoint, fps 28–30 (throttled-tab ceiling) through the whole storm, console
+clean. Honest notes: normal-map patches keep source tangent orientation (slightly wrong near poles
+— invisible in practice); equirect pole pinch on the base fill remains (triplanar would fix, later);
+paint history upscales blurry on ensureCapacity (new splats stay crisp).
 LIKELY NEXT: motion STREAKS for tracers; affected-object glow/tint; per-object trails; drawpad per-axis
 ortho cam. NB screenshotting a 500ms shockwave: pin `S.shocks[0].born = now-190` on an interval.
 Research dossier: docs/FORCES_RESEARCH.md.

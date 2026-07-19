@@ -26,7 +26,7 @@ import { PLAIN, type Material } from './systems/materials';
 import { fieldForce, fieldInfluence, pathInfluence, wellOrbitalVelocity, FIELD_INFO, samplePath, PATH_PRESETS, type Field, type FieldKind, type FieldShape, type CurveSpec } from './systems/fields';
 import { FieldFlow } from './systems/fieldviz';
 import { NBody } from './systems/nbody';
-import { mergeComp, bakePlanetMaterial, type CompEntry } from './systems/planettex';
+import { mergeComp, PlanetSkin, type CompEntry } from './systems/planettex';
 import { buildJoint, anchorWorld, JOINT_INFO, type JointKind } from './systems/joints';
 
 export type Kind = 'box' | 'sphere' | 'custom';
@@ -57,6 +57,7 @@ export interface Entity {
   frozen?: boolean; // Phase 4 freeze tool: body switched to Fixed (held in place until unfrozen)
   accreted?: number; // how many original bodies this one is fused from (accretion merging)
   comp?: CompEntry[]; // what it's made of, by volume (accretion tracks every material it eats)
+  skin?: PlanetSkin; // persistent painted surface (mixed accreted planets) — impacts land where they hit
 }
 
 export type Tool = 'grab' | 'connect' | 'freeze' | 'push' | 'brush';
@@ -107,6 +108,11 @@ const ACCRETE_MAX_PER_CHECK = 8; // merges per check: a 300-body clump melts int
 //                                  not in one jarring frame
 const ACCRETE_MAX_SPIN = 8; // rad/s cap on a merged body's spin — angular momentum conservation can
 //                             demand silly rates when a fast grazer fuses
+const SKIN_MIN_R = 0.8; // planets this big paint EVERY foreign bite where it landed; smaller mixed
+//                         pebbles stay in the instanced pool (their surface detail is invisible)
+const ACCRETE_SKIN_BUDGET = 1; // skin BIRTHS per check — creating one is 4 full canvas fills (the
+//                                remaining per-step spike), so they're strictly one per check; an
+//                                over-budget pair stays touching and fuses a sixth of a second later
 
 const PALETTE = ['#5b8def', '#4fb89a', '#c9bb3a', '#e89948', '#dc4a4a', '#a978e0'];
 
@@ -139,6 +145,7 @@ export class Sandbox {
   // half of the same story: gravity gathers the rubble, accretion makes it a planet)
   private accretionOn = false;
   private accreteTick = 0;
+  private skinBudget = 0; // reset each accretion check; consumed by merges that must BUILD a skin
 
   // Phase 4 — force fields, joints, and interaction tools
   private fields: FieldRec[] = [];
@@ -1576,7 +1583,9 @@ export class Sandbox {
       this.scene.remove(e.mesh);
       e.mesh.geometry.dispose();
       const mm = e.mesh.material as THREE.MeshStandardMaterial;
-      if (mm.userData.ownedTex) mm.map?.dispose(); // baked planet canvas — ours alone (pool maps are shared)
+      if (mm.userData.ownedTex) { // baked planet canvases — ours alone (pool maps are shared)
+        mm.map?.dispose(); mm.normalMap?.dispose(); mm.roughnessMap?.dispose(); mm.metalnessMap?.dispose();
+      }
       mm.dispose();
       const mi = this.customMeshes.indexOf(e.mesh);
       if (mi >= 0) this.customMeshes.splice(mi, 1);
@@ -1595,7 +1604,9 @@ export class Sandbox {
         this.scene.remove(e.mesh);
         e.mesh.geometry.dispose();
         const mm = e.mesh.material as THREE.MeshStandardMaterial;
-        if (mm.userData.ownedTex) mm.map?.dispose();
+        if (mm.userData.ownedTex) {
+          mm.map?.dispose(); mm.normalMap?.dispose(); mm.roughnessMap?.dispose(); mm.metalnessMap?.dispose();
+        }
         mm.dispose();
       }
     }
@@ -1729,6 +1740,7 @@ export class Sandbox {
    * seconds instead of snapping into one in a single frame.
    */
   private stepAccretion() {
+    this.skinBudget = ACCRETE_SKIN_BUDGET;
     // collider handle → entity, for reading Rapier's contact graph (customs have several colliders)
     const byCollider = new Map<number, Entity>();
     for (const e of this.entities) {
@@ -1759,56 +1771,145 @@ export class Sandbox {
   }
 
   /**
-   * Fuse two bodies into one sphere of their combined volume, conserving mass (exactly — the new
-   * collider's density is set to M/V), momentum, and angular momentum (orbital + approximate spin,
-   * capped). Placed at the pair's centre of mass; takes the heavier body's material and color.
+   * Fuse two bodies, conserving mass (exactly — collider density M/V), momentum, and angular
+   * momentum (orbital + approximate spin, capped). Realistic accretion shape: the LARGER body
+   * SURVIVES — it keeps its identity, orientation, spin history, and painted surface — grows to
+   * the combined volume in place, and the smaller body is painted onto it at the spot where it
+   * hit. Only when neither body is a sphere yet (box/custom-shape rubble smashing together) is a
+   * fresh sphere built.
    */
-  private mergePair(a: Entity, b: Entity) {
-    const ma = a.body.mass(), mb = b.body.mass();
+  private mergePair(x: Entity, y: Entity) {
+    const [big, small] = this.volumeOf(x) >= this.volumeOf(y) ? [x, y] : [y, x];
+    const ma = big.body.mass(), mb = small.body.mass();
     if (!(ma > 0) || !(mb > 0)) return; // a first-tick body hasn't finalized yet — merge next check
     const M = ma + mb;
-    const pa = a.body.translation(), pb = b.body.translation();
-    const va = a.body.linvel(), vb = b.body.linvel();
+    const pa = big.body.translation(), pb = small.body.translation();
+    const va = big.body.linvel(), vb = small.body.linvel();
     const com = new THREE.Vector3(
       (pa.x * ma + pb.x * mb) / M, (pa.y * ma + pb.y * mb) / M, (pa.z * ma + pb.z * mb) / M);
     const vel = new THREE.Vector3(
       (va.x * ma + vb.x * mb) / M, (va.y * ma + vb.y * mb) / M, (va.z * ma + vb.z * mb) / M);
-    const V = this.volumeOf(a) + this.volumeOf(b);
+    const V = this.volumeOf(big) + this.volumeOf(small);
     const R = Math.cbrt((3 * V) / (4 * Math.PI));
 
     // angular momentum about the merged centre: orbital term + each body's own spin (I ≈ 0.4·m·r²
     // for everything — rubble is round enough, and the cap keeps any error harmless)
     const L = new THREE.Vector3();
-    for (const [e, m] of [[a, ma], [b, mb]] as Array<[Entity, number]>) {
-      const p = e.body.translation(), v = e.body.linvel(), w = e.body.angvel();
+    for (const [ent, m] of [[big, ma], [small, mb]] as Array<[Entity, number]>) {
+      const p = ent.body.translation(), v = ent.body.linvel(), w = ent.body.angvel();
       const r = new THREE.Vector3(p.x - com.x, p.y - com.y, p.z - com.z);
       const dv = new THREE.Vector3(v.x - vel.x, v.y - vel.y, v.z - vel.z);
       L.add(r.cross(dv).multiplyScalar(m));
-      const I = 0.4 * m * e.size * e.size;
+      const I = 0.4 * m * ent.size * ent.size;
       L.x += I * w.x; L.y += I * w.y; L.z += I * w.z;
     }
 
-    const comp = mergeComp(this.compOf(a), this.compOf(b));
-    const count = (a.accreted ?? 1) + (b.accreted ?? 1);
-    this.deleteEntity(a);
-    this.deleteEntity(b);
+    const bigComp = this.compOf(big);
+    const smallComp = this.compOf(small);
+    const comp = mergeComp(bigComp, smallComp);
+    const count = (big.accreted ?? 1) + (small.accreted ?? 1);
+    // a planet earns a painted skin once it's big enough for a splat to be visible AND holds any
+    // foreign material at all — even a 1% steel bite must leave its mark where it landed
+    const wantSkin = comp.length > 1 && R >= SKIN_MIN_R;
+    // building a skin = four full canvas fills — budgeted per check so a merge burst can't stack
+    // several in one frame. An over-budget pair simply stays touching and fuses next check.
+    if (wantSkin && !(big.kind === 'custom' && big.skin)) {
+      if (this.skinBudget <= 0) return;
+      this.skinBudget--;
+    }
+    // where the newcomer hit: the unit centre-to-centre direction (exact for sphere contact)
+    const dirWorld = new THREE.Vector3(pb.x - pa.x, pb.y - pa.y, pb.z - pa.z);
+    if (dirWorld.lengthSq() < 1e-9) dirWorld.set(0, 1, 0); else dirWorld.normalize();
+    // physics blends: volume-weighted friction/restitution of everything in the mix
+    let fr = 0, re = 0;
+    for (const c of comp) { fr += (c.vol / V) * c.mat.friction; re += (c.vol / V) * c.mat.restitution; }
 
     let e: Entity;
-    if (comp[0].vol / V >= 0.97 || comp.length === 1) {
-      // effectively one material — stay in the cheap instanced pool
-      e = this.spawn('sphere', com, R, comp[0].mat);
-      if (!comp[0].mat.maps) e.color.copy(comp[0].color); // plain planets blend their palette colors
+    if (big.kind === 'sphere' || (big.kind === 'custom' && big.skin)) {
+      // ---- absorb in place: the planet survives, grows, and wears the impact ----
+      e = big;
+      this.deleteEntity(small);
+      // grow by REPLACING the ball collider — setRadius mutates the shape but does NOT recompute
+      // the body's mass properties in this Rapier build (measured live: planets grew while their
+      // mass froze near-constant, then the feather-weight giants flung the whole crowd into the
+      // void). A fresh collider carrying density M/V is exact, same as the fresh-build path.
+      this.world.removeCollider(e.body.collider(0), false);
+      this.world.createCollider(
+        RAPIER.ColliderDesc.ball(R).setFriction(fr).setRestitution(re).setDensity(M / V), e.body);
+      e.body.setTranslation({ x: com.x, y: com.y, z: com.z }, true);
+      e.size = R; e.volume = V;
+      e.bbCenter.set(0, 0, 0); e.bbHalf.setScalar(R);
+      if (wantSkin && !e.skin) {
+        // first foreign bite: the pool sphere becomes a skinned planet. Unit geometry × scale, so
+        // every later growth is a single scale write, never a rebuild.
+        const skin = new PlanetSkin(R, bigComp[0]);
+        const mesh = new THREE.Mesh(new THREE.SphereGeometry(1, 64, 48), skin.material);
+        mesh.castShadow = mesh.receiveShadow = true;
+        mesh.scale.setScalar(R);
+        mesh.position.copy(e.currPos);
+        mesh.userData.entity = e;
+        this.scene.add(mesh);
+        this.customMeshes.push(mesh);
+        e.mesh = mesh;
+        e.kind = 'custom';
+        e.skin = skin;
+        // trace minors (≤3%) absorbed before the skin existed — scatter them so nothing is lost
+        for (let k = 1; k < bigComp.length; k++) {
+          this.paintImpact(skin, [bigComp[k]], new THREE.Vector3().randomDirection(), V, R);
+        }
+      }
+      if (e.skin) {
+        e.skin.ensureCapacity(R);
+        e.mesh!.scale.setScalar(R);
+        // impact direction in the planet's LOCAL frame — its surface keeps its orientation, so
+        // the patch lands exactly where the newcomer touched
+        const q = e.body.rotation();
+        const dirLocal = dirWorld.clone()
+          .applyQuaternion(new THREE.Quaternion(q.x, q.y, q.z, q.w).invert());
+        this.paintImpact(e.skin, smallComp, dirLocal, V, R);
+        e.skin.refreshScalars(comp);
+      } else if (!comp[0].mat.maps) {
+        e.color.copy(comp[0].color); // plain-pure growth keeps blending its palette color
+      }
     } else {
-      // genuinely mixed — a unique mesh wearing a baked patchwork of everything it has eaten
-      const body = this.world.createRigidBody(
-        RAPIER.RigidBodyDesc.dynamic().setTranslation(com.x, com.y, com.z).setCcdEnabled(true));
-      let fr = 0, re = 0; // physics blends too: volume-weighted friction/restitution
-      for (const c of comp) { fr += (c.vol / V) * c.mat.friction; re += (c.vol / V) * c.mat.restitution; }
-      this.world.createCollider(RAPIER.ColliderDesc.ball(R).setFriction(fr).setRestitution(re), body);
-      e = this.finishCustomEntity(
-        body, new THREE.SphereGeometry(R, 48, 32), com, R, V, `accreted ×${count}`, comp[0].mat, [1, 1]);
-      (e.mesh!.material as THREE.Material).dispose(); // the plain material finishCustomEntity made
-      e.mesh!.material = bakePlanetMaterial(comp, R);
+      // ---- neither is a sphere yet (box / custom-shape rubble): build the planet fresh ----
+      this.deleteEntity(big);
+      this.deleteEntity(small);
+      if (!wantSkin) {
+        e = this.spawn('sphere', com, R, comp[0].mat);
+        if (!comp[0].mat.maps) e.color.copy(comp[0].color);
+        e.body.collider(0).setFriction(fr);
+        e.body.collider(0).setRestitution(re);
+      } else {
+        const body = this.world.createRigidBody(
+          RAPIER.RigidBodyDesc.dynamic().setTranslation(com.x, com.y, com.z).setCcdEnabled(true));
+        this.world.createCollider(RAPIER.ColliderDesc.ball(R).setFriction(fr).setRestitution(re), body);
+        const skin = new PlanetSkin(R, bigComp[0]);
+        const mesh = new THREE.Mesh(new THREE.SphereGeometry(1, 64, 48), skin.material);
+        mesh.castShadow = mesh.receiveShadow = true;
+        mesh.scale.setScalar(R);
+        mesh.position.copy(com);
+        this.scene.add(mesh);
+        this.customMeshes.push(mesh);
+        e = {
+          id: this.nextId++, kind: 'custom', body, size: R, mat: comp[0].mat,
+          color: comp[0].color.clone(), texRepeat: [1, 1],
+          prevPos: com.clone(), prevQuat: new THREE.Quaternion(),
+          currPos: com.clone(), currQuat: new THREE.Quaternion(),
+          lastVel: new THREE.Vector3(), accel: new THREE.Vector3(),
+          bbCenter: new THREE.Vector3(), bbHalf: new THREE.Vector3(R, R, R),
+          mesh, volume: V, skin,
+        };
+        mesh.userData.entity = e;
+        this.entities.push(e);
+        // big's own minors scatter (no impact history to honor on a fresh build); the newcomer
+        // lands where it hit — a fresh body starts at identity, so the world dir IS the local dir
+        for (let k = 1; k < bigComp.length; k++) {
+          this.paintImpact(skin, [bigComp[k]], new THREE.Vector3().randomDirection(), V, R);
+        }
+        this.paintImpact(skin, smallComp, dirWorld, V, R);
+        skin.refreshScalars(comp);
+      }
     }
     e.comp = comp;
     e.accreted = count;
@@ -1820,6 +1921,31 @@ export class Sandbox {
     if (spin.length() > ACCRETE_MAX_SPIN) spin.setLength(ACCRETE_MAX_SPIN);
     e.body.setAngvel({ x: spin.x, y: spin.y, z: spin.z }, true);
     e.lastVel.copy(vel); // so the forces readout doesn't record a phantom acceleration spike
+  }
+
+  /**
+   * Paint an absorbed body onto a planet skin at its impact site: the dominant material as the
+   * main splat — an ejecta blanket a bit wider than the impactor, or (for a comparable merger) a
+   * cap covering its volume share of the surface — with minor ingredients as smaller blotches
+   * jittered inside the cap.
+   */
+  private paintImpact(skin: PlanetSkin, comp: CompEntry[], dirLocal: THREE.Vector3, Vtotal: number, R: number) {
+    const vol = comp.reduce((s, c) => s + c.vol, 0);
+    if (vol <= 0) return;
+    const rImp = Math.cbrt((3 * vol) / (4 * Math.PI));
+    const radiusM = Math.max(1.6 * rImp, 2 * R * Math.sqrt(vol / Vtotal));
+    skin.splat(comp[0], dirLocal, radiusM, R);
+    for (let k = 1; k < comp.length; k++) {
+      const f = comp[k].vol / vol;
+      if (f < 0.04) continue;
+      const n = Math.max(1, Math.round(f * 5));
+      for (let i = 0; i < n; i++) {
+        const jit = dirLocal.clone()
+          .add(new THREE.Vector3().randomDirection().multiplyScalar((0.5 * radiusM) / R))
+          .normalize();
+        skin.splat(comp[k], jit, radiusM * Math.sqrt(f) * 0.55, R, false);
+      }
+    }
   }
 
   private stepPhysics() {
@@ -1946,6 +2072,8 @@ export class Sandbox {
         const selMat = mesh.material as THREE.MeshStandardMaterial;
         // frozen reads as an icy glow; selection as a warm-grey lift; else no emissive
         selMat.emissive.setHex(e.frozen ? 0x1c4a7a : e === this.selected ? 0x3a4152 : 0x000000);
+        // throttled GPU upload of any paint the planet took this frame (the accretion lag lever)
+        if (e.skin) e.skin.flushIfDue(performance.now());
         continue;
       }
       const scale = e.kind === 'box' ? e.size * 2 : e.size; // box geo is unit cube; sphere geo is unit radius

@@ -81,18 +81,23 @@ A checklist so nothing is lost. `[x]` = in Phase 1 today · `[ ]` = planned (wit
       `accreted ×400` planet (mass 534.26 → 534.26); with a gravity-well star → a stable 5-body
       system (planet r=4.8 + planet r=1.7 + 3 moonlets) orbiting for 60+ sim-s. Future: tidal/impact
       breakup, per-planet inspector stats.
-- [x] **Textures merge** (`systems/planettex.ts`) — every accreted body carries a **composition**
-      (volume-weighted list of every material it ate, `Entity.comp`); a genuinely mixed planet
-      (<97% dominant) becomes a unique-mesh sphere wearing a **canvas-baked equirect patchwork**:
-      dominant material fills the surface, each minor ingredient appears as irregular blotches
-      covering ≈ its volume fraction, sampled from the ingredients' REAL albedo maps (same files
-      the pools tile, ~2 m/tile) with seam-wrapped longitude; roughness/metalness/envBoost are
-      volume-weighted scalar blends, as are the merged body's friction/restitution. Plain-only
-      merges stay in the cheap instanced pool with their palette colors blended volume-weighted.
-      Baked canvas textures are owned per-planet (`userData.ownedTex`) and disposed with the mesh.
-      Verified live: 260 objects (120 stone / 60 steel / 50 wood / 30 plain) → ONE `accreted ×260`
-      planet, comp 43/25/19/13% matching the spawn mix, mottled stone-steel-wood-pink surface on
-      screen, mass 941.29 unchanged, console clean.
+- [x] **Textures merge — impact-sited planet skins** (`systems/planettex.ts`, `PlanetSkin`) — every
+      accreted body carries a **composition** (volume-weighted list of every material it ate,
+      `Entity.comp`), and a planet (R ≥ 0.8) owns a persistent painted surface for life: FOUR
+      equirect canvases (albedo + normal at up to 2048×1024, roughness + metalness at half) sampled
+      from the ingredients' REAL PBR files at pool-matching ~2 m/tile density — wood keeps its
+      grain relief, steel actually gleams (metalness map baked, roughnessScale via ctx.filter).
+      **Realistic accretion:** the LARGER body survives a merge — keeps its surface, orientation,
+      and spin, grows in place (collider REPLACED, not resized), and the newcomer is painted as a
+      true spherical cap **exactly where it hit** (impact direction → planet-local frame → UV),
+      sized by its volume share (pebble → ejecta blanket ~1.6× its radius; comparable merger →
+      hemispheric cap), with a faint darkened crater rim and long-wavelength organic edges; a mixed
+      impactor paints its minors as sub-blotches inside its cap. Plain volume blends palette colors;
+      small mixed pebbles stay pool-rendered until they grow. Anti-lag: paint marks skins dirty and
+      the GPU upload is throttled to one per planet per 300 ms; skin births budgeted 1/check;
+      caps fill as ONE Path2D per layer. Verified live: fps held 28–30 through a full 400-object
+      merge storm (was multi-second freezes), mass exact at every checkpoint, steel/wood pellets
+      land visibly at their exact impact points (+X face / north pole test), console clean.
 - [x] **Live flow tracers** (`systems/fieldviz.ts`, `✦ Flow tracers` toggle, on by default) — every field
       (and the ghost you're placing) grows a cloud of ~260 glowing, additive-blended tracer motes that
       **drift by the field's OWN `fieldForce`** — so you SEE the wind blow, the vortex swirl, the attractor
