@@ -59,6 +59,16 @@ A checklist so nothing is lost. `[x]` = in Phase 1 today · `[ ]` = planned (wit
 
 ## Forces & fields — `systems/fields.ts` (Phase 4)
 - [ ] Gravity direction/strength/per-object/zero-G
+- [x] **☄ Mutual gravity (self gravity / N-body)** (`systems/nbody.ts`, World panel toggle + G slider) —
+      every object pulls every other, so rubble accretes: spawn a spread cloud in Zero-G, flip the
+      toggle, and it collapses into a self-bound rubble-pile planet (verified live: 1000 objects,
+      spread 31 → 6.1 and holding — gravitational equilibrium). **Barnes-Hut octree**, O(n log n):
+      flat typed arrays, zero per-step allocation, Plummer-softened (same trick as the well) so close
+      passes slingshot instead of detonating and self-force is exactly zero. Measured 1.5 ms/step at
+      1000 bodies for the tree, 7.3 ms/step for the whole physics step with the cloud fully clumped —
+      inside the 60 Hz budget. Frozen bodies stay in the tree as attractors (pin a "sun"), fresh
+      zero-mass bodies are skipped for a tick, femto-pulls don't wake sleepers. Pairs with the gravity
+      well (star) + Zero-G for solar-system building; accretion *merging* is a future slice.
 - [x] **Live flow tracers** (`systems/fieldviz.ts`, `✦ Flow tracers` toggle, on by default) — every field
       (and the ghost you're placing) grows a cloud of ~260 glowing, additive-blended tracer motes that
       **drift by the field's OWN `fieldForce`** — so you SEE the wind blow, the vortex swirl, the attractor

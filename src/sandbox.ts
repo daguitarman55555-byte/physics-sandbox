@@ -25,6 +25,7 @@ import { buildImplicit, type ImplicitSpec } from './systems/implicit';
 import { PLAIN, type Material } from './systems/materials';
 import { fieldForce, fieldInfluence, pathInfluence, wellOrbitalVelocity, FIELD_INFO, samplePath, PATH_PRESETS, type Field, type FieldKind, type FieldShape, type CurveSpec } from './systems/fields';
 import { FieldFlow } from './systems/fieldviz';
+import { NBody } from './systems/nbody';
 import { buildJoint, anchorWorld, JOINT_INFO, type JointKind } from './systems/joints';
 
 export type Kind = 'box' | 'sphere' | 'custom';
@@ -113,6 +114,12 @@ export class Sandbox {
   private unitSphere = new THREE.SphereGeometry(1, 48, 32); // smooth silhouette; still one instanced draw
   private texCache = new Map<string, THREE.Texture>(); // loaded PBR maps, keyed by url|repeat
   private customMeshes: THREE.Mesh[] = []; // unique-geometry meshes (Phase 2 shapes), one draw call each
+
+  // Mutual (self) gravity — every object pulls every other via a Barnes-Hut octree, so rubble
+  // under a star's well can accrete into planets. Opt-in: it keeps the whole scene awake.
+  private nbody = new NBody();
+  private selfGravityOn = false;
+  private selfG = 2; // G in sandbox units — 2 drifts two 1 kg spheres 2 m apart together in ~2 s
 
   // Phase 4 — force fields, joints, and interaction tools
   private fields: FieldRec[] = [];
@@ -1591,6 +1598,15 @@ export class Sandbox {
     for (const e of this.entities) e.body.wakeUp();
   }
 
+  get selfGravity() { return this.selfGravityOn; }
+  setSelfGravity(on: boolean) {
+    this.selfGravityOn = on;
+    // wake everything so a resting scene starts drifting the moment the pull exists
+    if (on) for (const e of this.entities) if (!e.frozen) e.body.wakeUp();
+  }
+  get selfGravityG() { return this.selfG; }
+  setSelfGravityG(v: number) { this.selfG = v; }
+
   // ---------------------------------------------------------------- the loop
   start() {
     this.last = performance.now();
@@ -1630,6 +1646,34 @@ export class Sandbox {
     requestAnimationFrame(frame);
   }
 
+  /**
+   * Mutual gravity, one step: rebuild the octree over every body, get each body's acceleration,
+   * apply impulse = m·a·dt. Frozen bodies stay in the tree as attractors (a pinned "sun" still
+   * pulls) but take no impulse. The tree is rebuilt from scratch each step — at 1000 bodies that's
+   * ~1.5 ms measured, cheap next to Rapier's own contact solve.
+   */
+  private stepSelfGravity() {
+    const ents = this.entities;
+    const n = ents.length;
+    this.nbody.ensure(n);
+    for (let i = 0; i < n; i++) {
+      const t = ents[i].body.translation();
+      this.nbody.set(i, t.x, t.y, t.z, ents[i].body.mass());
+    }
+    this.nbody.build(n);
+    this.nbody.accel(this.selfG);
+    const { ax, ay, az, m } = this.nbody;
+    for (let i = 0; i < n; i++) {
+      const e = ents[i];
+      if (e.frozen) continue;
+      const mass = m[i];
+      if (!(mass > 0)) continue; // a body created this tick reads mass 0 until Rapier finalizes it
+      const a2 = ax[i] * ax[i] + ay[i] * ay[i] + az[i] * az[i];
+      if (a2 < 1e-8) continue; // don't wake a distant sleeper over a femto-pull
+      e.body.applyImpulse({ x: ax[i] * mass * FIXED, y: ay[i] * mass * FIXED, z: az[i] * mass * FIXED }, true);
+    }
+  }
+
   private stepPhysics() {
     // save previous transforms for interpolation
     for (const e of this.entities) { e.prevPos.copy(e.currPos); e.prevQuat.copy(e.currQuat); }
@@ -1661,6 +1705,9 @@ export class Sandbox {
 
     // force brush: while the user holds + drags the brush, shove nearby bodies each step
     if (this.brushActive) this.applyBrush();
+
+    // mutual gravity: every body pulls every other (Barnes-Hut) — rubble clumps into planets
+    if (this.selfGravityOn && this.entities.length > 1) this.stepSelfGravity();
 
     // force fields: sum each field's force on every awake dynamic body, apply as impulse = F·dt
     if (this.fields.length) {

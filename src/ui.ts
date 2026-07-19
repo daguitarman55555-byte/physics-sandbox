@@ -491,6 +491,31 @@ function buildPanel(sandbox: Sandbox) {
   presets.append(gEarth, gMoon, gZero);
   worldBody.append(presets);
 
+  // mutual gravity: every object pulls every other (Barnes-Hut N-body) — the solar-system maker.
+  // Pairs naturally with Zero-G + a gravity well: the well is the star, this makes the rubble clump.
+  const sgRow = el('div', '', 'row');
+  const bSelf = el('button', '☄ Mutual gravity', 'mini');
+  bSelf.onclick = () => {
+    const on = !sandbox.selfGravity;
+    sandbox.setSelfGravity(on);
+    bSelf.classList.toggle('primary', on);
+  };
+  sgRow.append(bSelf);
+  worldBody.append(sgRow);
+
+  const sgField = el('div', '', 'field');
+  const sgLabel = el('label', `Pull strength G <b>${sandbox.selfGravityG.toFixed(1)}</b>`);
+  const sgRange = el('input');
+  sgRange.type = 'range';
+  sgRange.min = '0'; sgRange.max = '10'; sgRange.step = '0.1'; sgRange.value = String(sandbox.selfGravityG);
+  sgRange.oninput = () => {
+    const v = parseFloat(sgRange.value);
+    sandbox.setSelfGravityG(v);
+    sgLabel.querySelector('b')!.textContent = v.toFixed(1);
+  };
+  sgField.append(sgLabel, sgRange);
+  worldBody.append(sgField);
+
   const actionsRow = el('div', '', 'row');
   const bReset = el('button', 'Reset scene');
   bReset.onclick = () => sandbox.reset();

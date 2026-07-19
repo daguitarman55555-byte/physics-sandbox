@@ -522,6 +522,29 @@ TORNADO LINE ROUND 3 + BIG MAP + APPLY-SPIN FIX (2026-07-18):
    tangential velocity to the WELL's dir. insertOrbits is now HANDEDNESS-PRESERVING: |vTan|>0.4 keeps
    its own sign (speed topped up to circular), only near-rest bodies get the well's dir. Verified:
    flipped crowd +3.72 stays + after Apply (was: flipped back to −).
+MUTUAL GRAVITY SHIPPED (2026-07-19) — the queued N-body build, sized for 1000+ objects: new
+`systems/nbody.ts` = a **Barnes-Hut octree** (θ=0.7, Plummer soft 0.6 — same softening trick as the
+well; softening also makes self-force exactly ZERO, so no self-exclusion bookkeeping is needed
+anywhere). Deliberately dependency-free + allocation-free after warmup: struct-of-arrays typed arrays
+for bodies AND tree nodes, explicit traversal stack, nodes cleared on creation not per-build — so it
+benches headless in node (esbuild-transpile the one file, no three/rapier) and never GC-stutters.
+Direct O(n²) would be ~500k pair evals/step at n=1000 — measured BH: 1.5 ms/step @1000, 4 ms @2000,
+13.5 ms @5000; BH vs direct-sum mean rel error 1.8% (the scary-looking "worst 64%" case is a body at
+the cloud's force-cancellation point — tiny absolute error, standard BH behavior). Integration
+(sandbox.ts `stepSelfGravity`, runs before the fields loop): rebuild tree from all entities each step,
+impulse = m·a·dt; FROZEN bodies stay in the tree as attractors (a pinned "sun" pulls) but take no
+impulse; mass-0 first-tick bodies skipped; |a|²<1e-8 skipped so femto-pulls don't wake distant
+sleepers; setSelfGravity(true) wakes the scene so a resting pile starts drifting immediately. UI =
+World panel: "☄ Mutual gravity" toggle (primary when on) + "Pull strength G" slider 0-10 (default 2 —
+two 1 kg spheres 2 m apart meet in ~2 s). VERIFIED LIVE at Rafael's requested scale: 1000 objects in
+Zero-G collapsed spread 31→6.1 and HELD (self-bound rubble-pile planet, real gravitational
+equilibrium; screenshot taken); full stepPhysics measured 3.96 ms/step spread → 7.34 ms/step fully
+clumped (worst case, still <½ the 16.7 ms budget); UI-button-driven run confirmed (click → collapse);
+console clean. NB the pair drift-test reads "slow" if you forget the bodies BOUNCE at contact —
+d settles ~1.2 for two r=0.5 spheres, that's restitution, not weak gravity. NEXT SLICES for star
+systems: accretion MERGING (contact clumps → one bigger body, keeps n in budget as piles grow),
+per-clump c.o.m. naming/inspector, maybe tidal breakup. Solar-system recipe that works TODAY:
+Zero-G + a big gravity well (star) + mutual gravity on + spawn a few hundred spread objects.
 LIKELY NEXT: motion STREAKS for tracers; affected-object glow/tint; per-object trails; drawpad per-axis
 ortho cam. NB screenshotting a 500ms shockwave: pin `S.shocks[0].born = now-190` on an interval.
 Research dossier: docs/FORCES_RESEARCH.md.
