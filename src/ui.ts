@@ -500,7 +500,20 @@ function buildPanel(sandbox: Sandbox) {
     sandbox.setSelfGravity(on);
     bSelf.classList.toggle('primary', on);
   };
-  sgRow.append(bSelf);
+  // accretion rides on mutual gravity (gravity gathers the rubble, accretion fuses it into a
+  // planet), so switching it on switches mutual gravity on too
+  const bAccrete = el('button', '🪐 Accretion', 'mini');
+  bAccrete.title = 'Slow-touching objects fuse into one growing sphere — planets form from rubble';
+  bAccrete.onclick = () => {
+    const on = !sandbox.accretion;
+    sandbox.setAccretion(on);
+    bAccrete.classList.toggle('primary', on);
+    if (on && !sandbox.selfGravity) {
+      sandbox.setSelfGravity(true);
+      bSelf.classList.add('primary');
+    }
+  };
+  sgRow.append(bSelf, bAccrete);
   worldBody.append(sgRow);
 
   const sgField = el('div', '', 'field');

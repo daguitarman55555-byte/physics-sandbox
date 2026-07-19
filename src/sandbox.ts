@@ -54,6 +54,7 @@ export interface Entity {
   volume?: number; // m³, for custom shapes (shown in the inspector)
   label?: string; // e.g. "revolution: 1.1 + 0.55*sin(x*0.9)"
   frozen?: boolean; // Phase 4 freeze tool: body switched to Fixed (held in place until unfrozen)
+  accreted?: number; // how many original bodies this one is fused from (accretion merging)
 }
 
 export type Tool = 'grab' | 'connect' | 'freeze' | 'push' | 'brush';
@@ -93,6 +94,18 @@ const BRUSH_RADIUS = 4.5; // metres — the force brush affects bodies within th
 const BRUSH_SPEED = 12; // target speed (m/s) the brush drives bodies toward
 const BRUSH_RESPONSE = 8; // how hard the brush steers toward that target velocity (1/s)
 
+// Accretion merging: touching bodies fuse into one bigger sphere (planets form from rubble).
+const ACCRETE_EVERY = 10; // check cadence in physics steps (6 Hz) — merging need not be per-step
+const ACCRETE_SPEED = 2; // base max relative speed (m/s) to fuse — fast impacts bounce, slow contact
+//                          sticks. Scaled up by the pair's ESCAPE VELOCITY (√(2G·M/r), like real
+//                          accretion: below escape speed you're captured), so a grown planet swallows
+//                          what touches it — without this, a moon can roll on the surface at ~2 m/s
+//                          forever (Rapier has no rolling resistance) and never fuse.
+const ACCRETE_MAX_PER_CHECK = 8; // merges per check: a 300-body clump melts into a planet over ~6 s,
+//                                  not in one jarring frame
+const ACCRETE_MAX_SPIN = 8; // rad/s cap on a merged body's spin — angular momentum conservation can
+//                             demand silly rates when a fast grazer fuses
+
 const PALETTE = ['#5b8def', '#4fb89a', '#c9bb3a', '#e89948', '#dc4a4a', '#a978e0'];
 
 /** Whole texture tiles per `len` world units (~2 m per tile, matching a 1 m box at one tile). */
@@ -120,6 +133,10 @@ export class Sandbox {
   private nbody = new NBody();
   private selfGravityOn = false;
   private selfG = 2; // G in sandbox units — 2 drifts two 1 kg spheres 2 m apart together in ~2 s
+  // Accretion: slow-touching bodies fuse into one (requires mutual gravity on — it's the second
+  // half of the same story: gravity gathers the rubble, accretion makes it a planet)
+  private accretionOn = false;
+  private accreteTick = 0;
 
   // Phase 4 — force fields, joints, and interaction tools
   private fields: FieldRec[] = [];
@@ -1606,6 +1623,8 @@ export class Sandbox {
   }
   get selfGravityG() { return this.selfG; }
   setSelfGravityG(v: number) { this.selfG = v; }
+  get accretion() { return this.accretionOn; }
+  setAccretion(on: boolean) { this.accretionOn = on; }
 
   // ---------------------------------------------------------------- the loop
   start() {
@@ -1674,6 +1693,107 @@ export class Sandbox {
     }
   }
 
+  /** Mergeable = an ordinary loose body: not pinned, not held by the grab, not part of an assembly. */
+  private canAccrete(e: Entity): boolean {
+    if (e.frozen || this.grab?.entity === e) return false;
+    for (const j of this.joints) if (j.a === e || j.b === e) return false;
+    for (const d of this.docks) if (d.a === e || d.b === e) return false;
+    return true;
+  }
+
+  /** Solid volume in m³ — exact for spheres/boxes/customs (customs carry their computed volume). */
+  private volumeOf(e: Entity): number {
+    if (e.kind === 'box') return 8 * e.size * e.size * e.size; // size is the half-extent
+    if (e.kind === 'custom') return e.volume ?? (4 / 3) * Math.PI * e.size ** 3;
+    return (4 / 3) * Math.PI * e.size ** 3;
+  }
+
+  /**
+   * One accretion pass: walk Rapier's live contact graph, pair up touching bodies whose relative
+   * speed is below ACCRETE_SPEED (fast impacts bounce — only lingering contact fuses, like real
+   * planetesimals), and merge a few of them. Capped per check so a clump melts into a planet over
+   * seconds instead of snapping into one in a single frame.
+   */
+  private stepAccretion() {
+    // collider handle → entity, for reading Rapier's contact graph (customs have several colliders)
+    const byCollider = new Map<number, Entity>();
+    for (const e of this.entities) {
+      for (let k = 0; k < e.body.numColliders(); k++) byCollider.set(e.body.collider(k).handle, e);
+    }
+    const used = new Set<Entity>();
+    const merges: Array<[Entity, Entity]> = [];
+    for (const e of this.entities) {
+      if (merges.length >= ACCRETE_MAX_PER_CHECK) break;
+      if (used.has(e) || !this.canAccrete(e)) continue;
+      let partner: Entity | null = null;
+      for (let k = 0; k < e.body.numColliders() && !partner; k++) {
+        this.world.contactPairsWith(e.body.collider(k), (other) => {
+          if (partner) return;
+          const o = byCollider.get(other.handle);
+          if (!o || o === e || used.has(o) || !this.canAccrete(o)) return;
+          const va = e.body.linvel(), vb = o.body.linvel();
+          const vEsc = Math.sqrt((2 * this.selfG * (e.body.mass() + o.body.mass())) / (e.size + o.size));
+          if (Math.hypot(va.x - vb.x, va.y - vb.y, va.z - vb.z) > Math.max(ACCRETE_SPEED, 0.7 * vEsc)) return;
+          // contactPairsWith includes near-misses the broad phase tracks — demand a real manifold
+          if (!this.pairInContact(e, o)) return;
+          partner = o;
+        });
+      }
+      if (partner) { used.add(e); used.add(partner); merges.push([e, partner]); }
+    }
+    for (const [a, b] of merges) this.mergePair(a, b);
+  }
+
+  /**
+   * Fuse two bodies into one sphere of their combined volume, conserving mass (exactly — the new
+   * collider's density is set to M/V), momentum, and angular momentum (orbital + approximate spin,
+   * capped). Placed at the pair's centre of mass; takes the heavier body's material and color.
+   */
+  private mergePair(a: Entity, b: Entity) {
+    const ma = a.body.mass(), mb = b.body.mass();
+    if (!(ma > 0) || !(mb > 0)) return; // a first-tick body hasn't finalized yet — merge next check
+    const M = ma + mb;
+    const pa = a.body.translation(), pb = b.body.translation();
+    const va = a.body.linvel(), vb = b.body.linvel();
+    const com = new THREE.Vector3(
+      (pa.x * ma + pb.x * mb) / M, (pa.y * ma + pb.y * mb) / M, (pa.z * ma + pb.z * mb) / M);
+    const vel = new THREE.Vector3(
+      (va.x * ma + vb.x * mb) / M, (va.y * ma + vb.y * mb) / M, (va.z * ma + vb.z * mb) / M);
+    const V = this.volumeOf(a) + this.volumeOf(b);
+    const R = Math.cbrt((3 * V) / (4 * Math.PI));
+
+    // angular momentum about the merged centre: orbital term + each body's own spin (I ≈ 0.4·m·r²
+    // for everything — rubble is round enough, and the cap keeps any error harmless)
+    const L = new THREE.Vector3();
+    for (const [e, m] of [[a, ma], [b, mb]] as Array<[Entity, number]>) {
+      const p = e.body.translation(), v = e.body.linvel(), w = e.body.angvel();
+      const r = new THREE.Vector3(p.x - com.x, p.y - com.y, p.z - com.z);
+      const dv = new THREE.Vector3(v.x - vel.x, v.y - vel.y, v.z - vel.z);
+      L.add(r.cross(dv).multiplyScalar(m));
+      const I = 0.4 * m * e.size * e.size;
+      L.x += I * w.x; L.y += I * w.y; L.z += I * w.z;
+    }
+
+    const heavier = ma >= mb ? a : b;
+    const mat = heavier.mat;
+    const color = heavier.color.clone();
+    const count = (a.accreted ?? 1) + (b.accreted ?? 1);
+    this.deleteEntity(a);
+    this.deleteEntity(b);
+
+    const e = this.spawn('sphere', com, R, mat);
+    e.color.copy(color);
+    e.accreted = count;
+    e.label = `accreted ×${count}`;
+    e.body.collider(0).setDensity(M / V); // exact mass conservation whatever the materials mixed
+    e.body.setLinvel({ x: vel.x, y: vel.y, z: vel.z }, true);
+    const I = 0.4 * M * R * R;
+    const spin = L.divideScalar(I);
+    if (spin.length() > ACCRETE_MAX_SPIN) spin.setLength(ACCRETE_MAX_SPIN);
+    e.body.setAngvel({ x: spin.x, y: spin.y, z: spin.z }, true);
+    e.lastVel.copy(vel); // so the forces readout doesn't record a phantom acceleration spike
+  }
+
   private stepPhysics() {
     // save previous transforms for interpolation
     for (const e of this.entities) { e.prevPos.copy(e.currPos); e.prevQuat.copy(e.currQuat); }
@@ -1708,6 +1828,13 @@ export class Sandbox {
 
     // mutual gravity: every body pulls every other (Barnes-Hut) — rubble clumps into planets
     if (this.selfGravityOn && this.entities.length > 1) this.stepSelfGravity();
+
+    // accretion: slow-touching bodies fuse into one bigger sphere (checked at 6 Hz, a few per check)
+    if (this.selfGravityOn && this.accretionOn && this.entities.length > 1
+      && ++this.accreteTick >= ACCRETE_EVERY) {
+      this.accreteTick = 0;
+      this.stepAccretion();
+    }
 
     // force fields: sum each field's force on every awake dynamic body, apply as impulse = F·dt
     if (this.fields.length) {

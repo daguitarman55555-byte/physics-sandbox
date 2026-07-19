@@ -68,7 +68,19 @@ A checklist so nothing is lost. `[x]` = in Phase 1 today · `[ ]` = planned (wit
       1000 bodies for the tree, 7.3 ms/step for the whole physics step with the cloud fully clumped —
       inside the 60 Hz budget. Frozen bodies stay in the tree as attractors (pin a "sun"), fresh
       zero-mass bodies are skipped for a tick, femto-pulls don't wake sleepers. Pairs with the gravity
-      well (star) + Zero-G for solar-system building; accretion *merging* is a future slice.
+      well (star) + Zero-G for solar-system building.
+- [x] **🪐 Accretion** (World panel toggle; auto-enables mutual gravity — it's the second half of the
+      same story) — slow-touching bodies **fuse into one sphere** of their combined volume, conserving
+      mass exactly (collider density set to M/V), momentum, and angular momentum (orbital + approx
+      spin, capped). Fast impacts still bounce: the fuse threshold is max(2 m/s, 0.7·v_escape) — the
+      escape-velocity scaling is what real accretion does, and without it a moon rolls on a planet's
+      surface at ~2 m/s forever (no rolling resistance in Rapier) and never lands. Checked at 6 Hz
+      via Rapier's live contact graph, ≤8 merges/check so a clump melts into a planet over seconds.
+      Merged bodies take the heavier parent's material/color and an `accreted ×N` label; frozen,
+      grabbed, and jointed bodies never fuse. Verified live: 400 spread objects in Zero-G → ONE
+      `accreted ×400` planet (mass 534.26 → 534.26); with a gravity-well star → a stable 5-body
+      system (planet r=4.8 + planet r=1.7 + 3 moonlets) orbiting for 60+ sim-s. Future: tidal/impact
+      breakup, per-planet inspector stats.
 - [x] **Live flow tracers** (`systems/fieldviz.ts`, `✦ Flow tracers` toggle, on by default) — every field
       (and the ghost you're placing) grows a cloud of ~260 glowing, additive-blended tracer motes that
       **drift by the field's OWN `fieldForce`** — so you SEE the wind blow, the vortex swirl, the attractor

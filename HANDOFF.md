@@ -545,6 +545,25 @@ d settles ~1.2 for two r=0.5 spheres, that's restitution, not weak gravity. NEXT
 systems: accretion MERGING (contact clumps → one bigger body, keeps n in budget as piles grow),
 per-clump c.o.m. naming/inspector, maybe tidal breakup. Solar-system recipe that works TODAY:
 Zero-G + a big gravity well (star) + mutual gravity on + spawn a few hundred spread objects.
+ACCRETION SHIPPED (2026-07-19, same session): "🪐 Accretion" toggle next to Mutual gravity (clicking
+it auto-enables mutual gravity; the step is gated on BOTH). stepAccretion in sandbox.ts, every 10
+steps (6 Hz): walks Rapier's live contact graph (world.contactPairsWith over a collider-handle→entity
+map; contactPairsWith includes broad-phase near-misses, so each candidate is confirmed with the
+existing pairInContact manifold check), fuses ≤8 pairs/check (a clump melts into a planet over
+seconds, not one frame). mergePair: sphere of combined volume at the pair's c.o.m., mass conserved
+EXACTLY by collider.setDensity(M/V) after spawn (works across mixed materials), momentum via
+setLinvel, angular momentum = orbital term + 0.4·m·r² spin approx, capped at 8 rad/s; heavier
+parent's material+color; label "accreted ×N" (Entity.accreted); lastVel seeded so the forces window
+shows no phantom spike. Skips frozen/grabbed/jointed/docking bodies and first-tick mass-0 spawns.
+KEY TUNING FOUND IN TESTING: a flat 2 m/s fuse threshold left a moon ROLLING on the planet's surface
+at 2.2 m/s forever (no rolling resistance in Rapier → rolling contact never slows) — threshold is now
+max(2, 0.7·v_esc) with v_esc = √(2·G_slider·(mA+mB)/(rA+rB)), i.e. real escape-velocity capture:
+grown planets swallow what touches them, pebbles keep the 2 m/s floor. NB spawn(pos,…) places
+EXACTLY at pos (the overlap-rejection lives only in findSpawnSpot), so merged planets don't jump.
+VERIFIED LIVE: 400 spread objects, Zero-G, one UI click → n: 400→1, "accreted ×400" r=5.03, total
+mass 534.26 unchanged at every checkpoint; recipe test with a fitted gravity-well star (beginPlace →
+fitFieldToObjects → commitPlace, orbital insertion) → stable 5-body system (r=4.8 planet, r=1.7
+planet, 3 moonlets) orbiting for 60+ sim-s, mass 498.3 constant, console clean, screenshots taken.
 LIKELY NEXT: motion STREAKS for tracers; affected-object glow/tint; per-object trails; drawpad per-axis
 ortho cam. NB screenshotting a 500ms shockwave: pin `S.shocks[0].born = now-190` on an interval.
 Research dossier: docs/FORCES_RESEARCH.md.
