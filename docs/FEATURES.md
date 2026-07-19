@@ -98,6 +98,26 @@ A checklist so nothing is lost. `[x]` = in Phase 1 today · `[ ]` = planned (wit
       caps fill as ONE Path2D per layer. Verified live: fps held 28–30 through a full 400-object
       merge storm (was multi-second freezes), mass exact at every checkpoint, steel/wood pellets
       land visibly at their exact impact points (+X face / north pole test), console clean.
+- [x] **Accretion UX pack** (2026-07-19): planets DRAG properly (sphere-exact floor clamp — the OBB
+      fallback read a rotated planet as reaching √3·R down and shoved it skyward — and a heavy ball
+      is held by its CENTRE, so no more wild pendulum); the **inspector swatch shows the planet's
+      actual painted surface** (cached 64×32 thumb of the skin) and the **forces window renders the
+      real skin** (materialFor clones the skin material, sharing its canvases; unit-sphere geometry
+      gets the R scale); **joints transfer on absorb** — eat a body that's welded/tethered to
+      something and the planet inherits the connection at the current pose (directly-jointed pairs
+      never fuse with each other: constructions are safe); **accretion no longer requires mutual
+      gravity** (independent toggles) and captures **at impact time** via Rapier collision events
+      (an EventQueue drains collision-started pairs each step — in zero-G a thrown body bounced off
+      between the 6 Hz scans and never fused; now it sticks the step it lands, with the capture
+      test on post-bounce velocity = the physical criterion). **✨ HD skins toggle**: full-grain
+      2048px planet maps vs 4× smaller for weak machines (applies to skins born after the switch).
+- [x] **Pause + time scale** (World panel): ⏸ Pause freezes the physics accumulator (render loop
+      keeps running); a ×0.1–×3 slider multiplies WALL time fed into the accumulator — physics
+      always steps its fixed 1/60 s, so impulses, forces, and thresholds are IDENTICAL at any
+      speed; slow-mo/fast-forward only changes how many steps run per wall second. MAX_CATCHUP
+      3→4 (headroom for ×3 at 60 fps); leftover accumulator clamped below one step so the render
+      interpolation never extrapolates. Verified: position frozen exactly while paused, moves on
+      resume.
 - [x] **Live flow tracers** (`systems/fieldviz.ts`, `✦ Flow tracers` toggle, on by default) — every field
       (and the ghost you're placing) grows a cloud of ~260 glowing, additive-blended tracer motes that
       **drift by the field's OWN `fieldForce`** — so you SEE the wind blow, the vortex swirl, the attractor

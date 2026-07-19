@@ -26,7 +26,7 @@ import { PLAIN, type Material } from './systems/materials';
 import { fieldForce, fieldInfluence, pathInfluence, wellOrbitalVelocity, FIELD_INFO, samplePath, PATH_PRESETS, type Field, type FieldKind, type FieldShape, type CurveSpec } from './systems/fields';
 import { FieldFlow } from './systems/fieldviz';
 import { NBody } from './systems/nbody';
-import { mergeComp, PlanetSkin, type CompEntry } from './systems/planettex';
+import { mergeComp, PlanetSkin, setSkinDetail as setSkinDetailFlag, skinDetailHigh, type CompEntry } from './systems/planettex';
 import { buildJoint, anchorWorld, JOINT_INFO, type JointKind } from './systems/joints';
 
 export type Kind = 'box' | 'sphere' | 'custom';
@@ -88,7 +88,8 @@ export interface FieldRec { field: Field; marker: THREE.Object3D; core?: THREE.O
 
 const FIXED = 1 / 60; // physics timestep — never varies
 const MAX_INSTANCES = 4000;
-const MAX_CATCHUP = 3; // cap steps per frame → smooth slight-slow-motion under load, never a freeze
+const MAX_CATCHUP = 4; // cap steps per frame → smooth slight-slow-motion under load, never a freeze
+//                        (4 leaves headroom for the ×3 fast-forward at 60 fps rendering)
 const MAX_SPEED = 60; // m/s hard cap — guards against solver-injected energy from deep-overlap spawns
 const VOID_Y = -20; // below this, an entity fell off the world edge — it gets removed (no respawn)
 const PICK_PIXEL_TOLERANCE = 18; // px — fallback nearest-entity radius when the exact ray misses
@@ -141,11 +142,21 @@ export class Sandbox {
   private nbody = new NBody();
   private selfGravityOn = false;
   private selfG = 2; // G in sandbox units — 2 drifts two 1 kg spheres 2 m apart together in ~2 s
-  // Accretion: slow-touching bodies fuse into one (requires mutual gravity on — it's the second
-  // half of the same story: gravity gathers the rubble, accretion makes it a planet)
+  // Accretion: slow-touching bodies fuse into one. Independent of mutual gravity — pairs with it
+  // for solar systems, but a plain pile on the floor can fuse too.
   private accretionOn = false;
   private accreteTick = 0;
   private skinBudget = 0; // reset each accretion check; consumed by merges that must BUILD a skin
+  // Collision events feed IMPACT-time accretion: in zero-G a thrown body bounces off a planet in
+  // 1–3 steps, far between the 6 Hz scans — the event queue catches the touch at the exact step.
+  // (Also the future home of impact breakage: it needs per-impact energies from the same events.)
+  private events!: RAPIER.EventQueue;
+
+  // Time controls: pause freezes the accumulator; timeScale multiplies the WALL time fed into it.
+  // Physics always steps at FIXED dt — impulses, field forces, and thresholds never see the scale —
+  // so slow-mo/fast-forward only changes how many fixed steps run per wall second.
+  private paused = false;
+  private timeScale = 1;
 
   // Phase 4 — force fields, joints, and interaction tools
   private fields: FieldRec[] = [];
@@ -242,6 +253,7 @@ export class Sandbox {
     // --- physics world ---
     this.world = new RAPIER.World({ x: 0, y: this.gravityY, z: 0 });
     this.world.timestep = FIXED;
+    this.events = new RAPIER.EventQueue(true);
     this.addGroundCollider();
 
     this.scene.add(this.fieldGroup, this.jointGroup); // Phase 4 visuals live here
@@ -373,6 +385,14 @@ export class Sandbox {
 
   /** A fresh render material matching an entity — the same maps and tiling its world mesh uses. */
   materialFor(e: Entity): THREE.MeshStandardMaterial {
+    if (e.skin) {
+      // an accreted planet's ACTUAL painted surface — the clone shares the skin's canvas textures
+      // (mini-views dispose their materials, and material.dispose() leaves textures alone)
+      const m = e.skin.material.clone();
+      m.userData = {}; // the ownedTex flag must not travel: only deleteEntity may free the canvases
+      m.emissive.setHex(0);
+      return m;
+    }
     if (e.mat.maps) return this.pbrMaterial(e.mat, e.texRepeat ?? [1, 1]);
     return new THREE.MeshStandardMaterial({ color: e.color, metalness: 0.1, roughness: 0.6 });
   }
@@ -427,6 +447,7 @@ export class Sandbox {
     this.world.createCollider(
       col.setFriction(mat.friction).setRestitution(mat.restitution).setDensity(mat.density / 1000), body);
 
+    this.enableContactEvents(body);
     this.getPool(kind as 'box' | 'sphere', mat); // ensure the render pool exists
     const color = new THREE.Color(PALETTE[this.nextId % PALETTE.length]);
     const e: Entity = {
@@ -620,6 +641,13 @@ export class Sandbox {
     return { ok: true, entity: e };
   }
 
+  /** Every entity collider reports collision events — impact-time accretion (and breakage) feed. */
+  private enableContactEvents(body: RAPIER.RigidBody) {
+    for (let k = 0; k < body.numColliders(); k++) {
+      body.collider(k).setActiveEvents(RAPIER.ActiveEvents.COLLISION_EVENTS);
+    }
+  }
+
   /** Shared tail for custom-geometry entities: mesh, registry entry, scene wiring. */
   private finishCustomEntity(
     body: RAPIER.RigidBody, geometry: THREE.BufferGeometry, p: THREE.Vector3,
@@ -639,6 +667,7 @@ export class Sandbox {
 
     geometry.computeBoundingBox();
     const bb = geometry.boundingBox!;
+    this.enableContactEvents(body);
     const e: Entity = {
       id: this.nextId++, kind: 'custom', body, size: boundingRadius, mat, color,
       texRepeat: repeat,
@@ -1641,7 +1670,16 @@ export class Sandbox {
   get selfGravityG() { return this.selfG; }
   setSelfGravityG(v: number) { this.selfG = v; }
   get accretion() { return this.accretionOn; }
-  setAccretion(on: boolean) { this.accretionOn = on; }
+  setAccretion(on: boolean) {
+    this.accretionOn = on;
+    if (on) this.skinBudget = ACCRETE_SKIN_BUDGET; // impact merges may fire before the first 6 Hz check
+  }
+  get skinDetail() { return skinDetailHigh(); }
+  setSkinDetail(hi: boolean) { setSkinDetailFlag(hi); }
+  get isPaused() { return this.paused; }
+  setPaused(p: boolean) { this.paused = p; }
+  get timeScaleValue() { return this.timeScale; }
+  setTimeScale(v: number) { this.timeScale = THREE.MathUtils.clamp(v, 0.1, 3); }
 
   // ---------------------------------------------------------------- the loop
   start() {
@@ -1650,7 +1688,7 @@ export class Sandbox {
       requestAnimationFrame(frame);
       const dt = Math.min((now - this.last) / 1000, MAX_CATCHUP * FIXED);
       this.last = now;
-      this.acc += dt;
+      if (!this.paused) this.acc += dt * this.timeScale;
 
       let steps = 0;
       while (this.acc >= FIXED && steps < MAX_CATCHUP) {
@@ -1658,6 +1696,9 @@ export class Sandbox {
         this.acc -= FIXED;
         steps++;
       }
+      // discard backlog the step cap couldn't absorb (a high time-scale on a slow frame) — the
+      // leftover must stay < FIXED or the render interpolation extrapolates past the newest state
+      if (this.acc > FIXED) this.acc = FIXED * 0.999;
       const alpha = this.acc / FIXED;
       this.syncRender(alpha);
       this.controls.update();
@@ -1710,12 +1751,18 @@ export class Sandbox {
     }
   }
 
-  /** Mergeable = an ordinary loose body: not pinned, not held by the grab, not part of an assembly. */
+  /** Mergeable = not pinned, not held by the grab, not mid-dock. Jointed bodies CAN be absorbed —
+   *  the planet inherits their connections — but a directly-jointed pair never fuses with itself
+   *  (a weld or tether is a deliberate construction, not accretion). */
   private canAccrete(e: Entity): boolean {
     if (e.frozen || this.grab?.entity === e) return false;
-    for (const j of this.joints) if (j.a === e || j.b === e) return false;
     for (const d of this.docks) if (d.a === e || d.b === e) return false;
     return true;
+  }
+
+  /** True if a joint directly links these two bodies. */
+  private jointed(a: Entity, b: Entity): boolean {
+    return this.joints.some((j) => (j.a === a && j.b === b) || (j.a === b && j.b === a));
   }
 
   /** Solid volume in m³ — exact for spheres/boxes/customs (customs carry their computed volume). */
@@ -1739,6 +1786,38 @@ export class Sandbox {
    * planetesimals), and merge a few of them. Capped per check so a clump melts into a planet over
    * seconds instead of snapping into one in a single frame.
    */
+  /**
+   * Impact-time accretion, run right after world.step: every collision that STARTED this step is
+   * a capture candidate. The speed test sees post-bounce velocities (restitution already applied),
+   * which is the physical capture criterion — a slow rebound can't escape and sticks.
+   */
+  private drainContactMerges() {
+    const pairs: Array<[Entity, Entity]> = [];
+    let map: Map<number, Entity> | undefined;
+    this.events.drainCollisionEvents((h1: number, h2: number, started: boolean) => {
+      if (!started) return;
+      if (!map) { // built lazily, only on steps that actually have fresh contacts
+        map = new Map();
+        for (const e of this.entities) {
+          for (let k = 0; k < e.body.numColliders(); k++) map.set(e.body.collider(k).handle, e);
+        }
+      }
+      const a = map.get(h1), b = map.get(h2);
+      if (!a || !b || a === b) return; // one side is the floor, or a self-pair
+      pairs.push([a, b]);
+    });
+    if (pairs.length === 0) return;
+    for (const [a, b] of pairs) {
+      // an earlier merge this step may have consumed either body
+      if (!this.entities.includes(a) || !this.entities.includes(b)) continue;
+      if (!this.canAccrete(a) || !this.canAccrete(b) || this.jointed(a, b)) continue;
+      const va = a.body.linvel(), vb = b.body.linvel();
+      const vEsc = Math.sqrt((2 * this.selfG * (a.body.mass() + b.body.mass())) / (a.size + b.size));
+      if (Math.hypot(va.x - vb.x, va.y - vb.y, va.z - vb.z) > Math.max(ACCRETE_SPEED, 0.7 * vEsc)) continue;
+      this.mergePair(a, b);
+    }
+  }
+
   private stepAccretion() {
     this.skinBudget = ACCRETE_SKIN_BUDGET;
     // collider handle → entity, for reading Rapier's contact graph (customs have several colliders)
@@ -1757,6 +1836,7 @@ export class Sandbox {
           if (partner) return;
           const o = byCollider.get(other.handle);
           if (!o || o === e || used.has(o) || !this.canAccrete(o)) return;
+          if (this.jointed(e, o)) return; // welded/tethered pairs are constructions — never fuse them
           const va = e.body.linvel(), vb = o.body.linvel();
           const vEsc = Math.sqrt((2 * this.selfG * (e.body.mass() + o.body.mass())) / (e.size + o.size));
           if (Math.hypot(va.x - vb.x, va.y - vb.y, va.z - vb.z) > Math.max(ACCRETE_SPEED, 0.7 * vEsc)) return;
@@ -1824,6 +1904,13 @@ export class Sandbox {
     let fr = 0, re = 0;
     for (const c of comp) { fr += (c.vol / V) * c.mat.friction; re += (c.vol / V) * c.mat.restitution; }
 
+    // joints on the absorbed body transfer to the merged planet — capture BEFORE any deleteEntity
+    // (deletion is what strips them). In-place merges keep big's own joints untouched.
+    const inherited: Array<{ kind: JointKind; other: Entity }> = [];
+    for (const j of this.joints) {
+      if (j.a === small || j.b === small) inherited.push({ kind: j.kind, other: j.a === small ? j.b : j.a });
+    }
+
     let e: Entity;
     if (big.kind === 'sphere' || (big.kind === 'custom' && big.skin)) {
       // ---- absorb in place: the planet survives, grows, and wears the impact ----
@@ -1836,6 +1923,7 @@ export class Sandbox {
       this.world.removeCollider(e.body.collider(0), false);
       this.world.createCollider(
         RAPIER.ColliderDesc.ball(R).setFriction(fr).setRestitution(re).setDensity(M / V), e.body);
+      this.enableContactEvents(e.body);
       e.body.setTranslation({ x: com.x, y: com.y, z: com.z }, true);
       e.size = R; e.volume = V;
       e.bbCenter.set(0, 0, 0); e.bbHalf.setScalar(R);
@@ -1873,6 +1961,10 @@ export class Sandbox {
       }
     } else {
       // ---- neither is a sphere yet (box / custom-shape rubble): build the planet fresh ----
+      // big is deleted too here, so its connections transfer as well
+      for (const j of this.joints) {
+        if (j.a === big || j.b === big) inherited.push({ kind: j.kind, other: j.a === big ? j.b : j.a });
+      }
       this.deleteEntity(big);
       this.deleteEntity(small);
       if (!wantSkin) {
@@ -1884,6 +1976,7 @@ export class Sandbox {
         const body = this.world.createRigidBody(
           RAPIER.RigidBodyDesc.dynamic().setTranslation(com.x, com.y, com.z).setCcdEnabled(true));
         this.world.createCollider(RAPIER.ColliderDesc.ball(R).setFriction(fr).setRestitution(re), body);
+        this.enableContactEvents(body);
         const skin = new PlanetSkin(R, bigComp[0]);
         const mesh = new THREE.Mesh(new THREE.SphereGeometry(1, 64, 48), skin.material);
         mesh.castShadow = mesh.receiveShadow = true;
@@ -1921,6 +2014,13 @@ export class Sandbox {
     if (spin.length() > ACCRETE_MAX_SPIN) spin.setLength(ACCRETE_MAX_SPIN);
     e.body.setAngvel({ x: spin.x, y: spin.y, z: spin.z }, true);
     e.lastVel.copy(vel); // so the forces readout doesn't record a phantom acceleration spike
+
+    // re-link inherited connections to the merged planet, locked at the current pose
+    for (const { kind, other } of inherited) {
+      if (other === e || !this.entities.includes(other)) continue; // partner is us, or merged away
+      if (this.jointed(e, other)) continue; // both parents shared this partner — one link is enough
+      this.lockJoint(e, other, kind, this.makeConnectorLine(kind));
+    }
   }
 
   /**
@@ -1983,9 +2083,9 @@ export class Sandbox {
     // mutual gravity: every body pulls every other (Barnes-Hut) — rubble clumps into planets
     if (this.selfGravityOn && this.entities.length > 1) this.stepSelfGravity();
 
-    // accretion: slow-touching bodies fuse into one bigger sphere (checked at 6 Hz, a few per check)
-    if (this.selfGravityOn && this.accretionOn && this.entities.length > 1
-      && ++this.accreteTick >= ACCRETE_EVERY) {
+    // accretion: slow-touching bodies fuse into one bigger sphere (checked at 6 Hz, a few per
+    // check). Independent of mutual gravity — a resting pile under plain world gravity fuses too.
+    if (this.accretionOn && this.entities.length > 1 && ++this.accreteTick >= ACCRETE_EVERY) {
       this.accreteTick = 0;
       this.stepAccretion();
     }
@@ -2027,7 +2127,12 @@ export class Sandbox {
       }
     }
 
-    this.world.step();
+    this.world.step(this.events);
+
+    // impact-time accretion: fuse capturable touches the step they happen — in zero-G a thrown
+    // body bounces off within a step or two, far between the 6 Hz scans
+    if (this.accretionOn) this.drainContactMerges();
+    else this.events.clear();
 
     for (const e of this.entities) {
       // hard speed cap: a stray deep-overlap contact can otherwise inject unbounded energy into a
@@ -2223,21 +2328,27 @@ export class Sandbox {
       this.releaseGrab(); // a second press mid-grab (multi-touch, missed pointerup) must not leak the joint
       if (hit.entity.frozen) { this.selected = hit.entity; return; } // frozen bodies don't grab
       this.selected = hit.entity;
-      // start a drag on a camera-facing plane through the grab point
+      // start a drag on a camera-facing plane through the grab point. A heavy accreted planet
+      // grabbed by its rim pendulums wildly (spherical joint at the surface of a massive uniform
+      // ball) — so planets are held by their CENTRE instead: they track the cursor steadily, and
+      // the ball's symmetry means no swing information is lost.
       const body = hit.entity.body;
       const t = body.translation();
       const bodyPos = new THREE.Vector3(t.x, t.y, t.z);
-      const hitPoint = hit.point;
+      const holdCenter = !!hit.entity.skin;
+      const anchorPoint = holdCenter ? bodyPos : hit.point;
       const normal = this.camera.getWorldDirection(new THREE.Vector3()).negate();
-      const plane = new THREE.Plane().setFromNormalAndCoplanarPoint(normal, hitPoint);
+      const plane = new THREE.Plane().setFromNormalAndCoplanarPoint(normal, anchorPoint);
 
       // pin a kinematic anchor to the grab point with a ball joint (anchor is body-local),
       // so the body hangs/swings physically from where it was grabbed
       const rq = body.rotation();
-      const local = hitPoint.clone().sub(bodyPos)
-        .applyQuaternion(new THREE.Quaternion(rq.x, rq.y, rq.z, rq.w).invert());
+      const local = holdCenter
+        ? new THREE.Vector3()
+        : anchorPoint.clone().sub(bodyPos)
+          .applyQuaternion(new THREE.Quaternion(rq.x, rq.y, rq.z, rq.w).invert());
       const kin = this.world.createRigidBody(
-        RAPIER.RigidBodyDesc.kinematicPositionBased().setTranslation(hitPoint.x, hitPoint.y, hitPoint.z),
+        RAPIER.RigidBodyDesc.kinematicPositionBased().setTranslation(anchorPoint.x, anchorPoint.y, anchorPoint.z),
       );
       const joint = this.world.createImpulseJoint(
         RAPIER.JointData.spherical({ x: 0, y: 0, z: 0 }, { x: local.x, y: local.y, z: local.z }),
@@ -2249,7 +2360,7 @@ export class Sandbox {
       body.setLinearDamping(4);
       body.setAngularDamping(0.9);
 
-      this.grab = { entity: hit.entity, plane, target: hitPoint.clone(), kin, joint, prevLinDamp, prevAngDamp };
+      this.grab = { entity: hit.entity, plane, target: anchorPoint.clone(), kin, joint, prevLinDamp, prevAngDamp };
       body.wakeUp();
       this.controls.enabled = false; // let the drag own the mouse
     } else {
@@ -2264,7 +2375,9 @@ export class Sandbox {
    */
   private bodyBottomY(e: Entity): number {
     const t = e.body.translation();
-    if (e.kind === 'sphere') return t.y - e.size;
+    // accreted planets are spheres too — the OBB fallback read them as rotated boxes reaching up
+    // to √3·R below centre, which made the drag clamp shove a held planet skyward
+    if (e.kind === 'sphere' || e.skin) return t.y - e.size;
     const q = e.body.rotation();
     // y-components of the world-rotated local basis vectors (middle row of the rotation matrix)
     const yx = 2 * (q.x * q.y + q.w * q.z);

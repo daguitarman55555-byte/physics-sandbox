@@ -609,6 +609,40 @@ mass exact at every checkpoint, fps 28–30 (throttled-tab ceiling) through the 
 clean. Honest notes: normal-map patches keep source tangent orientation (slightly wrong near poles
 — invisible in practice); equirect pole pinch on the base fill remains (triplanar would fix, later);
 paint history upscales blurry on ensureCapacity (new splats stay crisp).
+ACCRETION UX PACK + TIME CONTROLS (2026-07-19, same session): (1) PLANET DRAG fixed — bodyBottomY
+treats skinned planets as spheres (the OBB fallback read a rotated planet as √3·R deep and the drag
+clamp shoved it skyward — measured yDrift 0 after), and grabs on skinned planets anchor at the
+CENTRE (a heavy uniform ball grabbed by its rim pendulums wildly; centre-hold tracks the cursor).
+(2) INSPECTOR/FORCES show the real skin: PlanetSkin.thumbURL() = cached 64×32 data-URL (inspector
+rebuilds at 10 Hz — NEVER toDataURL the full canvas there), invalidated on paint; materialFor(e)
+returns e.skin.material.clone() (shares canvas textures; material.dispose() leaves textures alone;
+clone's userData cleared so ownedTex doesn't travel); forces-view meshes get mesh.scale=e.size for
+skinned (unit geometry) + radius×e.size for framing. (3) JOINT TRANSFER on absorb: canAccrete no
+longer excludes jointed bodies; a directly-jointed pair NEVER fuses with itself (jointed() check in
+the candidate scan — welds/tethers are constructions); mergePair captures small's joints (+ big's
+too on the fresh path) BEFORE deleteEntity strips them, then lockJoint(e, other, kind) re-links at
+the current pose (dedupe via jointed(); entities.includes guards partners merged away the same
+check). Verified: planet ate a spring-tethered box mid-flight and inherited the spring to its
+partner. (4) ACCRETION ≠ MUTUAL GRAVITY: the stepPhysics gate is accretionOn only; the UI button no
+longer auto-enables gravity. CRITICAL COMPANION FIX — IMPACT-TIME CAPTURE: without gravity a thrown
+body bounces off a planet in 1–3 steps and the 6 Hz scan NEVER sees the contact (measured: tethered
+box sailed through 2400 steps unfused). New RAPIER.EventQueue passed to world.step; every entity
+collider gets ActiveEvents.COLLISION_EVENTS (enableContactEvents(body) called in spawn,
+finishCustomEntity, and mergePair's two collider builds); drainContactMerges (right after
+world.step, accretion on; events.clear() otherwise or the queue grows) resolves started-pairs via a
+lazily-built collider→entity map and runs the same capture test on POST-BOUNCE velocity (physically
+right: a slow rebound can't escape) then mergePair. setAccretion(true) primes skinBudget so an
+impact merge before the first 6 Hz check isn't skipped. NB the event queue is also the feed impact
+BREAKAGE will need (per-impact pairs at the exact step). (5) ✨ HD SKINS toggle (World row):
+planettex setSkinDetail/skinDetailHigh — hi {96 px/m, 1024–2048} / lo {32 px/m, 256–512}; applies
+to skins born/resized after the switch. (6) PAUSE + TIME SCALE (World): `paused` skips accumulator
+feed; `timeScale` (0.1–3) multiplies WALL dt INTO the accumulator — physics always steps FIXED so
+impulses/forces are identical at any speed (this was Rafael's explicit constraint); MAX_CATCHUP
+3→4 (×3 needs 3 steps/frame at 60 fps — headroom); leftover acc clamped < FIXED after the while
+loop or alpha>1 extrapolates the render (unbounded backlog at high scale otherwise). Verified:
+frozen exactly while paused, moves on resume; drag yDrift 0; joint inherited; low-detail skin maps
+512 wide. NB a mid-edit HMR race left two stale "enableContactEvents is not a function" errors in
+the console history — the fresh load is clean (the tool's console log persists across navigations).
 LIKELY NEXT: motion STREAKS for tracers; affected-object glow/tint; per-object trails; drawpad per-axis
 ortho cam. NB screenshotting a 500ms shockwave: pin `S.shocks[0].born = now-190` on an interval.
 Research dossier: docs/FORCES_RESEARCH.md.

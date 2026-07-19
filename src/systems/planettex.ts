@@ -41,10 +41,16 @@ function srcImage(url: string): HTMLImageElement {
 }
 for (const m of PRESETS) for (const url of Object.values(m.maps ?? {})) if (url) srcImage(url);
 
-const TARGET_PXM = 96; // painted texel density (px per surface metre) — chosen so a 2 m texture
-//                        tile lands at ~192 px from a 1024 px source: real grain survives the bake
-const MIN_W = 1024;
-const MAX_W = 2048; // albedo/normal cap (rough/metal bake at half) — a planet is ~25 MB of GPU maps
+// Skin detail is toggleable (World panel "HD planet textures"): high = real grain survives the
+// bake (a 2 m tile lands at ~192 px from a 1024 px source) at ~25 MB of GPU maps per planet;
+// low = 4× smaller canvases for weak machines — patches still land where they hit, just softer.
+// The flag applies to skins born (or resized) after the switch; existing paint is left alone.
+let hiDetail = true;
+export function setSkinDetail(hi: boolean) { hiDetail = hi; }
+export function skinDetailHigh() { return hiDetail; }
+const targetPxm = () => (hiDetail ? 96 : 32); // painted texel density (px per surface metre)
+const minW = () => (hiDetail ? 1024 : 256);
+const maxW = () => (hiDetail ? 2048 : 512); // albedo/normal cap (rough/metal bake at half)
 const TILE_M = 2; // one source-texture tile ≈ 2 m of surface, matching the instanced pools
 const FLUSH_MS = 300; // min interval between GPU re-uploads of a planet's canvases (the lag lever)
 
@@ -75,7 +81,7 @@ function layerFilter(kind: LayerKind, mat: Material): string {
 }
 
 const pow2ceil = (x: number) => 2 ** Math.ceil(Math.log2(Math.max(1, x)));
-const clampW = (w: number) => Math.min(MAX_W, Math.max(MIN_W, pow2ceil(w)));
+const clampW = (w: number) => Math.min(maxW(), Math.max(minW(), pow2ceil(w)));
 
 /**
  * A planet's persistent painted surface: four equirect canvases (albedo + normal full-res,
@@ -94,9 +100,10 @@ export class PlanetSkin {
   private dirty = false;
   private lastFlush = 0;
   private patterns = new Map<string, string | CanvasPattern>(); // per-(layer×material) fill cache
+  private thumb: string | null = null; // cached 64×32 albedo data-URL for the inspector swatch
 
   constructor(radius: number, base: CompEntry) {
-    this.W = clampW(2 * Math.PI * radius * TARGET_PXM);
+    this.W = clampW(2 * Math.PI * radius * targetPxm());
     for (const kind of ['albedo', 'normal', 'rough', 'metal'] as LayerKind[]) {
       const w = kind === 'albedo' || kind === 'normal' ? this.W : this.W / 2;
       const canvas = document.createElement('canvas');
@@ -154,6 +161,18 @@ export class PlanetSkin {
       L.ctx.filter = 'none';
     }
     this.dirty = true;
+    this.thumb = null;
+  }
+
+  /** Tiny albedo snapshot for the inspector swatch — cached until the next paint (called at 10 Hz). */
+  thumbURL(): string {
+    if (!this.thumb) {
+      const c = document.createElement('canvas');
+      c.width = 64; c.height = 32;
+      c.getContext('2d')!.drawImage(this.layers[0].canvas, 0, 0, 64, 32);
+      this.thumb = c.toDataURL();
+    }
+    return this.thumb;
   }
 
   /** Upload pending paint to the GPU, at most every FLUSH_MS. Call once per frame per planet. */
@@ -247,6 +266,7 @@ export class PlanetSkin {
       }
     }
     this.dirty = true; // uploaded by flushIfDue — never per-splat
+    this.thumb = null;
   }
 
   /**
@@ -255,7 +275,7 @@ export class PlanetSkin {
    * A no-op once the MAX_W cap is reached, so it fires at most a couple of times per planet.
    */
   ensureCapacity(radius: number) {
-    const want = clampW(2 * Math.PI * radius * TARGET_PXM);
+    const want = clampW(2 * Math.PI * radius * targetPxm());
     if (want <= this.W) return;
     this.W = want;
     for (const L of this.layers) {

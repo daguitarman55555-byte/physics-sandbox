@@ -500,21 +500,51 @@ function buildPanel(sandbox: Sandbox) {
     sandbox.setSelfGravity(on);
     bSelf.classList.toggle('primary', on);
   };
-  // accretion rides on mutual gravity (gravity gathers the rubble, accretion fuses it into a
-  // planet), so switching it on switches mutual gravity on too
+  // accretion is independent of mutual gravity: pair them for solar systems, or fuse a plain
+  // pile on the floor with accretion alone
   const bAccrete = el('button', '🪐 Accretion', 'mini');
   bAccrete.title = 'Slow-touching objects fuse into one growing sphere — planets form from rubble';
   bAccrete.onclick = () => {
     const on = !sandbox.accretion;
     sandbox.setAccretion(on);
     bAccrete.classList.toggle('primary', on);
-    if (on && !sandbox.selfGravity) {
-      sandbox.setSelfGravity(true);
-      bSelf.classList.add('primary');
-    }
   };
-  sgRow.append(bSelf, bAccrete);
+  // planet texture detail: HD = full-grain 2048px skins (~25 MB GPU each); off = 4× smaller
+  const bHD = el('button', '✨ HD skins', 'mini primary');
+  bHD.title = 'Maximum texture detail on accreted planets — turn off on weaker machines';
+  bHD.onclick = () => {
+    const hi = !sandbox.skinDetail;
+    sandbox.setSkinDetail(hi);
+    bHD.classList.toggle('primary', hi);
+  };
+  sgRow.append(bSelf, bAccrete, bHD);
   worldBody.append(sgRow);
+
+  // time controls: pause, and a wall-time multiplier. Physics always steps its fixed 1/60 s —
+  // the scale only changes how many steps run per second, so forces/impulses stay identical.
+  const timeRow = el('div', '', 'row');
+  const bPause = el('button', '⏸ Pause', 'mini');
+  bPause.onclick = () => {
+    const p = !sandbox.isPaused;
+    sandbox.setPaused(p);
+    bPause.textContent = p ? '▶ Resume' : '⏸ Pause';
+    bPause.classList.toggle('primary', p);
+  };
+  timeRow.append(bPause);
+  worldBody.append(timeRow);
+
+  const tField = el('div', '', 'field');
+  const tLabel = el('label', 'Time scale <b>×1.0</b>');
+  const tRange = el('input');
+  tRange.type = 'range';
+  tRange.min = '0.1'; tRange.max = '3'; tRange.step = '0.1'; tRange.value = '1';
+  tRange.oninput = () => {
+    const v = parseFloat(tRange.value);
+    sandbox.setTimeScale(v);
+    tLabel.querySelector('b')!.textContent = `×${v.toFixed(1)}`;
+  };
+  tField.append(tLabel, tRange);
+  worldBody.append(tField);
 
   const sgField = el('div', '', 'field');
   const sgLabel = el('label', `Pull strength G <b>${sandbox.selfGravityG.toFixed(1)}</b>`);
@@ -1396,10 +1426,13 @@ function buildInspector(sandbox: Sandbox) {
     const sizeOrShape = e.kind === 'custom'
       ? prop('volume', `${(e.volume ?? 0).toFixed(2)} m³`)
       : prop('size', `${(e.size * 2).toFixed(2)} m`);
-    // swatch shows the material itself: albedo thumbnail for textured presets, color for plain
-    const sw = e.mat.maps?.albedo
-      ? `background-image:url('${e.mat.maps.albedo}');background-size:cover`
-      : `background:#${e.color.getHexString()}`;
+    // swatch shows the material itself: an accreted planet's ACTUAL painted surface (cached
+    // thumbnail of its skin), an albedo thumbnail for textured presets, or the color for plain
+    const sw = e.skin
+      ? `background-image:url('${e.skin.thumbURL()}');background-size:cover`
+      : e.mat.maps?.albedo
+        ? `background-image:url('${e.mat.maps.albedo}');background-size:cover`
+        : `background:#${e.color.getHexString()}`;
     content.innerHTML =
       `<h3><span>Inspector</span><span class="swatch" style="${sw}"></span></h3>` +
       prop('id', `#${e.id} · ${e.kind}`) +
@@ -1501,11 +1534,13 @@ function buildForcesView(sandbox: Sandbox) {
     parts = list.map((e) => {
       const { geo, own } = geometryFor(e);
       const mat = sandbox.materialFor(e); // each body wears its own maps + tiling
-      mat.side = e.kind === 'custom' ? THREE.DoubleSide : THREE.FrontSide; // open surfaces have two faces
+      mat.side = e.kind === 'custom' && !e.skin ? THREE.DoubleSide : THREE.FrontSide; // open surfaces have two faces
       const mesh = new THREE.Mesh(geo, mat);
+      if (e.skin) mesh.scale.setScalar(e.size); // skinned planets are unit geometry × scale
       geo.computeBoundingSphere();
       assembly.add(mesh);
-      return { e, mesh, own, radius: geo.boundingSphere?.radius ?? Math.max(e.size, 0.2) };
+      const r = geo.boundingSphere?.radius ?? Math.max(e.size, 0.2);
+      return { e, mesh, own, radius: e.skin ? r * e.size : r };
     });
   };
 
