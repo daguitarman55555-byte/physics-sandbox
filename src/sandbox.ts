@@ -26,6 +26,7 @@ import { PLAIN, type Material } from './systems/materials';
 import { fieldForce, fieldInfluence, pathInfluence, wellOrbitalVelocity, FIELD_INFO, samplePath, PATH_PRESETS, type Field, type FieldKind, type FieldShape, type CurveSpec } from './systems/fields';
 import { FieldFlow } from './systems/fieldviz';
 import { NBody } from './systems/nbody';
+import { mergeComp, bakePlanetMaterial, type CompEntry } from './systems/planettex';
 import { buildJoint, anchorWorld, JOINT_INFO, type JointKind } from './systems/joints';
 
 export type Kind = 'box' | 'sphere' | 'custom';
@@ -55,6 +56,7 @@ export interface Entity {
   label?: string; // e.g. "revolution: 1.1 + 0.55*sin(x*0.9)"
   frozen?: boolean; // Phase 4 freeze tool: body switched to Fixed (held in place until unfrozen)
   accreted?: number; // how many original bodies this one is fused from (accretion merging)
+  comp?: CompEntry[]; // what it's made of, by volume (accretion tracks every material it eats)
 }
 
 export type Tool = 'grab' | 'connect' | 'freeze' | 'push' | 'brush';
@@ -1573,7 +1575,9 @@ export class Sandbox {
     if (e.mesh) {
       this.scene.remove(e.mesh);
       e.mesh.geometry.dispose();
-      (e.mesh.material as THREE.Material).dispose();
+      const mm = e.mesh.material as THREE.MeshStandardMaterial;
+      if (mm.userData.ownedTex) mm.map?.dispose(); // baked planet canvas — ours alone (pool maps are shared)
+      mm.dispose();
       const mi = this.customMeshes.indexOf(e.mesh);
       if (mi >= 0) this.customMeshes.splice(mi, 1);
     }
@@ -1590,7 +1594,9 @@ export class Sandbox {
       if (e.mesh) {
         this.scene.remove(e.mesh);
         e.mesh.geometry.dispose();
-        (e.mesh.material as THREE.Material).dispose();
+        const mm = e.mesh.material as THREE.MeshStandardMaterial;
+        if (mm.userData.ownedTex) mm.map?.dispose();
+        mm.dispose();
       }
     }
     this.entities.length = 0;
@@ -1708,6 +1714,14 @@ export class Sandbox {
     return (4 / 3) * Math.PI * e.size ** 3;
   }
 
+  /** What a body is made of: its accretion history, or (for a virgin body) just its own material. */
+  private compOf(e: Entity): CompEntry[] {
+    if (e.comp) return e.comp;
+    // Plain carries its per-entity palette color; textured materials use their preset color
+    const color = e.mat.maps ? new THREE.Color(e.mat.color) : e.color.clone();
+    return [{ mat: e.mat, vol: this.volumeOf(e), color }];
+  }
+
   /**
    * One accretion pass: walk Rapier's live contact graph, pair up touching bodies whose relative
    * speed is below ACCRETE_SPEED (fast impacts bounce — only lingering contact fuses, like real
@@ -1774,15 +1788,29 @@ export class Sandbox {
       L.x += I * w.x; L.y += I * w.y; L.z += I * w.z;
     }
 
-    const heavier = ma >= mb ? a : b;
-    const mat = heavier.mat;
-    const color = heavier.color.clone();
+    const comp = mergeComp(this.compOf(a), this.compOf(b));
     const count = (a.accreted ?? 1) + (b.accreted ?? 1);
     this.deleteEntity(a);
     this.deleteEntity(b);
 
-    const e = this.spawn('sphere', com, R, mat);
-    e.color.copy(color);
+    let e: Entity;
+    if (comp[0].vol / V >= 0.97 || comp.length === 1) {
+      // effectively one material — stay in the cheap instanced pool
+      e = this.spawn('sphere', com, R, comp[0].mat);
+      if (!comp[0].mat.maps) e.color.copy(comp[0].color); // plain planets blend their palette colors
+    } else {
+      // genuinely mixed — a unique mesh wearing a baked patchwork of everything it has eaten
+      const body = this.world.createRigidBody(
+        RAPIER.RigidBodyDesc.dynamic().setTranslation(com.x, com.y, com.z).setCcdEnabled(true));
+      let fr = 0, re = 0; // physics blends too: volume-weighted friction/restitution
+      for (const c of comp) { fr += (c.vol / V) * c.mat.friction; re += (c.vol / V) * c.mat.restitution; }
+      this.world.createCollider(RAPIER.ColliderDesc.ball(R).setFriction(fr).setRestitution(re), body);
+      e = this.finishCustomEntity(
+        body, new THREE.SphereGeometry(R, 48, 32), com, R, V, `accreted ×${count}`, comp[0].mat, [1, 1]);
+      (e.mesh!.material as THREE.Material).dispose(); // the plain material finishCustomEntity made
+      e.mesh!.material = bakePlanetMaterial(comp, R);
+    }
+    e.comp = comp;
     e.accreted = count;
     e.label = `accreted ×${count}`;
     e.body.collider(0).setDensity(M / V); // exact mass conservation whatever the materials mixed

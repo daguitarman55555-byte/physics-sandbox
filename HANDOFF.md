@@ -564,6 +564,31 @@ VERIFIED LIVE: 400 spread objects, Zero-G, one UI click → n: 400→1, "accrete
 mass 534.26 unchanged at every checkpoint; recipe test with a fitted gravity-well star (beginPlace →
 fitFieldToObjects → commitPlace, orbital insertion) → stable 5-body system (r=4.8 planet, r=1.7
 planet, 3 moonlets) orbiting for 60+ sim-s, mass 498.3 constant, console clean, screenshots taken.
+TEXTURES MERGE (2026-07-19, Rafael's ask): new `systems/planettex.ts`. Every accreted body carries
+`Entity.comp: CompEntry[]` = volume-weighted {mat, vol, color} of everything it ate (compOf gives a
+virgin body a single entry; mergeComp sums by mat.id and lerps Plain's per-entity palette color by
+volume). mergePair now branches: dominant ≥97% (or single entry) → the old cheap instanced-pool
+sphere, with e.color = blended palette color when the dominant is Plain (pool tint only shows for
+untextured mats — textured pools use WHITE base instanceColor, don't override those); genuinely
+mixed → a 'custom'-kind unique-mesh sphere via finishCustomEntity (dispose the material it auto-
+builds, swap in bakePlanetMaterial), collider friction/restitution = volume-weighted blends, density
+M/V as before. bakePlanetMaterial: 256×128 equirect canvas — dominant fills, each minor ingredient
+gets random-ellipse blotches until it covers ≈ its volume fraction (drawn thrice at x, x±W so the
+longitude seam wraps), fill = createPattern(albedo image, ~2 m/tile via pxPerM scale) or flat color
+for Plain/unloaded; scalar roughness/metalness/envMapIntensity = volume-weighted blends; CanvasTexture
+SRGB. Albedo images come from a module-level Image cache (warmed at import for all PRESETS — the
+URLs are already in the browser HTTP cache from the pools, so this is free). OWNERSHIP: baked
+material sets userData.ownedTex; deleteEntity/clear dispose mm.map only when that flag is set (pool
+maps are SHARED via texCache — never blanket-dispose a custom mesh's map). Console-testing tip:
+`import('/src/systems/materials.ts')` works in the Vite dev console for grabbing PRESETS/PLAIN to
+spawn specific materials. VERIFIED LIVE: 260 mixed (120 stone/60 steel/50 wood/30 plain) → one
+"accreted ×260" custom planet, comp 43.4/24.7/19.3/12.6% ≈ spawn mix, mottled surface on screen
+(stone base, wood/steel/pink-plain blotches), mass 941.29 → 941.29, ~259 bakes over the run with no
+stutter, console clean; plain-only run stayed kind 'sphere' (pool), comp 1 entry, blended color
+#b592a0. Honest notes: patch grain is soft at small radii (2 m/tile ≈ 20 px/tile on an r≈4 planet —
+bump the tile constant in styleFor if Rafael wants chunkier grain); normal/roughness MAPS aren't
+patch-masked (scalar blends only); the bake re-randomizes patch layout each merge (reads as the
+surface reshuffling as it eats — arguably a feature).
 LIKELY NEXT: motion STREAKS for tracers; affected-object glow/tint; per-object trails; drawpad per-axis
 ortho cam. NB screenshotting a 500ms shockwave: pin `S.shocks[0].born = now-190` on an interval.
 Research dossier: docs/FORCES_RESEARCH.md.

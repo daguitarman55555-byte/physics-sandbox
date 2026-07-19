@@ -81,6 +81,18 @@ A checklist so nothing is lost. `[x]` = in Phase 1 today · `[ ]` = planned (wit
       `accreted ×400` planet (mass 534.26 → 534.26); with a gravity-well star → a stable 5-body
       system (planet r=4.8 + planet r=1.7 + 3 moonlets) orbiting for 60+ sim-s. Future: tidal/impact
       breakup, per-planet inspector stats.
+- [x] **Textures merge** (`systems/planettex.ts`) — every accreted body carries a **composition**
+      (volume-weighted list of every material it ate, `Entity.comp`); a genuinely mixed planet
+      (<97% dominant) becomes a unique-mesh sphere wearing a **canvas-baked equirect patchwork**:
+      dominant material fills the surface, each minor ingredient appears as irregular blotches
+      covering ≈ its volume fraction, sampled from the ingredients' REAL albedo maps (same files
+      the pools tile, ~2 m/tile) with seam-wrapped longitude; roughness/metalness/envBoost are
+      volume-weighted scalar blends, as are the merged body's friction/restitution. Plain-only
+      merges stay in the cheap instanced pool with their palette colors blended volume-weighted.
+      Baked canvas textures are owned per-planet (`userData.ownedTex`) and disposed with the mesh.
+      Verified live: 260 objects (120 stone / 60 steel / 50 wood / 30 plain) → ONE `accreted ×260`
+      planet, comp 43/25/19/13% matching the spawn mix, mottled stone-steel-wood-pink surface on
+      screen, mass 941.29 unchanged, console clean.
 - [x] **Live flow tracers** (`systems/fieldviz.ts`, `✦ Flow tracers` toggle, on by default) — every field
       (and the ghost you're placing) grows a cloud of ~260 glowing, additive-blended tracer motes that
       **drift by the field's OWN `fieldForce`** — so you SEE the wind blow, the vortex swirl, the attractor
