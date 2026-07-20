@@ -735,6 +735,40 @@ would need hull-vs-growth handling — only do it if Rafael asks). Verified: mas
 hull-debris shatter (68.43 → 68.43), console clean. NB FEATURES.md gotcha: an insert-before edit
 ate the "Pause + time scale" HEADER line (old_string was the header, new_string forgot to re-append
 it) — restored; when inserting before an entry, always re-emit the displaced line.
+FLOOR SLAMS + HAMMER BREAKAGE + NO-SPHERE REACCRETION (2026-07-20): (1) FLOOR BREAKAGE — the ground
+collider's handle is stored (`groundHandle`, set in addGroundCollider; events already fire because
+the ENTITY collider carries COLLISION_EVENTS and Rapier ORs the two colliders' flags). drainContact-
+Events (renamed from drainContactMerges earlier) now collects `floorHits` = contacts where exactly
+one side maps to an entity and the other handle === groundHandle. A floor slam is an infinite-mass
+impact: Q = ½·v_down² (v_down = -e.lastVel.y, pre-impact; μ→m so mass cancels — a boulder and a
+pebble break at the same drop speed, physically right). Threshold = BREAK_Q·strengthOf·FLOOR_BREAK_
+FACTOR(2.5) — tougher than a body hit so casual drops survive (verified: stone whole at 4.4/7.7 m/s,
+shatters at 12.5≈8 m drop; ice cracks at 6.3; steel survives 14). Shares the BREAKS_PER_STEP cap
+with body-body (passed as a `{n}` box so both loops mutate it). (2) HAMMER BREAKAGE — the body-body
+loop was restructured: MERGE still needs full `canAccrete` of both, but SHATTER is now per-TARGET
+via `canBreak(e)` = `!frozen && grab?.entity !== e && size >= BREAK_MIN_R`. So a GRABBED body breaks
+what it rams while staying whole (you keep your hammer) — verified: held hammer → target shattered,
+hammer survived. Previously the whole pair was skipped if either side failed canAccrete (grabbed),
+so a dragged body couldn't break anything. (3) NO-SPHERE REACCRETION — the big one. Pure-material
+accreted bodies USED to stay perfect pool spheres (spawn('sphere') in fresh-build, or a pool-sphere
+big growing in place) — so shatter→reaccrete gave back a flawless sphere. Now `applyAccretedForm(e,
+R, comp, bigComp, V)` decides the visual form for every merge: wantSkin (mixed & R≥0.8) → skinned
+lumpy custom; wantCustom (R ≥ DEBRIS_POTATO_R 0.5) → PURE lumpy custom (dominant material's PBR/
+color via accretedMaterialFor); else a tiny pool sphere (cheap, invisible lumps). It converts UP as
+R climbs (pool→pure-lumpy→skinned) and calls growLumpyMesh which REBUILDS the geometry with fainter
+bumps once R grows ≥15% — `lumpyGeometry(R)` fades amplitude k = 0.13/(1+max(0,R-0.5)·0.7), so ±13%
+at R≈0.5 down to ±3.5% at R≈4 (measured) — small reassembled bodies are rubble asteroids, big
+naturally-grown ones round out (hydrostatic-equilibrium look). Helpers: attachLumpyMesh / disposeMesh
+/ growLumpyMesh / accretedMaterialFor. In-place-grow condition changed from `big.skin` to `!big.
+support` (any BALL-collider custom grows in place — pool sphere, skinned, or pure-lumpy; only boxes
+& hull-debris rebuild fresh, keyed off `support` which only debris sets). New Entity field `geoR` =
+radius at last geometry build. Direction-pure displacement → skin UVs survive rebuilds, splats stay
+put. VERIFIED: reassembled stone = irregular ×12 asteroid (kind custom, not sphere), mass 52.55
+exact; mixed skinned accretion + craters unaffected (946→946, slug survived); 600-object pure-stone
+storm mean 0.52 ms/step worst 11.5, peak 95 custom meshes, one round R=4.3 planet; console clean.
+NB: pure-lumpy custom bodies keep BALL colliders (grow in place); the ±13% mesh pokes slightly past
+the ball at small R — acceptable (same as skinned planets always have). NB2: lumpyUnitSphere() is
+GONE, replaced by lumpyGeometry(R).
 LIKELY NEXT: motion STREAKS for tracers; affected-object glow/tint; per-object trails; drawpad per-axis
 ortho cam. NB screenshotting a 500ms shockwave: pin `S.shocks[0].born = now-190` on an interval.
 Research dossier: docs/FORCES_RESEARCH.md.

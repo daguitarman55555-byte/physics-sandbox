@@ -62,6 +62,8 @@ export interface Entity {
   mergedTick?: number; // last physics step this body took part in a merge — one merge per body per
   //                      step, or the second merge reads mass() before Rapier finalized the first
   //                      (measured: a planet's mass DOUBLED per absorb, compounding to ×1000)
+  geoR?: number; // radius at which a lumpy accreted mesh's geometry was last built — growth past
+  //                a threshold rebuilds it with fainter lumps, so big planets round out naturally
 }
 
 export type Tool = 'grab' | 'connect' | 'freeze' | 'push' | 'brush';
@@ -134,6 +136,9 @@ const BREAK_BINDING = 0.15; // × v_esc² added when mutual gravity is on: self-
 const BREAK_MIN_R = 0.3; // fragments below this never re-shatter — no infinite dust
 const BREAKS_PER_STEP = 2;
 const CRATER_SPEED = 5; // m/s — bounce-regime hits above this scar a skinned planet's surface
+const FLOOR_BREAK_FACTOR = 2.5; // the ground is tougher to shatter against than a body-body hit:
+//                                 Q = ½·v_down² vs FACTOR × the material threshold, so a plain
+//                                 object breaks from a ~4.5 m free-fall slam but not a casual drop
 const DEBRIS_POTATO_R = 0.5; // fragments this big get a lumpy displaced-sphere mesh (ball collider)
 
 const CCD_SPEED = Infinity; // CCD is fully DISABLED. Always-on CCD was THE 1000-object accretion
@@ -181,6 +186,7 @@ export class Sandbox {
   // 1–3 steps, far between the 6 Hz scans — the event queue catches the touch at the exact step.
   // (Also the future home of impact breakage: it needs per-impact energies from the same events.)
   private events!: RAPIER.EventQueue;
+  private groundHandle = -1; // the floor collider's handle — recognize floor slams in the drain
   // persistent collider-handle → entity index (kept current by registerColliders/unregister) — the
   // event drain and the 6 Hz scan used to rebuild this per call, thousands of inserts per step in
   // a settling pile
@@ -363,7 +369,11 @@ export class Sandbox {
   private addGroundCollider() {
     // 1000×1000 physics floor (half-extents 500) — objects can't realistically be thrown off it.
     const ground = this.world.createRigidBody(RAPIER.RigidBodyDesc.fixed().setTranslation(0, -0.5, 0));
-    this.world.createCollider(RAPIER.ColliderDesc.cuboid(500, 0.5, 500).setFriction(0.7).setRestitution(0.1), ground);
+    const col = this.world.createCollider(
+      RAPIER.ColliderDesc.cuboid(500, 0.5, 500).setFriction(0.7).setRestitution(0.1), ground);
+    // collision events fire when either collider has the flag; entities have it, so floor-vs-entity
+    // contacts already appear in the drain — this handle lets us recognize them (floor slam breakage)
+    this.groundHandle = col.handle;
   }
 
   /**
@@ -1836,33 +1846,42 @@ export class Sandbox {
    */
   private drainContactEvents() {
     const pairs: Array<[Entity, Entity]> = [];
+    const floorHits: Entity[] = [];
     this.events.drainCollisionEvents((h1: number, h2: number, started: boolean) => {
       if (!started) return;
       const a = this.colliderToEntity.get(h1), b = this.colliderToEntity.get(h2);
-      if (!a || !b || a === b) return; // one side is the floor, or a self-pair
-      pairs.push([a, b]);
+      if (a && b) { if (a !== b) pairs.push([a, b]); return; }
+      // exactly one side is an entity → the other is the floor (the only non-entity collider)
+      const e = a ?? b;
+      if (e && (a ? h2 : h1) === this.groundHandle) floorHits.push(e);
     });
-    if (pairs.length === 0) return;
-    let merges = 0, breaks = 0;
+    let merges = 0;
+    const breaks = { n: 0 }; // shared cap across body-body and floor slams
+
     for (const [a, b] of pairs) {
       // an earlier merge/shatter this step may have consumed either body
       if (!a.body.isValid() || !b.body.isValid()) continue;
-      // one merge per body per STEP: a second same-step merge reads mass() before Rapier
-      // finalized the first and the planet's mass compounds (measured ×2 per absorb)
-      if (a.mergedTick === this.tick || b.mergedTick === this.tick) continue;
-      if (!this.canAccrete(a) || !this.canAccrete(b) || this.jointed(a, b)) continue;
       const ma = a.body.mass(), mb = b.body.mass();
       if (!(ma > 0) || !(mb > 0)) continue;
-      const va = a.body.linvel(), vb = b.body.linvel();
-      const vPost = Math.hypot(va.x - vb.x, va.y - vb.y, va.z - vb.z);
-      const vEsc2 = (2 * this.selfG * (ma + mb)) / (a.size + b.size);
+
+      // CAPTURE (needs full accretion eligibility of BOTH bodies — a grabbed/frozen body can't fuse)
       if (this.accretionOn && merges < IMPACT_MERGES_PER_STEP
-        && vPost <= Math.max(ACCRETE_SPEED, 0.7 * Math.sqrt(vEsc2))) {
-        this.mergePair(a, b);
-        merges++;
-        continue;
+        && a.mergedTick !== this.tick && b.mergedTick !== this.tick
+        && this.canAccrete(a) && this.canAccrete(b) && !this.jointed(a, b)) {
+        const va = a.body.linvel(), vb = b.body.linvel();
+        const vPost = Math.hypot(va.x - vb.x, va.y - vb.y, va.z - vb.z);
+        const vEsc2 = (2 * this.selfG * (ma + mb)) / (a.size + b.size);
+        if (vPost <= Math.max(ACCRETE_SPEED, 0.7 * Math.sqrt(vEsc2))) {
+          this.mergePair(a, b);
+          merges++;
+          continue;
+        }
       }
-      if (!this.breakageOn) continue;
+
+      // SHATTER — breakage is per-TARGET (canBreak), so a grabbed body can break what it rams
+      // while staying whole itself (you keep your hammer); welded/tethered pairs stay intact
+      if (!this.breakageOn || this.jointed(a, b)) continue;
+      const vEsc2 = (2 * this.selfG * (ma + mb)) / (a.size + b.size);
       const vPre = Math.hypot(
         a.lastVel.x - b.lastVel.x, a.lastVel.y - b.lastVel.y, a.lastVel.z - b.lastVel.z);
       const E = 0.5 * ((ma * mb) / (ma + mb)) * vPre * vPre; // impact energy in the pair frame
@@ -1876,12 +1895,12 @@ export class Sandbox {
         big === a ? pb.y - pa.y : pa.y - pb.y,
         big === a ? pb.z - pa.z : pa.z - pb.z);
       for (const [tgt, m] of [[a, ma], [b, mb]] as Array<[Entity, number]>) {
-        if (breaks >= BREAKS_PER_STEP || tgt.size < BREAK_MIN_R) continue;
+        if (breaks.n >= BREAKS_PER_STEP || !this.canBreak(tgt)) continue;
         const Q = E / m; // specific energy: the SMALLER body of a pair takes the worse beating
         const thr = BREAK_Q * this.strengthOf(tgt) + binding;
         if (Q > thr) {
           this.shatter(tgt, Math.min(1 + 0.3 * Math.sqrt(Q - thr), 7));
-          breaks++;
+          breaks.n++;
         }
       }
       // the bigger body survived a hard hit → an impact scar on its skin (the impactor may well
@@ -1893,6 +1912,29 @@ export class Sandbox {
         big.skin.crater(impactDir, Math.max(0.35, smallSize * 1.3), big.size);
       }
     }
+
+    // FLOOR SLAMS — the ground is an infinite-mass impactor: specific energy Q = ½·v_down² (mass
+    // cancels), thresholded higher than a body hit so a casual drop survives but a hard slam breaks
+    if (this.breakageOn) {
+      for (const e of floorHits) {
+        if (breaks.n >= BREAKS_PER_STEP) break;
+        if (!e.body.isValid() || !this.canBreak(e)) continue;
+        const vDown = -e.lastVel.y; // downward speed entering this step (pre-impact)
+        if (vDown <= 0) continue;
+        const Q = 0.5 * vDown * vDown;
+        const thr = BREAK_Q * this.strengthOf(e) * FLOOR_BREAK_FACTOR;
+        if (Q > thr) {
+          this.shatter(e, Math.min(1 + 0.3 * Math.sqrt(Q - thr), 7));
+          breaks.n++;
+        }
+      }
+    }
+  }
+
+  /** A body can be shattered by an impact: loose, breakable-sized, and not the one you're holding
+   *  (your dragged object survives so it can act as a hammer) or pinned. */
+  private canBreak(e: Entity): boolean {
+    return !e.frozen && this.grab?.entity !== e && e.size >= BREAK_MIN_R;
   }
 
   /** Impact-shatter resistance: the volume-weighted strength of everything the body is made of. */
@@ -2031,10 +2073,96 @@ export class Sandbox {
     return this.displaceSphere(new THREE.SphereGeometry(R, 24, 16), [0.16, 0.1, 0.07]);
   }
 
-  /** A gently irregular unit sphere for accreted planets: rubble-pile lumpiness, subtle enough
-   *  that the ball collider stays honest and the drag clamp's sphere assumption holds. */
-  private lumpyUnitSphere(): THREE.BufferGeometry {
-    return this.displaceSphere(new THREE.SphereGeometry(1, 64, 48), [0.055, 0.035, 0.022]);
+  /** A lumpy UNIT sphere for accreted bodies (mesh is scaled by R). Relative bumpiness FADES as R
+   *  grows — a small reassembled body reads as rubble, a large one rounds out like a real planet
+   *  under self-gravity (hydrostatic equilibrium). Direction-pure displacement, so the equirect
+   *  skin UVs survive a rebuild unchanged. */
+  private lumpyGeometry(R: number): THREE.BufferGeometry {
+    const k = 0.13 / (1 + Math.max(0, R - 0.5) * 0.7); // ±13% at R≈0.5 → ±2% by R≈8
+    return this.displaceSphere(new THREE.SphereGeometry(1, 64, 48), [k, k * 0.65, k * 0.42]);
+  }
+
+  /** A render material for a pure-material accreted body (no skin): the dominant material's PBR
+   *  maps, or a solid-color standard material for Plain. */
+  private accretedMaterialFor(dom: CompEntry): THREE.MeshStandardMaterial {
+    return dom.mat.maps
+      ? this.pbrMaterial(dom.mat, [2, 1])
+      : new THREE.MeshStandardMaterial({ color: dom.color, metalness: 0.1, roughness: 0.6 });
+  }
+
+  /** Attach a fresh lumpy custom mesh (unit geometry × R scale) to an entity. */
+  private attachLumpyMesh(e: Entity, R: number, material: THREE.Material): THREE.Mesh {
+    const mesh = new THREE.Mesh(this.lumpyGeometry(R), material);
+    mesh.castShadow = mesh.receiveShadow = true;
+    mesh.scale.setScalar(R);
+    mesh.position.copy(e.currPos);
+    mesh.userData.entity = e;
+    this.scene.add(mesh);
+    this.customMeshes.push(mesh);
+    return mesh;
+  }
+
+  /** Free an entity's custom mesh (geometry + its own material/canvases), if it has one. */
+  private disposeMesh(e: Entity) {
+    if (!e.mesh) return;
+    this.scene.remove(e.mesh);
+    e.mesh.geometry.dispose();
+    const m = e.mesh.material as THREE.MeshStandardMaterial;
+    if (m.userData.ownedTex) {
+      m.map?.dispose(); m.normalMap?.dispose(); m.roughnessMap?.dispose(); m.metalnessMap?.dispose();
+    }
+    m.dispose();
+    const i = this.customMeshes.indexOf(e.mesh);
+    if (i >= 0) this.customMeshes.splice(i, 1);
+    e.mesh = undefined;
+  }
+
+  /** Rebuild a lumpy mesh's geometry with fainter bumps once it has grown ≥15% (big → round), and
+   *  keep its scale synced to R. UVs are identical each rebuild, so a skin stays aligned. */
+  private growLumpyMesh(e: Entity, R: number) {
+    if (e.mesh && (!e.geoR || R > e.geoR * 1.15)) {
+      const old = e.mesh.geometry;
+      e.mesh.geometry = this.lumpyGeometry(R);
+      old.dispose();
+      e.geoR = R;
+    }
+    e.mesh?.scale.setScalar(R);
+  }
+
+  /**
+   * Give an accreted body the right visual FORM as it grows: a mixed body big enough earns a
+   * skinned lumpy planet; a pure body big enough gets a lumpy custom mesh (so a reassembled sphere
+   * never reads as a perfect sphere); a tiny one stays a cheap pool sphere. Bumpiness fades with
+   * size, so only large, naturally-grown bodies round out. Converts UP across these as R climbs.
+   */
+  private applyAccretedForm(e: Entity, R: number, comp: CompEntry[], bigComp: CompEntry[], V: number) {
+    const wantSkin = comp.length > 1 && R >= SKIN_MIN_R;
+    const wantCustom = wantSkin || R >= DEBRIS_POTATO_R;
+
+    if (wantSkin && !e.skin) {
+      this.disposeMesh(e); // free a pure-lumpy mesh if we're upgrading one (no-op for pool spheres)
+      const skin = new PlanetSkin(R, bigComp[0]);
+      e.skin = skin;
+      e.mesh = this.attachLumpyMesh(e, R, skin.material);
+      e.kind = 'custom';
+      e.geoR = R;
+      for (let k = 1; k < bigComp.length; k++) // scatter minors absorbed before the skin existed
+        this.paintImpact(skin, [bigComp[k]], new THREE.Vector3().randomDirection(), V, R);
+      return; // caller paints the newcomer + ensureCapacity
+    }
+    if (e.skin) { this.growLumpyMesh(e, R); return; }
+    if (wantCustom) {
+      if (e.kind !== 'custom') { // pool sphere → pure lumpy custom
+        e.mesh = this.attachLumpyMesh(e, R, this.accretedMaterialFor(comp[0]));
+        e.kind = 'custom';
+        e.geoR = R;
+      } else { // already pure lumpy custom → grow (rounds out as it gets big)
+        this.growLumpyMesh(e, R);
+        if (!comp[0].mat.maps) (e.mesh!.material as THREE.MeshStandardMaterial).color.copy(comp[0].color);
+      }
+    } else if (!comp[0].mat.maps) {
+      e.color.copy(comp[0].color); // still tiny: keep instanced, just blend the plain palette color
+    }
   }
 
 
@@ -2129,7 +2257,9 @@ export class Sandbox {
     }
 
     let e: Entity;
-    if (big.kind === 'sphere' || (big.kind === 'custom' && big.skin)) {
+    // grow in place when big has a BALL collider (pool sphere, skinned planet, or pure lumpy
+    // accreted body — none carry `support`); boxes and hull-collider debris rebuild fresh
+    if (big.kind === 'sphere' || (big.kind === 'custom' && !big.support)) {
       // ---- absorb in place: the planet survives, grows, and wears the impact ----
       e = big;
       this.deleteEntity(small);
@@ -2146,29 +2276,9 @@ export class Sandbox {
       e.body.setTranslation({ x: com.x, y: com.y, z: com.z }, true);
       e.size = R; e.volume = V;
       e.bbCenter.set(0, 0, 0); e.bbHalf.setScalar(R);
-      if (wantSkin && !e.skin) {
-        // first foreign bite: the pool sphere becomes a skinned planet. Unit geometry × scale, so
-        // every later growth is a single scale write, never a rebuild. Gently lumpy: rubble
-        // piles aren't perfect spheres (the ball collider stays honest at this amplitude).
-        const skin = new PlanetSkin(R, bigComp[0]);
-        const mesh = new THREE.Mesh(this.lumpyUnitSphere(), skin.material);
-        mesh.castShadow = mesh.receiveShadow = true;
-        mesh.scale.setScalar(R);
-        mesh.position.copy(e.currPos);
-        mesh.userData.entity = e;
-        this.scene.add(mesh);
-        this.customMeshes.push(mesh);
-        e.mesh = mesh;
-        e.kind = 'custom';
-        e.skin = skin;
-        // trace minors (≤3%) absorbed before the skin existed — scatter them so nothing is lost
-        for (let k = 1; k < bigComp.length; k++) {
-          this.paintImpact(skin, [bigComp[k]], new THREE.Vector3().randomDirection(), V, R);
-        }
-      }
+      this.applyAccretedForm(e, R, comp, bigComp, V);
       if (e.skin) {
         e.skin.ensureCapacity(R);
-        e.mesh!.scale.setScalar(R);
         // impact direction in the planet's LOCAL frame — its surface keeps its orientation, so
         // the patch lands exactly where the newcomer touched
         const q = e.body.rotation();
@@ -2176,8 +2286,6 @@ export class Sandbox {
           .applyQuaternion(new THREE.Quaternion(q.x, q.y, q.z, q.w).invert());
         this.paintImpact(e.skin, smallComp, dirLocal, V, R);
         e.skin.refreshScalars(comp);
-      } else if (!comp[0].mat.maps) {
-        e.color.copy(comp[0].color); // plain-pure growth keeps blending its palette color
       }
     } else {
       // ---- neither is a sphere yet (box / custom-shape rubble): build the planet fresh ----
@@ -2187,41 +2295,28 @@ export class Sandbox {
       }
       this.deleteEntity(big);
       this.deleteEntity(small);
-      if (!wantSkin) {
-        e = this.spawn('sphere', com, R, comp[0].mat);
-        if (!comp[0].mat.maps) e.color.copy(comp[0].color);
-        e.body.collider(0).setFriction(fr);
-        e.body.collider(0).setRestitution(re);
-      } else {
-        const body = this.world.createRigidBody(
-          RAPIER.RigidBodyDesc.dynamic().setTranslation(com.x, com.y, com.z));
-        this.world.createCollider(RAPIER.ColliderDesc.ball(R).setFriction(fr).setRestitution(re), body);
-        const skin = new PlanetSkin(R, bigComp[0]);
-        const mesh = new THREE.Mesh(this.lumpyUnitSphere(), skin.material);
-        mesh.castShadow = mesh.receiveShadow = true;
-        mesh.scale.setScalar(R);
-        mesh.position.copy(com);
-        this.scene.add(mesh);
-        this.customMeshes.push(mesh);
-        e = {
-          id: this.nextId++, kind: 'custom', body, size: R, mat: comp[0].mat,
-          color: comp[0].color.clone(), texRepeat: [1, 1],
-          prevPos: com.clone(), prevQuat: new THREE.Quaternion(),
-          currPos: com.clone(), currQuat: new THREE.Quaternion(),
-          lastVel: new THREE.Vector3(), accel: new THREE.Vector3(),
-          bbCenter: new THREE.Vector3(), bbHalf: new THREE.Vector3(R, R, R),
-          mesh, volume: V, skin,
-        };
-        mesh.userData.entity = e;
-        this.entities.push(e);
-        this.registerColliders(e);
-        // big's own minors scatter (no impact history to honor on a fresh build); the newcomer
-        // lands where it hit — a fresh body starts at identity, so the world dir IS the local dir
-        for (let k = 1; k < bigComp.length; k++) {
-          this.paintImpact(skin, [bigComp[k]], new THREE.Vector3().randomDirection(), V, R);
-        }
-        this.paintImpact(skin, smallComp, dirWorld, V, R);
-        skin.refreshScalars(comp);
+      // a fresh accreted body is round-ish → a ball-collider dynamic body; applyAccretedForm then
+      // gives it the right visual form (skinned / pure-lumpy / tiny pool sphere)
+      const body = this.world.createRigidBody(
+        RAPIER.RigidBodyDesc.dynamic().setTranslation(com.x, com.y, com.z));
+      this.world.createCollider(RAPIER.ColliderDesc.ball(R).setFriction(fr).setRestitution(re), body);
+      e = {
+        id: this.nextId++, kind: 'sphere', body, size: R, mat: comp[0].mat,
+        color: comp[0].color.clone(), texRepeat: [2, 1],
+        prevPos: com.clone(), prevQuat: new THREE.Quaternion(),
+        currPos: com.clone(), currQuat: new THREE.Quaternion(),
+        lastVel: new THREE.Vector3(), accel: new THREE.Vector3(),
+        bbCenter: new THREE.Vector3(), bbHalf: new THREE.Vector3(R, R, R),
+        volume: V,
+      };
+      this.entities.push(e);
+      this.registerColliders(e);
+      this.getPool('sphere', comp[0].mat); // in case it stays a tiny instanced sphere
+      this.applyAccretedForm(e, R, comp, bigComp, V);
+      if (e.skin) {
+        // a fresh body starts at identity rotation, so the world impact dir IS the local dir
+        this.paintImpact(e.skin, smallComp, dirWorld, V, R);
+        e.skin.refreshScalars(comp);
       }
     }
     e.comp = comp;

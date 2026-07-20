@@ -149,6 +149,22 @@ A checklist so nothing is lost. `[x]` = in Phase 1 today · `[ ]` = planned (wit
       points; the ball collider stays honest at this amplitude). Drag anchor speed 40 → 250 m/s:
       the held object tracks the cursor 1:1 at any human speed (20 m crossed in 5 steps vs ~50)
       while staying bounded — no teleport-fling, and MAX_SPEED still caps the released throw.
+- [x] **Floor slams, hammer breakage & no-sphere reaccretion** (2026-07-20) — three breakage
+      refinements. (1) **Hitting the floor hard shatters** — the ground is an infinite-mass
+      impactor, so specific energy Q = ½·v_down² (mass cancels); thresholded 2.5× a body-body hit,
+      so stone survives a casual drop but shatters from ~8 m (measured: stone whole at 4.4/7.7 m/s,
+      breaks at 12.5; brittle ice cracks at 6.3; tough steel survives 14). (2) **Drag-impact
+      breakage** — a grabbed object can smash what it rams while staying whole itself (breakage is
+      per-target: `canBreak` excludes the held/frozen body) — verified: a held hammer shattered a
+      stone target into debris and survived. (3) **A destroyed-and-reassembled sphere never looks
+      like a sphere again** — every accreted body ≥0.5 m now gets a lumpy custom mesh (even
+      pure-material ones, which used to stay perfect pool spheres), with bumpiness that FADES as it
+      grows, so a small reassembled body reads as a rubble asteroid while only large, naturally
+      grown planets round out (verified: 600 pure-stone pebbles → one R=4.3 planet at 3.5%
+      lumpiness = smooth; a shattered stone ball re-accretes to a visibly irregular ×12 asteroid).
+      Direction-pure displacement keeps the equirect skin aligned; mixed skinned accretion, craters,
+      and mass conservation all intact; a 600-object pure storm runs at mean 0.52 ms/step, peak 95
+      custom meshes.
 - [x] **Pause + time scale** (World panel): ⏸ Pause freezes the physics accumulator (render loop
       keeps running); a ×0.1–×3 slider multiplies WALL time fed into the accumulator — physics
       always steps its fixed 1/60 s, so impulses, forces, and thresholds are IDENTICAL at any
