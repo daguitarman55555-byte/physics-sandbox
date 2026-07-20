@@ -509,6 +509,14 @@ function buildPanel(sandbox: Sandbox) {
     sandbox.setAccretion(on);
     bAccrete.classList.toggle('primary', on);
   };
+  // impact breakage: the destructive half of the accretion lifecycle
+  const bBreak = el('button', '💥 Breakage', 'mini');
+  bBreak.title = 'Violent impacts shatter bodies into debris that inherits their materials';
+  bBreak.onclick = () => {
+    const on = !sandbox.breakage;
+    sandbox.setBreakage(on);
+    bBreak.classList.toggle('primary', on);
+  };
   // planet texture detail: HD = full-grain 2048px skins (~25 MB GPU each); off = 4× smaller
   const bHD = el('button', '✨ HD skins', 'mini primary');
   bHD.title = 'Maximum texture detail on accreted planets — turn off on weaker machines';
@@ -517,7 +525,7 @@ function buildPanel(sandbox: Sandbox) {
     sandbox.setSkinDetail(hi);
     bHD.classList.toggle('primary', hi);
   };
-  sgRow.append(bSelf, bAccrete, bHD);
+  sgRow.append(bSelf, bAccrete, bBreak, bHD);
   worldBody.append(sgRow);
 
   // time controls: pause, and a wall-time multiplier. Physics always steps its fixed 1/60 s —

@@ -270,6 +270,36 @@ export class PlanetSkin {
   }
 
   /**
+   * An impact SCAR (no new material): a dark translucent cap + rim on the albedo layer where a
+   * fast-but-not-shattering hit landed. Skipped near the poles, where the ellipse approximation
+   * degenerates — a rare miss beats a smeared wedge.
+   */
+  crater(dirLocal: THREE.Vector3, radiusM: number, planetR: number) {
+    const th0 = Math.acos(THREE.MathUtils.clamp(dirLocal.y, -1, 1));
+    const alpha = Math.max(radiusM / planetR, 0.02);
+    if (th0 < alpha + 0.25 || Math.PI - th0 < alpha + 0.25) return;
+    const u = (Math.atan2(dirLocal.z, -dirLocal.x) / (2 * Math.PI) + 1) % 1;
+    const L = this.layers[0];
+    const W = L.canvas.width, H = L.canvas.height;
+    const r = radiusM * this.pxPerM(L, planetR);
+    const widen = 1 / Math.max(Math.sin(th0), 0.18);
+    const px = u * W, py = (th0 / Math.PI) * H;
+    for (const wrap of [0, -W, W]) {
+      L.ctx.fillStyle = 'rgba(0,0,0,0.26)';
+      L.ctx.beginPath();
+      L.ctx.ellipse(px + wrap, py, r * widen, r, 0, 0, Math.PI * 2);
+      L.ctx.fill();
+      L.ctx.strokeStyle = 'rgba(0,0,0,0.32)';
+      L.ctx.lineWidth = Math.max(1.5, r * 0.18);
+      L.ctx.beginPath();
+      L.ctx.ellipse(px + wrap, py, r * 1.05 * widen, r * 1.05, 0, 0, Math.PI * 2);
+      L.ctx.stroke();
+    }
+    this.dirty = true;
+    this.thumb = null;
+  }
+
+  /**
    * If the planet has outgrown its texel density (radius grew past what the canvas covers at
    * TARGET_PXM), upscale every layer in place — old paint blurs slightly, new splats land crisp.
    * A no-op once the MAX_W cap is reached, so it fires at most a couple of times per planet.

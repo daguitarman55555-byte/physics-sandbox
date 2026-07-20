@@ -677,6 +677,45 @@ import won't stick; patch via Object.getPrototypeOf(window.sandbox) instead. (c)
 `Get-Content`/`Set-Content` round-trips MANGLE UTF-8 (reads as ANSI → 137 mojibake sites in
 sandbox.ts) — never bulk-edit sources with PS; the recovery script (reverse cp1252 round-trip) is
 scratchpad/fix-mojibake.mjs if it ever happens again.
+IMPACT BREAKAGE SHIPPED (2026-07-20): "💥 Breakage" World toggle, independent of accretion, riding
+the same collision-event drain (drainContactMerges → renamed drainContactEvents, gated on EITHER
+toggle; events.clear() when both off). THREE REGIMES per contact-started pair: capture (accretion,
+post-bounce speed ≤ max(2, 0.7·vEsc)) → shatter (breakage) → bounce+crater. DAMAGE uses PRE-impact
+closing speed from lastVel (the post-step drain sees post-bounce velocities — judging damage by
+those would make bouncy rubber break easier than brittle ice; lastVel holds each body's velocity
+from BEFORE this step, exactly the pre-impact value, no restitution guesswork). E = ½μv², per-body
+Q = E/m (the smaller body of a pair takes the worse specific beating — a pebble explodes against a
+planet that barely notices, for free); threshold = BREAK_Q(18)·strengthOf(e) + (selfGravityOn ?
+0.15·vEsc² : 0) — `Material.strength` is NEW (ice 0.4, wood 0.7, stone 1.2, rubber 2.5, steel 3;
+volume-weighted over comp). shatter(): volume split w0≈0.38-0.58 remnant + shards (crumbs < 0.12
+fold back), fragments placed inside the parent radius, collider density = parent M/V (mass exact
+WITHOUT trusting same-tick mass reads), comp scaled per fragment (re-accretion regrows the same
+mixed planet — verified round trip: shattered planet's debris re-fused to "accreted ×36" with the
+same stone/steel/wood split), velocities = parent v₀ + ω×r + energy-scaled radial kick with the
+remnant absorbing counter-momentum (total momentum exact), fragments get mergedTick = tick (no
+same-step re-merge). POTATO DEBRIS: fragments R ≥ 0.5 get displaced-sphere meshes (potatoGeometry:
+3 random low-frequency radial sine waves, displacement a pure function of DIRECTION so UV-seam
+duplicate vertices stay welded; computeVertexNormals) via finishCustomEntity + ball collider —
+looks like an asteroid, rolls like a ball; TRUE irregular colliders (convex hulls + the exact
+polyhedron mass path from shapes.ts) and LUMPY ACCRETED PLANETS are the agreed NEXT slice (Rafael
+2026-07-20; planet lumpiness must reconcile with the equirect skin + in-place growth — displaced
+unit sphere keeps UVs, so it's mesh-side feasible; collider stays ball until the hull path lands).
+CRATERS: PlanetSkin.crater() = dark translucent cap + rim on the albedo layer at the impact dir
+(pole-guarded); painted whenever the BIGGER body survives a > 5 m/s hit — including when the
+impactor shatters against it (first cut skipped that case and looked broken); impact geometry is
+captured BEFORE any shatter deletes a body (small.body.translation() after deletion = invalid
+handle). Caps: BREAKS_PER_STEP 2, BREAK_MIN_R 0.3, +8-entity headroom guard vs MAX_INSTANCES.
+VERIFIED LIVE: stone pair @14 m/s closing → 8 debris, mass 2.72→2.72; @6 m/s → bounce; wood pebble
+vs skinned planet → pebble shatters, planet survives with an on-screen crater ring at the exact
+impact point; steel slug @26 m/s → accreted planet blown into 10 potatoes (screenshot: proper
+asteroid look); full lifecycle mass-exact; 500-object all-three-systems storm mean 1.89 ms/step
+worst 85 ms, console clean. GOTCHA that burned 20 min: a build-the-scene loop `while (n>1 && s<cap)`
+can exit on the CAP with stragglers still flying — the "planet wouldn't shatter" mystery was the
+slug hitting leftover pellets en route (energy spent before arrival), not a code bug; assert n===1
+before staging the next phase of a test. Honest notes: fast shards can sail below VOID_Y and get
+culled (existing off-world cleanup — ~0.3% mass in one violent test; deletion, not a bug); floor
+impacts don't break anything yet (the floor isn't an entity pair — future: treat static-collider
+hits as infinite-mass impacts).
 LIKELY NEXT: motion STREAKS for tracers; affected-object glow/tint; per-object trails; drawpad per-axis
 ortho cam. NB screenshotting a 500ms shockwave: pin `S.shocks[0].born = now-190` on an interval.
 Research dossier: docs/FORCES_RESEARCH.md.

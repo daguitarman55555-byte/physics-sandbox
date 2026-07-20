@@ -119,7 +119,26 @@ A checklist so nothing is lost. `[x]` = in Phase 1 today · `[ ]` = planned (wit
       before Rapier finalized the first and DOUBLED the planet's mass per absorb, compounding
       ×1000); density written once per merge; persistent collider→entity index instead of per-call
       map rebuilds; event-driven merges capped at 4/step.
-- [x] **Pause + time scale** (World panel): ⏸ Pause freezes the physics accumulator (render loop
+- [x] **💥 Impact breakage** (World toggle, independent of accretion) — the destructive half of the
+      lifecycle. A hit whose SPECIFIC energy (½μv²/m, PRE-impact speeds via lastVel — post-bounce
+      speeds would make bouncy rubber break easier than brittle ice) exceeds the body's strength
+      shatters it: threshold = 18 J/kg × material strength (new `Material.strength`: ice 0.4 brittle
+      → steel 3 tough; mixed bodies volume-weight it) + a self-gravity binding term when mutual
+      gravity is on (planets under strong G are properly harder to disrupt). Fragments conserve
+      volume and mass exactly (parent's density), inherit the parent's full composition (so debris
+      re-accretes into the same mixed planet — verified round trip), ride the parent's rigid-body
+      velocity field (v = v₀ + ω×r) plus an energy-scaled radial ejection with the remnant absorbing
+      the counter-momentum. Big chunks (R ≥ 0.5) wear lumpy displaced-sphere **potato meshes**
+      (asteroid look; ball colliders — true irregular colliders are the planned next slice, along
+      with lumpy accreted planets); small shards stay instanced. Mid-energy hits BOUNCE and leave a
+      dark **crater scar** at the impact point on a skinned planet (painted even when the impactor
+      itself shattered against it). Caps: 2 breaks/step, min fragment 0.3 that can re-break, no
+      fragments if near the instance limit. Verified live: 14 m/s pebble pair shatters (6 m/s pair
+      bounces), pebble explodes against a planet leaving a crater, a steel slug blows a mixed planet
+      into 10 potatoes + shards, debris re-accretes to a skinned planet with the SAME composition,
+      mass exact through the whole cycle; 500-object gravity+accretion+breakage storm runs at mean
+      1.9 ms/step. Honest note: shards flung below the void plane are culled by the existing
+      off-world cleanup (~0.3% mass in one violent test) — deletion, not a conservation bug.
       keeps running); a ×0.1–×3 slider multiplies WALL time fed into the accumulator — physics
       always steps its fixed 1/60 s, so impulses, forces, and thresholds are IDENTICAL at any
       speed; slow-mo/fast-forward only changes how many steps run per wall second. MAX_CATCHUP

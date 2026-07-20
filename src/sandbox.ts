@@ -126,6 +126,16 @@ const IMPACT_MERGES_PER_STEP = 4; // cap on event-driven merges per step. Uncapp
 const PLANET_NO_CCD_R = 1.2; // bodies past this radius never get CCD: a big ball can't tunnel (it
 //                              travels ≤1 m per step at the speed cap), and CCD on a large collider
 //                              overlapping a crowd is Rapier's worst case
+// Impact breakage: a hit whose SPECIFIC energy (½μv²/m, PRE-impact velocities via lastVel — using
+// post-bounce speeds would make bouncy rubber break easier than brittle ice) exceeds the body's
+// strength shatters it into volume-conserving fragments that inherit its composition.
+const BREAK_Q = 18; // J/kg per strength unit — pebble pairs shatter at ~12 m/s closing, not at ~8
+const BREAK_BINDING = 0.15; // × v_esc² added when mutual gravity is on: self-gravity resists disruption
+const BREAK_MIN_R = 0.3; // fragments below this never re-shatter — no infinite dust
+const BREAKS_PER_STEP = 2;
+const CRATER_SPEED = 5; // m/s — bounce-regime hits above this scar a skinned planet's surface
+const DEBRIS_POTATO_R = 0.5; // fragments this big get a lumpy displaced-sphere mesh (ball collider)
+
 const CCD_SPEED = Infinity; // CCD is fully DISABLED. Always-on CCD was THE 1000-object accretion
 //    lag: a gravity-compressed clump measured 873 ms per world.step vs 0.2 ms without — a ~4000×
 //    cliff — and even a 20 m/s adaptive threshold re-triggered it (deep-overlap ejections are
@@ -166,6 +176,7 @@ export class Sandbox {
   private accretionOn = false;
   private accreteTick = 0;
   private skinBudget = 0; // reset each accretion check; consumed by merges that must BUILD a skin
+  private breakageOn = false; // impact breakage — the destructive half of the accretion lifecycle
   // Collision events feed IMPACT-time accretion: in zero-G a thrown body bounces off a planet in
   // 1–3 steps, far between the 6 Hz scans — the event queue catches the touch at the exact step.
   // (Also the future home of impact breakage: it needs per-impact energies from the same events.)
@@ -1708,6 +1719,8 @@ export class Sandbox {
     this.accretionOn = on;
     if (on) this.skinBudget = ACCRETE_SKIN_BUDGET; // impact merges may fire before the first 6 Hz check
   }
+  get breakage() { return this.breakageOn; }
+  setBreakage(on: boolean) { this.breakageOn = on; }
   get skinDetail() { return skinDetailHigh(); }
   setSkinDetail(hi: boolean) { setSkinDetailFlag(hi); }
   get isPaused() { return this.paused; }
@@ -1815,17 +1828,13 @@ export class Sandbox {
   }
 
   /**
-   * One accretion pass: walk Rapier's live contact graph, pair up touching bodies whose relative
-   * speed is below ACCRETE_SPEED (fast impacts bounce — only lingering contact fuses, like real
-   * planetesimals), and merge a few of them. Capped per check so a clump melts into a planet over
-   * seconds instead of snapping into one in a single frame.
+   * Impact resolution, run right after world.step over every collision that STARTED this step.
+   * Three regimes by energy: slow touches CAPTURE (accretion), violent hits SHATTER (breakage),
+   * and the in-between BOUNCES — scarring a skinned planet with a crater. Capture tests the
+   * post-bounce speed (a rebound that can't escape sticks); damage uses PRE-impact speeds from
+   * lastVel — judging by post-bounce speed would make bouncy rubber break easier than brittle ice.
    */
-  /**
-   * Impact-time accretion, run right after world.step: every collision that STARTED this step is
-   * a capture candidate. The speed test sees post-bounce velocities (restitution already applied),
-   * which is the physical capture criterion — a slow rebound can't escape and sticks.
-   */
-  private drainContactMerges() {
+  private drainContactEvents() {
     const pairs: Array<[Entity, Entity]> = [];
     this.events.drainCollisionEvents((h1: number, h2: number, started: boolean) => {
       if (!started) return;
@@ -1834,21 +1843,178 @@ export class Sandbox {
       pairs.push([a, b]);
     });
     if (pairs.length === 0) return;
-    let merges = 0;
+    let merges = 0, breaks = 0;
     for (const [a, b] of pairs) {
-      if (merges >= IMPACT_MERGES_PER_STEP) break;
-      // an earlier merge this step may have consumed either body (its rigid body is then gone)
+      // an earlier merge/shatter this step may have consumed either body
       if (!a.body.isValid() || !b.body.isValid()) continue;
       // one merge per body per STEP: a second same-step merge reads mass() before Rapier
       // finalized the first and the planet's mass compounds (measured ×2 per absorb)
       if (a.mergedTick === this.tick || b.mergedTick === this.tick) continue;
       if (!this.canAccrete(a) || !this.canAccrete(b) || this.jointed(a, b)) continue;
+      const ma = a.body.mass(), mb = b.body.mass();
+      if (!(ma > 0) || !(mb > 0)) continue;
       const va = a.body.linvel(), vb = b.body.linvel();
-      const vEsc = Math.sqrt((2 * this.selfG * (a.body.mass() + b.body.mass())) / (a.size + b.size));
-      if (Math.hypot(va.x - vb.x, va.y - vb.y, va.z - vb.z) > Math.max(ACCRETE_SPEED, 0.7 * vEsc)) continue;
-      this.mergePair(a, b);
-      merges++;
+      const vPost = Math.hypot(va.x - vb.x, va.y - vb.y, va.z - vb.z);
+      const vEsc2 = (2 * this.selfG * (ma + mb)) / (a.size + b.size);
+      if (this.accretionOn && merges < IMPACT_MERGES_PER_STEP
+        && vPost <= Math.max(ACCRETE_SPEED, 0.7 * Math.sqrt(vEsc2))) {
+        this.mergePair(a, b);
+        merges++;
+        continue;
+      }
+      if (!this.breakageOn) continue;
+      const vPre = Math.hypot(
+        a.lastVel.x - b.lastVel.x, a.lastVel.y - b.lastVel.y, a.lastVel.z - b.lastVel.z);
+      const E = 0.5 * ((ma * mb) / (ma + mb)) * vPre * vPre; // impact energy in the pair frame
+      const binding = this.selfGravityOn ? BREAK_BINDING * vEsc2 : 0; // self-gravity resists disruption
+      // capture the impact geometry BEFORE any shatter deletes a body
+      const pa = a.body.translation(), pb = b.body.translation();
+      const big = this.volumeOf(a) >= this.volumeOf(b) ? a : b;
+      const smallSize = (big === a ? b : a).size;
+      const impactDir = new THREE.Vector3(
+        big === a ? pb.x - pa.x : pa.x - pb.x,
+        big === a ? pb.y - pa.y : pa.y - pb.y,
+        big === a ? pb.z - pa.z : pa.z - pb.z);
+      for (const [tgt, m] of [[a, ma], [b, mb]] as Array<[Entity, number]>) {
+        if (breaks >= BREAKS_PER_STEP || tgt.size < BREAK_MIN_R) continue;
+        const Q = E / m; // specific energy: the SMALLER body of a pair takes the worse beating
+        const thr = BREAK_Q * this.strengthOf(tgt) + binding;
+        if (Q > thr) {
+          this.shatter(tgt, Math.min(1 + 0.3 * Math.sqrt(Q - thr), 7));
+          breaks++;
+        }
+      }
+      // the bigger body survived a hard hit → an impact scar on its skin (the impactor may well
+      // have shattered against it — that's exactly when the scar should show)
+      if (vPre > CRATER_SPEED && big.skin && big.body.isValid() && impactDir.lengthSq() > 1e-9) {
+        const q = big.body.rotation();
+        impactDir.normalize()
+          .applyQuaternion(new THREE.Quaternion(q.x, q.y, q.z, q.w).invert());
+        big.skin.crater(impactDir, Math.max(0.35, smallSize * 1.3), big.size);
+      }
     }
+  }
+
+  /** Impact-shatter resistance: the volume-weighted strength of everything the body is made of. */
+  private strengthOf(e: Entity): number {
+    const comp = this.compOf(e);
+    const total = comp.reduce((s, c) => s + c.vol, 0) || 1;
+    let s = 0;
+    for (const c of comp) s += (c.vol / total) * (c.mat.strength ?? 1);
+    return s;
+  }
+
+  /**
+   * Shatter a body into volume-conserving fragments that inherit its composition and density
+   * (total mass exact), its rigid-body velocity field (v = v₀ + ω×r), and a radial ejection kick
+   * scaled by the excess impact energy — with the big remnant absorbing the shards' counter-
+   * momentum so the total is unchanged. Big chunks get a lumpy potato mesh; small ones stay in
+   * the cheap instanced pools.
+   */
+  private shatter(e: Entity, vEj: number) {
+    const M = e.body.mass();
+    const V = this.volumeOf(e);
+    if (!(M > 0) || !(V > 0)) return;
+    if (this.entities.length + 8 >= MAX_INSTANCES) return; // no room for fragments — it survives
+    const t = e.body.translation(), vl = e.body.linvel(), w = e.body.angvel();
+    const center = new THREE.Vector3(t.x, t.y, t.z);
+    const parentVel = new THREE.Vector3(vl.x, vl.y, vl.z);
+    const spin = new THREE.Vector3(w.x, w.y, w.z);
+    const R0 = e.size;
+    const density = M / V;
+    const comp = this.compOf(e);
+    const totalCompVol = comp.reduce((s, c) => s + c.vol, 0) || 1;
+
+    // volume split: one big remnant + shards; sub-0.12 m crumbs fold back into the remnant
+    const n = Math.min(3 + Math.floor(R0 * 2), 7);
+    const w0 = 0.38 + Math.random() * 0.2;
+    const raws: number[] = [];
+    for (let i = 1; i < n; i++) raws.push(0.3 + Math.random());
+    const rSum = raws.reduce((s, x) => s + x, 0) || 1;
+    const vols = [V * w0, ...raws.map((r) => (V * (1 - w0) * r) / rSum)];
+    const radius = (vol: number) => Math.cbrt((3 * vol) / (4 * Math.PI));
+    for (let i = vols.length - 1; i >= 1; i--) {
+      if (radius(vols[i]) < 0.12) { vols[0] += vols[i]; vols.splice(i, 1); }
+    }
+
+    this.deleteEntity(e);
+
+    const recoil = new THREE.Vector3();
+    const frags: Array<{ ent: Entity; vel: THREE.Vector3 }> = [];
+    for (let i = 0; i < vols.length; i++) {
+      const Ri = radius(vols[i]);
+      const dir = i === 0 ? new THREE.Vector3() : new THREE.Vector3().randomDirection();
+      const pos = center.clone()
+        .addScaledVector(dir, i === 0 ? 0 : Math.max(0, R0 - Ri) * (0.4 + Math.random() * 0.5));
+      const frag = this.makeDebris(Ri, pos, comp, totalCompVol, density);
+      const vi = parentVel.clone()
+        .add(new THREE.Vector3().crossVectors(spin, pos.clone().sub(center)));
+      if (i > 0) {
+        const kick = vEj * (0.5 + Math.random() * 0.7);
+        vi.addScaledVector(dir, kick);
+        recoil.addScaledVector(dir, -kick * density * vols[i]);
+      }
+      frags.push({ ent: frag, vel: vi });
+    }
+    frags[0].vel.addScaledVector(recoil, 1 / (density * vols[0]));
+    for (const { ent, vel } of frags) {
+      ent.body.setLinvel({ x: vel.x, y: vel.y, z: vel.z }, true);
+      ent.body.setAngvel({ x: spin.x, y: spin.y, z: spin.z }, true);
+      ent.lastVel.copy(vel);
+      ent.mergedTick = this.tick; // fragments settle for a step before they can merge again
+    }
+  }
+
+  /**
+   * One debris fragment: composition = the parent's mix scaled to this volume, collider density =
+   * the parent's (mass conservation without trusting same-tick mass reads). Big chunks wear a
+   * displaced-sphere "potato" mesh (ball collider — true irregular colliders are a later slice);
+   * small shards stay instanced pool spheres.
+   */
+  private makeDebris(R: number, pos: THREE.Vector3, parentComp: CompEntry[], totalVol: number, density: number): Entity {
+    const Vi = (4 / 3) * Math.PI * R ** 3;
+    const comp = parentComp.map((c) => ({ mat: c.mat, vol: (c.vol / totalVol) * Vi, color: c.color.clone() }));
+    const dom = comp[0];
+    let e: Entity;
+    if (R >= DEBRIS_POTATO_R) {
+      const body = this.world.createRigidBody(
+        RAPIER.RigidBodyDesc.dynamic().setTranslation(pos.x, pos.y, pos.z));
+      this.world.createCollider(
+        RAPIER.ColliderDesc.ball(R).setFriction(dom.mat.friction).setRestitution(dom.mat.restitution), body);
+      e = this.finishCustomEntity(body, this.potatoGeometry(R), pos, R, Vi, 'debris', dom.mat, [2, 1]);
+      if (!dom.mat.maps) (e.mesh!.material as THREE.MeshStandardMaterial).color.copy(dom.color);
+    } else {
+      e = this.spawn('sphere', pos, R, dom.mat);
+      e.label = 'debris';
+    }
+    if (!dom.mat.maps) e.color.copy(dom.color);
+    e.comp = comp;
+    e.body.collider(0).setDensity(density);
+    return e;
+  }
+
+  /** A lumpy rock: sphere geometry displaced radially by a few random low-frequency waves. The
+   *  displacement is a pure function of direction, so UV-seam duplicate vertices stay welded. */
+  private potatoGeometry(R: number): THREE.BufferGeometry {
+    const geo = new THREE.SphereGeometry(R, 24, 16);
+    const p = geo.attributes.position as THREE.BufferAttribute;
+    const dirs = [
+      new THREE.Vector3().randomDirection(),
+      new THREE.Vector3().randomDirection(),
+      new THREE.Vector3().randomDirection(),
+    ];
+    const ph = [Math.random() * 6.28, Math.random() * 6.28, Math.random() * 6.28];
+    const v = new THREE.Vector3();
+    for (let i = 0; i < p.count; i++) {
+      v.set(p.getX(i), p.getY(i), p.getZ(i)).normalize();
+      const bump = 1
+        + 0.16 * Math.sin(v.dot(dirs[0]) * 3.1 + ph[0])
+        + 0.1 * Math.sin(v.dot(dirs[1]) * 5.3 + ph[1])
+        + 0.07 * Math.sin(v.dot(dirs[2]) * 8.7 + ph[2]);
+      p.setXYZ(i, p.getX(i) * bump, p.getY(i) * bump, p.getZ(i) * bump);
+    }
+    geo.computeVertexNormals();
+    return geo;
   }
 
   private stepAccretion() {
@@ -2163,9 +2329,9 @@ export class Sandbox {
 
     this.world.step(this.events);
 
-    // impact-time accretion: fuse capturable touches the step they happen — in zero-G a thrown
-    // body bounces off within a step or two, far between the 6 Hz scans
-    if (this.accretionOn) this.drainContactMerges();
+    // impact resolution (capture / shatter / crater) the step contacts happen — in zero-G a
+    // thrown body bounces off within a step or two, far between the 6 Hz scans
+    if (this.accretionOn || this.breakageOn) this.drainContactEvents();
     else this.events.clear();
 
     for (const e of this.entities) {
