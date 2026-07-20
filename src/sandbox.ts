@@ -58,6 +58,10 @@ export interface Entity {
   accreted?: number; // how many original bodies this one is fused from (accretion merging)
   comp?: CompEntry[]; // what it's made of, by volume (accretion tracks every material it eats)
   skin?: PlanetSkin; // persistent painted surface (mixed accreted planets) — impacts land where they hit
+  ccdOn?: boolean; // adaptive CCD state (see stepPhysics) — cached so we only call into WASM on change
+  mergedTick?: number; // last physics step this body took part in a merge — one merge per body per
+  //                      step, or the second merge reads mass() before Rapier finalized the first
+  //                      (measured: a planet's mass DOUBLED per absorb, compounding to ×1000)
 }
 
 export type Tool = 'grab' | 'connect' | 'freeze' | 'push' | 'brush';
@@ -114,6 +118,21 @@ const SKIN_MIN_R = 0.8; // planets this big paint EVERY foreign bite where it la
 const ACCRETE_SKIN_BUDGET = 1; // skin BIRTHS per check — creating one is 4 full canvas fills (the
 //                                remaining per-step spike), so they're strictly one per check; an
 //                                over-budget pair stays touching and fuses a sixth of a second later
+const IMPACT_MERGES_PER_STEP = 4; // cap on event-driven merges per step. Uncapped, a collapsing
+//                                   1000-body cloud merges dozens per STEP — the planet grows so
+//                                   fast it envelops neighbours in deep overlap every step, and the
+//                                   solver grinds to hundreds of ms (measured: a locked-up tab).
+//                                   Excess pairs stay in contact and fuse via the 6 Hz scan.
+const PLANET_NO_CCD_R = 1.2; // bodies past this radius never get CCD: a big ball can't tunnel (it
+//                              travels ≤1 m per step at the speed cap), and CCD on a large collider
+//                              overlapping a crowd is Rapier's worst case
+const CCD_SPEED = Infinity; // CCD is fully DISABLED. Always-on CCD was THE 1000-object accretion
+//    lag: a gravity-compressed clump measured 873 ms per world.step vs 0.2 ms without — a ~4000×
+//    cliff — and even a 20 m/s adaptive threshold re-triggered it (deep-overlap ejections are
+//    exactly the fast bodies). It's safe to drop: MAX_SPEED 60 → ≤1 m/step, and the floor slab is
+//    1 m thick, so a body can never step fully across it; pebble-vs-pebble tunneling at extreme
+//    speed is cosmetic and the VOID_Y net catches anything weird. The adaptive toggle below stays
+//    wired — lower this threshold again if a thin static collider ever enters the scene.
 
 const PALETTE = ['#5b8def', '#4fb89a', '#c9bb3a', '#e89948', '#dc4a4a', '#a978e0'];
 
@@ -151,6 +170,12 @@ export class Sandbox {
   // 1–3 steps, far between the 6 Hz scans — the event queue catches the touch at the exact step.
   // (Also the future home of impact breakage: it needs per-impact energies from the same events.)
   private events!: RAPIER.EventQueue;
+  // persistent collider-handle → entity index (kept current by registerColliders/unregister) — the
+  // event drain and the 6 Hz scan used to rebuild this per call, thousands of inserts per step in
+  // a settling pile
+  private colliderToEntity = new Map<number, Entity>();
+
+  private tick = 0; // physics step counter — gates one merge per body per step (see mergedTick)
 
   // Time controls: pause freezes the accumulator; timeScale multiplies the WALL time fed into it.
   // Physics always steps at FIXED dt — impulses, field forces, and thresholds never see the scale —
@@ -436,8 +461,8 @@ export class Sandbox {
       RAPIER.RigidBodyDesc.dynamic()
         .setTranslation(p.x, p.y, p.z)
         .setLinvel((Math.random() - 0.5) * 2, 0, (Math.random() - 0.5) * 2)
-        .setAngvel({ x: Math.random(), y: Math.random(), z: Math.random() })
-        .setCcdEnabled(true), // prevents tunneling through the thin ground collider at high speed
+        .setAngvel({ x: Math.random(), y: Math.random(), z: Math.random() }),
+      // CCD is ADAPTIVE (see stepPhysics): only fast small bodies carry it
     );
     const col =
       kind === 'box'
@@ -447,7 +472,6 @@ export class Sandbox {
     this.world.createCollider(
       col.setFriction(mat.friction).setRestitution(mat.restitution).setDensity(mat.density / 1000), body);
 
-    this.enableContactEvents(body);
     this.getPool(kind as 'box' | 'sphere', mat); // ensure the render pool exists
     const color = new THREE.Color(PALETTE[this.nextId % PALETTE.length]);
     const e: Entity = {
@@ -459,6 +483,7 @@ export class Sandbox {
       bbCenter: new THREE.Vector3(), bbHalf: new THREE.Vector3(s, s, s),
     };
     this.entities.push(e);
+    this.registerColliders(e);
     return e;
   }
 
@@ -490,7 +515,7 @@ export class Sandbox {
           { x: s.inertia.x, y: s.inertia.y, z: s.inertia.z },
           { x: 0, y: 0, z: 0, w: 1 },
         )
-        .setCcdEnabled(true),
+
     );
     // convex hull collider with zero density (mass comes from the exact tensor above)
     const hullDesc = RAPIER.ColliderDesc.convexHull(s.hull);
@@ -525,7 +550,7 @@ export class Sandbox {
         .setTranslation(p.x, p.y, p.z)
         .setAngvel({ x: (Math.random() - 0.5) * 1.5, y: (Math.random() - 0.5) * 1.5, z: (Math.random() - 0.5) * 1.5 })
         .setAdditionalMassProperties(s.mass, { x: 0, y: 0, z: 0 }, s.inertia, s.inertiaFrame)
-        .setCcdEnabled(true),
+
     );
     for (const cap of s.capsules) {
       this.world.createCollider(
@@ -577,7 +602,7 @@ export class Sandbox {
         .setTranslation(p.x, p.y, p.z)
         .setAngvel({ x: (Math.random() - 0.5) * 1.5, y: (Math.random() - 0.5) * 1.5, z: (Math.random() - 0.5) * 1.5 })
         .setAdditionalMassProperties(s.mass, { x: 0, y: 0, z: 0 }, s.inertia, s.inertiaFrame)
-        .setCcdEnabled(true),
+
     );
     let attached = 0;
     for (const slab of s.slabs) {
@@ -620,7 +645,7 @@ export class Sandbox {
         .setTranslation(p.x, p.y, p.z)
         .setAngvel({ x: (Math.random() - 0.5) * 1.5, y: (Math.random() - 0.5) * 1.5, z: (Math.random() - 0.5) * 1.5 })
         .setAdditionalMassProperties(s.mass, { x: 0, y: 0, z: 0 }, s.inertia, s.inertiaFrame)
-        .setCcdEnabled(true),
+
     );
     for (const b of s.boxes) {
       this.world.createCollider(
@@ -641,11 +666,18 @@ export class Sandbox {
     return { ok: true, entity: e };
   }
 
-  /** Every entity collider reports collision events — impact-time accretion (and breakage) feed. */
-  private enableContactEvents(body: RAPIER.RigidBody) {
-    for (let k = 0; k < body.numColliders(); k++) {
-      body.collider(k).setActiveEvents(RAPIER.ActiveEvents.COLLISION_EVENTS);
+  /** Register an entity's colliders: collision events on (impact-time accretion + future breakage)
+   *  and the handle→entity index updated. Call after every collider creation/replacement. */
+  private registerColliders(e: Entity) {
+    for (let k = 0; k < e.body.numColliders(); k++) {
+      const c = e.body.collider(k);
+      c.setActiveEvents(RAPIER.ActiveEvents.COLLISION_EVENTS);
+      this.colliderToEntity.set(c.handle, e);
     }
+  }
+
+  private unregisterColliders(e: Entity) {
+    for (let k = 0; k < e.body.numColliders(); k++) this.colliderToEntity.delete(e.body.collider(k).handle);
   }
 
   /** Shared tail for custom-geometry entities: mesh, registry entry, scene wiring. */
@@ -667,7 +699,6 @@ export class Sandbox {
 
     geometry.computeBoundingBox();
     const bb = geometry.boundingBox!;
-    this.enableContactEvents(body);
     const e: Entity = {
       id: this.nextId++, kind: 'custom', body, size: boundingRadius, mat, color,
       texRepeat: repeat,
@@ -679,6 +710,7 @@ export class Sandbox {
     };
     mesh.userData.entity = e;
     this.entities.push(e);
+    this.registerColliders(e);
     return e;
   }
 
@@ -1607,6 +1639,7 @@ export class Sandbox {
     if (this.grab?.entity === e) this.releaseGrab(); // before the body goes — the joint refs it
     this.removeJointsFor(e); // joints reference the body — drop them before it's gone
     if (this.connectA === e) this.connectA = null;
+    this.unregisterColliders(e); // while the handles are still alive
     this.world.removeRigidBody(e.body);
     if (e.mesh) {
       this.scene.remove(e.mesh);
@@ -1641,6 +1674,7 @@ export class Sandbox {
     }
     this.entities.length = 0;
     this.customMeshes.length = 0;
+    this.colliderToEntity.clear();
     this.selected = null;
   }
 
@@ -1793,38 +1827,33 @@ export class Sandbox {
    */
   private drainContactMerges() {
     const pairs: Array<[Entity, Entity]> = [];
-    let map: Map<number, Entity> | undefined;
     this.events.drainCollisionEvents((h1: number, h2: number, started: boolean) => {
       if (!started) return;
-      if (!map) { // built lazily, only on steps that actually have fresh contacts
-        map = new Map();
-        for (const e of this.entities) {
-          for (let k = 0; k < e.body.numColliders(); k++) map.set(e.body.collider(k).handle, e);
-        }
-      }
-      const a = map.get(h1), b = map.get(h2);
+      const a = this.colliderToEntity.get(h1), b = this.colliderToEntity.get(h2);
       if (!a || !b || a === b) return; // one side is the floor, or a self-pair
       pairs.push([a, b]);
     });
     if (pairs.length === 0) return;
+    let merges = 0;
     for (const [a, b] of pairs) {
-      // an earlier merge this step may have consumed either body
-      if (!this.entities.includes(a) || !this.entities.includes(b)) continue;
+      if (merges >= IMPACT_MERGES_PER_STEP) break;
+      // an earlier merge this step may have consumed either body (its rigid body is then gone)
+      if (!a.body.isValid() || !b.body.isValid()) continue;
+      // one merge per body per STEP: a second same-step merge reads mass() before Rapier
+      // finalized the first and the planet's mass compounds (measured ×2 per absorb)
+      if (a.mergedTick === this.tick || b.mergedTick === this.tick) continue;
       if (!this.canAccrete(a) || !this.canAccrete(b) || this.jointed(a, b)) continue;
       const va = a.body.linvel(), vb = b.body.linvel();
       const vEsc = Math.sqrt((2 * this.selfG * (a.body.mass() + b.body.mass())) / (a.size + b.size));
       if (Math.hypot(va.x - vb.x, va.y - vb.y, va.z - vb.z) > Math.max(ACCRETE_SPEED, 0.7 * vEsc)) continue;
       this.mergePair(a, b);
+      merges++;
     }
   }
 
   private stepAccretion() {
     this.skinBudget = ACCRETE_SKIN_BUDGET;
-    // collider handle → entity, for reading Rapier's contact graph (customs have several colliders)
-    const byCollider = new Map<number, Entity>();
-    for (const e of this.entities) {
-      for (let k = 0; k < e.body.numColliders(); k++) byCollider.set(e.body.collider(k).handle, e);
-    }
+    const byCollider = this.colliderToEntity; // maintained by registerColliders — no rebuild
     const used = new Set<Entity>();
     const merges: Array<[Entity, Entity]> = [];
     for (const e of this.entities) {
@@ -1836,6 +1865,7 @@ export class Sandbox {
           if (partner) return;
           const o = byCollider.get(other.handle);
           if (!o || o === e || used.has(o) || !this.canAccrete(o)) return;
+          if (o.mergedTick === this.tick || e.mergedTick === this.tick) return; // one merge per body per step
           if (this.jointed(e, o)) return; // welded/tethered pairs are constructions — never fuse them
           const va = e.body.linvel(), vb = o.body.linvel();
           const vEsc = Math.sqrt((2 * this.selfG * (e.body.mass() + o.body.mass())) / (e.size + o.size));
@@ -1920,10 +1950,12 @@ export class Sandbox {
       // the body's mass properties in this Rapier build (measured live: planets grew while their
       // mass froze near-constant, then the feather-weight giants flung the whole crowd into the
       // void). A fresh collider carrying density M/V is exact, same as the fresh-build path.
+      this.unregisterColliders(e);
       this.world.removeCollider(e.body.collider(0), false);
-      this.world.createCollider(
-        RAPIER.ColliderDesc.ball(R).setFriction(fr).setRestitution(re).setDensity(M / V), e.body);
-      this.enableContactEvents(e.body);
+      // density is set ONCE, in the common tail — setting it here too made two same-step mass
+      // updates that Rapier stacks instead of replacing (part of the mass-doubling bug)
+      this.world.createCollider(RAPIER.ColliderDesc.ball(R).setFriction(fr).setRestitution(re), e.body);
+      this.registerColliders(e);
       e.body.setTranslation({ x: com.x, y: com.y, z: com.z }, true);
       e.size = R; e.volume = V;
       e.bbCenter.set(0, 0, 0); e.bbHalf.setScalar(R);
@@ -1974,9 +2006,8 @@ export class Sandbox {
         e.body.collider(0).setRestitution(re);
       } else {
         const body = this.world.createRigidBody(
-          RAPIER.RigidBodyDesc.dynamic().setTranslation(com.x, com.y, com.z).setCcdEnabled(true));
+          RAPIER.RigidBodyDesc.dynamic().setTranslation(com.x, com.y, com.z));
         this.world.createCollider(RAPIER.ColliderDesc.ball(R).setFriction(fr).setRestitution(re), body);
-        this.enableContactEvents(body);
         const skin = new PlanetSkin(R, bigComp[0]);
         const mesh = new THREE.Mesh(new THREE.SphereGeometry(1, 64, 48), skin.material);
         mesh.castShadow = mesh.receiveShadow = true;
@@ -1995,6 +2026,7 @@ export class Sandbox {
         };
         mesh.userData.entity = e;
         this.entities.push(e);
+        this.registerColliders(e);
         // big's own minors scatter (no impact history to honor on a fresh build); the newcomer
         // lands where it hit — a fresh body starts at identity, so the world dir IS the local dir
         for (let k = 1; k < bigComp.length; k++) {
@@ -2006,6 +2038,7 @@ export class Sandbox {
     }
     e.comp = comp;
     e.accreted = count;
+    e.mergedTick = this.tick; // no second merge for this body until Rapier finalizes its mass
     e.label = `accreted ×${count}`;
     e.body.collider(0).setDensity(M / V); // exact mass conservation whatever the materials mixed
     e.body.setLinvel({ x: vel.x, y: vel.y, z: vel.z }, true);
@@ -2049,6 +2082,7 @@ export class Sandbox {
   }
 
   private stepPhysics() {
+    this.tick++;
     // save previous transforms for interpolation
     for (const e of this.entities) { e.prevPos.copy(e.currPos); e.prevQuat.copy(e.currQuat); }
     const lost: Entity[] = []; // entities that fell off the world this step — removed after the loop
@@ -2142,6 +2176,15 @@ export class Sandbox {
       if (speed > MAX_SPEED) {
         const k = MAX_SPEED / speed;
         e.body.setLinvel({ x: v.x * k, y: v.y * k, z: v.z * k }, true);
+      }
+
+      // ADAPTIVE CCD: tunnel protection engages only on small fast bodies. Always-on CCD was THE
+      // accretion-clump catastrophe (873 ms/step vs 0.2 measured) - slow bodies can't tunnel, and
+      // CCD across a dense overlapping crowd is Rapier's worst case.
+      const wantCcd = speed > CCD_SPEED && e.size < PLANET_NO_CCD_R && !e.frozen;
+      if (wantCcd !== !!e.ccdOn) {
+        e.body.enableCcd(wantCcd);
+        e.ccdOn = wantCcd;
       }
 
       const t = e.body.translation();

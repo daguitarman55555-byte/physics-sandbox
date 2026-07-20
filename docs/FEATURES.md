@@ -111,6 +111,14 @@ A checklist so nothing is lost. `[x]` = in Phase 1 today · `[ ]` = planned (wit
       between the 6 Hz scans and never fused; now it sticks the step it lands, with the capture
       test on post-bounce velocity = the physical criterion). **✨ HD skins toggle**: full-grain
       2048px planet maps vs 4× smaller for weak machines (applies to skins born after the switch).
+- [x] **Efficiency pass** (2026-07-19) — the 1000-object accretion storm: mean **2.0 ms/step**
+      (was 480–2300 ms and tab-locking), live fps pinned at the preview ceiling with one brief dip,
+      mass exact through 999 merges. Fixes: CCD fully disabled (a gravity-compressed clump measured
+      873 → 0.2 ms/step, ~4000×; safe — at the 60 m/s cap a body moves ≤1 m/step and can't skip the
+      1 m floor slab); one merge per body per physics step (a second same-step merge read mass()
+      before Rapier finalized the first and DOUBLED the planet's mass per absorb, compounding
+      ×1000); density written once per merge; persistent collider→entity index instead of per-call
+      map rebuilds; event-driven merges capped at 4/step.
 - [x] **Pause + time scale** (World panel): ⏸ Pause freezes the physics accumulator (render loop
       keeps running); a ×0.1–×3 slider multiplies WALL time fed into the accumulator — physics
       always steps its fixed 1/60 s, so impulses, forces, and thresholds are IDENTICAL at any

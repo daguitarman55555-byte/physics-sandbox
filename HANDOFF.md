@@ -643,6 +643,40 @@ loop or alpha>1 extrapolates the render (unbounded backlog at high scale otherwi
 frozen exactly while paused, moves on resume; drag yDrift 0; joint inherited; low-detail skin maps
 512 wide. NB a mid-edit HMR race left two stale "enableContactEvents is not a function" errors in
 the console history — the fresh load is clean (the tool's console log persists across navigations).
+EFFICIENCY PASS (2026-07-19) — the 1000-object accretion storm went from LOCKING THE TAB (steps
+measured at 480–2300 ms, one exec ran 400+ s) to mean 2.0 ms/step, worst ~110 ms, live fps pinned
+at the throttled tab's 30 with one brief 17 dip; 1000→1 planet with mass EXACT (3481→3481). Three
+root causes, found by phase instrumentation (world.step was 99% of a 15 s window — merge code was
+~1%):
+ (1) CCD. THE big one: always-on CCD in a gravity-compressed clump measured 873 ms/step vs 0.2 ms
+     with CCD off — ~4000×. Even a 20 m/s adaptive threshold re-triggered it (deep-overlap ejections
+     are exactly the fast bodies). CCD is now FULLY OFF (CCD_SPEED = Infinity; the adaptive toggle in
+     stepPhysics stays wired for the future): safe because MAX_SPEED 60 → ≤1 m/step vs the 1 m-thick
+     floor slab (can't step across), and VOID_Y catches strays. If a THIN static collider ever ships,
+     lower CCD_SPEED again.
+ (2) MASS-DOUBLING MERGE BUG: two merges hitting the same body in one STEP (possible since impact-
+     time capture) — the second reads body.mass() before Rapier finalized the first collider
+     replacement, and densities stack: a planet's mass DOUBLED per absorb, compounding to ×1000
+     (measured 3.6M kg on a 175 m³ planet; the feather... no, the LEAD balloon then wrecked the sim).
+     Fix: `Entity.mergedTick` + `Sandbox.tick` — ONE merge per body per physics step across BOTH
+     paths (scan + drain), and density is set ONCE (common tail only; the in-place collider desc no
+     longer sets it). Mass conservation re-verified exact through a full 1000-body storm.
+ (3) Persistent `colliderToEntity` map maintained by registerColliders/unregisterColliders (spawn,
+     finishCustomEntity, mergePair's replacements, deleteEntity, clear) — the event drain and 6 Hz
+     scan no longer rebuild a 1000-entry map per call; drain aliveness checks use body.isValid()
+     (O(1)) not entities.includes. Plus IMPACT_MERGES_PER_STEP=4 caps event-driven merges (uncapped,
+     dozens fired per step and the growing planet enveloped its neighbours in deep overlap every
+     step).
+TESTING GOTCHAS learned the hard way: (a) the browser exec tool KILLS scripts at its 30 s timeout —
+if that lands mid-world.step, Rapier's WASM is left mutably borrowed and EVERY later call throws
+"recursive use of an object … unsafe aliasing"; only a page reload clears it. Use TIME-BUDGETED
+loops (`while (performance.now()-t0 < 15000)`) that check between steps, and persist counters on
+`window` so a timeout can't lose them. (b) Vite may serve dynamic `import('/src/...')` a DIFFERENT
+module instance than the app's (HMR query strings) — prototype patches on classes from a console
+import won't stick; patch via Object.getPrototypeOf(window.sandbox) instead. (c) PowerShell 5.1
+`Get-Content`/`Set-Content` round-trips MANGLE UTF-8 (reads as ANSI → 137 mojibake sites in
+sandbox.ts) — never bulk-edit sources with PS; the recovery script (reverse cp1252 round-trip) is
+scratchpad/fix-mojibake.mjs if it ever happens again.
 LIKELY NEXT: motion STREAKS for tracers; affected-object glow/tint; per-object trails; drawpad per-axis
 ortho cam. NB screenshotting a 500ms shockwave: pin `S.shocks[0].born = now-190` on an interval.
 Research dossier: docs/FORCES_RESEARCH.md.
