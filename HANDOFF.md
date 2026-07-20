@@ -716,6 +716,25 @@ before staging the next phase of a test. Honest notes: fast shards can sail belo
 culled (existing off-world cleanup — ~0.3% mass in one violent test; deletion, not a bug); floor
 impacts don't break anything yet (the floor isn't an entity pair — future: treat static-collider
 hits as infinite-mass impacts).
+IRREGULAR SHAPES + 1:1 DRAG (2026-07-20): (1) DRAG anchor speed 40 → 250 m/s (the grab-anchor
+clamp in stepPhysics) — the held object now tracks the cursor exactly at any human speed (measured:
+20 m crossed in 5 steps vs ~50 before); still bounded so a violent flick can't teleport-fling, and
+MAX_SPEED caps the released throw. (2) DEBRIS HULL COLLIDERS: makeDebris's potato path now builds
+`ColliderDesc.convexHull(displaced mesh positions)` (ball fallback if degenerate) with
+`.setMass(density × nominal volume)` — exact mass WITHOUT knowing the hull's volume (the earlier
+setDensity approach would need it; setMass lets Rapier derive just the inertia from the shape).
+The hull's defining points go into `e.support` (exact drag floor-clamp). RESULT: chunks tumble and
+SETTLE like rocks — 9/9 asleep after a violent shatter+scatter, where ball colliders rolled forever
+(no rolling resistance in Rapier — this closes that long-standing note for debris). (3) LUMPY
+ACCRETED PLANETS: both planet-mesh sites in mergePair use `lumpyUnitSphere()` = displaceSphere(unit
+sphere 64×48, amps [0.055, 0.035, 0.022]) — same direction-pure displacement as potatoes (shared
+`displaceSphere` helper; potatoGeometry = amps [0.16, 0.1, 0.07] at 24×16), so UV-seam verts stay
+welded and the equirect SKIN survives — verified live: wood + steel splats land exactly at their
+impact points on a visibly lumpy planet. Planet colliders stay BALLS (honest at ±7%; hull planets
+would need hull-vs-growth handling — only do it if Rafael asks). Verified: mass exact through a
+hull-debris shatter (68.43 → 68.43), console clean. NB FEATURES.md gotcha: an insert-before edit
+ate the "Pause + time scale" HEADER line (old_string was the header, new_string forgot to re-append
+it) — restored; when inserting before an entry, always re-emit the displaced line.
 LIKELY NEXT: motion STREAKS for tracers; affected-object glow/tint; per-object trails; drawpad per-axis
 ortho cam. NB screenshotting a 500ms shockwave: pin `S.shocks[0].born = now-190` on an interval.
 Research dossier: docs/FORCES_RESEARCH.md.

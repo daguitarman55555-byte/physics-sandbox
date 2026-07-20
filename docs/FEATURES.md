@@ -139,6 +139,17 @@ A checklist so nothing is lost. `[x]` = in Phase 1 today · `[ ]` = planned (wit
       mass exact through the whole cycle; 500-object gravity+accretion+breakage storm runs at mean
       1.9 ms/step. Honest note: shards flung below the void plane are culled by the existing
       off-world cleanup (~0.3% mass in one violent test) — deletion, not a conservation bug.
+- [x] **Irregular shapes + 1:1 drag** (2026-07-20) — debris chunks now carry **convex-hull
+      colliders** built from their displaced potato mesh (mass set directly = density × nominal
+      volume, exact conservation; Rapier derives the inertia; hull points double as exact drag
+      floor-clamp support), so rocks tumble and SETTLE like rocks — verified: 9/9 shattered chunks
+      at rest and asleep after a violent break, where sphere colliders rolled forever. **Accreted
+      planets are gently lumpy** (displaced unit sphere, ±~7%; displacement is a pure function of
+      direction so the equirect skin mapping survives — splats still land exactly at impact
+      points; the ball collider stays honest at this amplitude). Drag anchor speed 40 → 250 m/s:
+      the held object tracks the cursor 1:1 at any human speed (20 m crossed in 5 steps vs ~50)
+      while staying bounded — no teleport-fling, and MAX_SPEED still caps the released throw.
+- [x] **Pause + time scale** (World panel): ⏸ Pause freezes the physics accumulator (render loop
       keeps running); a ×0.1–×3 slider multiplies WALL time fed into the accumulator — physics
       always steps its fixed 1/60 s, so impulses, forces, and thresholds are IDENTICAL at any
       speed; slow-mo/fast-forward only changes how many steps run per wall second. MAX_CATCHUP

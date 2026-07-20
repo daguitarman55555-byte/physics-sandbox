@@ -1977,26 +1977,35 @@ export class Sandbox {
     const dom = comp[0];
     let e: Entity;
     if (R >= DEBRIS_POTATO_R) {
+      // a real irregular body: the collider is the CONVEX HULL of the displaced mesh, so chunks
+      // tumble and settle like rocks instead of rolling away forever. Mass is set directly
+      // (density × nominal volume) — exact conservation without knowing the hull's own volume;
+      // Rapier derives the inertia tensor from the hull shape.
+      const geo = this.potatoGeometry(R);
       const body = this.world.createRigidBody(
         RAPIER.RigidBodyDesc.dynamic().setTranslation(pos.x, pos.y, pos.z));
-      this.world.createCollider(
-        RAPIER.ColliderDesc.ball(R).setFriction(dom.mat.friction).setRestitution(dom.mat.restitution), body);
-      e = this.finishCustomEntity(body, this.potatoGeometry(R), pos, R, Vi, 'debris', dom.mat, [2, 1]);
+      const pts = (geo.attributes.position as THREE.BufferAttribute).array as Float32Array;
+      const desc = (RAPIER.ColliderDesc.convexHull(pts) ?? RAPIER.ColliderDesc.ball(R))
+        .setFriction(dom.mat.friction).setRestitution(dom.mat.restitution)
+        .setMass(density * Vi);
+      this.world.createCollider(desc, body);
+      e = this.finishCustomEntity(body, geo, pos, R, Vi, 'debris', dom.mat, [2, 1]);
       if (!dom.mat.maps) (e.mesh!.material as THREE.MeshStandardMaterial).color.copy(dom.color);
+      e.support = { points: pts, pad: 0 }; // exact drag floor-clamp over the hull's defining points
     } else {
       e = this.spawn('sphere', pos, R, dom.mat);
       e.label = 'debris';
+      e.body.collider(0).setDensity(density);
     }
     if (!dom.mat.maps) e.color.copy(dom.color);
     e.comp = comp;
-    e.body.collider(0).setDensity(density);
     return e;
   }
 
-  /** A lumpy rock: sphere geometry displaced radially by a few random low-frequency waves. The
-   *  displacement is a pure function of direction, so UV-seam duplicate vertices stay welded. */
-  private potatoGeometry(R: number): THREE.BufferGeometry {
-    const geo = new THREE.SphereGeometry(R, 24, 16);
+  /** Displace a sphere geometry radially by three random low-frequency waves. The displacement is
+   *  a pure function of direction, so UV-seam duplicate vertices stay welded and the skin's
+   *  equirect mapping survives untouched. */
+  private displaceSphere(geo: THREE.BufferGeometry, amps: [number, number, number]): THREE.BufferGeometry {
     const p = geo.attributes.position as THREE.BufferAttribute;
     const dirs = [
       new THREE.Vector3().randomDirection(),
@@ -2008,14 +2017,26 @@ export class Sandbox {
     for (let i = 0; i < p.count; i++) {
       v.set(p.getX(i), p.getY(i), p.getZ(i)).normalize();
       const bump = 1
-        + 0.16 * Math.sin(v.dot(dirs[0]) * 3.1 + ph[0])
-        + 0.1 * Math.sin(v.dot(dirs[1]) * 5.3 + ph[1])
-        + 0.07 * Math.sin(v.dot(dirs[2]) * 8.7 + ph[2]);
+        + amps[0] * Math.sin(v.dot(dirs[0]) * 3.1 + ph[0])
+        + amps[1] * Math.sin(v.dot(dirs[1]) * 5.3 + ph[1])
+        + amps[2] * Math.sin(v.dot(dirs[2]) * 8.7 + ph[2]);
       p.setXYZ(i, p.getX(i) * bump, p.getY(i) * bump, p.getZ(i) * bump);
     }
     geo.computeVertexNormals();
     return geo;
   }
+
+  /** A lumpy rock for debris: strong displacement, asteroid look. */
+  private potatoGeometry(R: number): THREE.BufferGeometry {
+    return this.displaceSphere(new THREE.SphereGeometry(R, 24, 16), [0.16, 0.1, 0.07]);
+  }
+
+  /** A gently irregular unit sphere for accreted planets: rubble-pile lumpiness, subtle enough
+   *  that the ball collider stays honest and the drag clamp's sphere assumption holds. */
+  private lumpyUnitSphere(): THREE.BufferGeometry {
+    return this.displaceSphere(new THREE.SphereGeometry(1, 64, 48), [0.055, 0.035, 0.022]);
+  }
+
 
   private stepAccretion() {
     this.skinBudget = ACCRETE_SKIN_BUDGET;
@@ -2127,9 +2148,10 @@ export class Sandbox {
       e.bbCenter.set(0, 0, 0); e.bbHalf.setScalar(R);
       if (wantSkin && !e.skin) {
         // first foreign bite: the pool sphere becomes a skinned planet. Unit geometry × scale, so
-        // every later growth is a single scale write, never a rebuild.
+        // every later growth is a single scale write, never a rebuild. Gently lumpy: rubble
+        // piles aren't perfect spheres (the ball collider stays honest at this amplitude).
         const skin = new PlanetSkin(R, bigComp[0]);
-        const mesh = new THREE.Mesh(new THREE.SphereGeometry(1, 64, 48), skin.material);
+        const mesh = new THREE.Mesh(this.lumpyUnitSphere(), skin.material);
         mesh.castShadow = mesh.receiveShadow = true;
         mesh.scale.setScalar(R);
         mesh.position.copy(e.currPos);
@@ -2175,7 +2197,7 @@ export class Sandbox {
           RAPIER.RigidBodyDesc.dynamic().setTranslation(com.x, com.y, com.z));
         this.world.createCollider(RAPIER.ColliderDesc.ball(R).setFriction(fr).setRestitution(re), body);
         const skin = new PlanetSkin(R, bigComp[0]);
-        const mesh = new THREE.Mesh(new THREE.SphereGeometry(1, 64, 48), skin.material);
+        const mesh = new THREE.Mesh(this.lumpyUnitSphere(), skin.material);
         mesh.castShadow = mesh.receiveShadow = true;
         mesh.scale.setScalar(R);
         mesh.position.copy(com);
@@ -2268,7 +2290,10 @@ export class Sandbox {
       tgt.z = THREE.MathUtils.clamp(tgt.z, -495, 495);
       const want = this._p.set(tgt.x, tgt.y, tgt.z)
         .sub(this._s.set(k.x, k.y, k.z));
-      const maxStep = 40 * FIXED; // ≤ 40 m/s anchor speed
+      // ≤ 250 m/s anchor speed: fast enough that any normal-speed mouse move tracks 1:1 (the old
+      // 40 left the object visibly trailing the cursor), still bounded so a violent flick can't
+      // teleport the joint — the original Phase 1 fling hazard — and MAX_SPEED caps the body anyway
+      const maxStep = 250 * FIXED;
       if (want.length() > maxStep) want.setLength(maxStep);
       this.grab.kin.setNextKinematicTranslation({ x: k.x + want.x, y: k.y + want.y, z: k.z + want.z });
       this.grab.entity.body.wakeUp();
