@@ -119,6 +119,7 @@ const BLOW_RADIUS = 6; // metres — the blow tool's one-shot gust reaches this 
 const BLOW_SPEED = 14; // m/s — outward kick at the centre (falls off linearly to the edge)
 const HINGE_MOTOR_FACTOR = 2; // stiffness/damping factor of a hinge's velocity motor — how hard it
 //                               drives toward the target spin (acceleration-based, so mass-independent)
+const TRAIL_MAX = 90; // points in the selected object's motion trail (~1.5 s of path at 60 fps)
 
 // Accretion merging: touching bodies fuse into one bigger sphere (planets form from rubble).
 const ACCRETE_EVERY = 10; // check cadence in physics steps (6 Hz) — merging need not be per-step
@@ -224,6 +225,11 @@ export class Sandbox {
   private fieldStrength = 1; // live global multiplier over every field's base strength
   private fieldGroup = new THREE.Group(); // holds the translucent field markers
   private fieldFlow!: FieldFlow; // glowing tracer particles that make each field's force visible
+  // motion trail: a fading ribbon following the SELECTED object so you can read its path
+  private trailLine!: THREE.Line;
+  private trailPts: THREE.Vector3[] = [];
+  private trailFor: Entity | null = null;
+  private _selPos = new THREE.Vector3();
   // field placement/editing: the gizmo, the ghost awaiting confirmation, and the live selection
   private transform!: TransformControls;
   private placing: FieldRec | null = null; // ghost being positioned — NOT in `fields`, exerts no force
@@ -321,6 +327,17 @@ export class Sandbox {
 
     this.scene.add(this.fieldGroup, this.jointGroup); // Phase 4 visuals live here
     this.fieldFlow = new FieldFlow(this.scene); // tracer particles visualizing every field's flow
+
+    // selected-object motion trail: a preallocated line, coloured bright at the head and fading to the
+    // background at the tail (per-vertex colour; GPU linewidth is unreliable on Windows so it's 1px)
+    const tg = new THREE.BufferGeometry();
+    tg.setAttribute('position', new THREE.BufferAttribute(new Float32Array(TRAIL_MAX * 3), 3));
+    tg.setAttribute('color', new THREE.BufferAttribute(new Float32Array(TRAIL_MAX * 3), 3));
+    tg.setDrawRange(0, 0);
+    this.trailLine = new THREE.Line(tg, new THREE.LineBasicMaterial({ vertexColors: true, transparent: true, opacity: 0.9 }));
+    this.trailLine.frustumCulled = false;
+    this.trailLine.visible = false;
+    this.scene.add(this.trailLine);
 
     // --- field placement gizmo ---
     // Axis-constrained handles are the honest answer to "a 2D mouse can't pick a 3D point": each
@@ -2791,9 +2808,11 @@ export class Sandbox {
   private syncRender(alpha: number) {
     const now = performance.now(); // one clock read per frame, reused by every skin flush + the ghost pulse
     for (const pool of this.pools.values()) pool.slots.length = 0;
+    let selSeen = false; // did we render the selected entity this frame? (drives its motion trail)
     for (const e of this.entities) {
       this._p.copy(e.prevPos).lerp(e.currPos, alpha);
       this._q.copy(e.prevQuat).slerp(e.currQuat, alpha);
+      if (e === this.selected) { this._selPos.copy(this._p); selSeen = true; }
       if (e.kind === 'custom') {
         // unique geometry → its own mesh; write the interpolated transform directly (no scale)
         const mesh = e.mesh!;
@@ -2861,8 +2880,43 @@ export class Sandbox {
     for (const r of this.fields) if (r !== this.editingOriginal && !noFlow(r.field)) this._flowList.push(r.field);
     if (this.placing && !noFlow(this.placing.field)) this._flowList.push(this.placing.field);
     this.fieldFlow.update(this._flowList, this.fieldStrength, this.placing?.field.id ?? -1);
+
+    this.updateTrail(selSeen ? this._selPos : null);
   }
   private _flowList: Field[] = []; // reused each frame to feed the flow viz without allocating
+
+  /**
+   * Grow the selected object's motion trail. Points are sampled as it moves (dedup'd by distance) into
+   * a capped ring, then written into the preallocated line with a colour gradient — the object's colour
+   * at the head fading to black (≈ the dark background) at the tail, which reads as a smooth fade-out.
+   * Resets whenever the selection changes or clears. One object only, so it never costs at scale.
+   */
+  private updateTrail(pos: THREE.Vector3 | null) {
+    if (this.selected !== this.trailFor) { this.trailPts.length = 0; this.trailFor = this.selected; }
+    const geo = this.trailLine.geometry;
+    if (!pos || !this.selected) {
+      if (this.trailLine.visible) { this.trailLine.visible = false; geo.setDrawRange(0, 0); }
+      this.trailPts.length = 0;
+      return;
+    }
+    const last = this.trailPts[this.trailPts.length - 1];
+    if (!last || last.distanceToSquared(pos) > 0.01) this.trailPts.push(pos.clone());
+    while (this.trailPts.length > TRAIL_MAX) this.trailPts.shift();
+    const n = this.trailPts.length;
+    if (n < 2) { this.trailLine.visible = false; return; }
+    this.trailLine.visible = true;
+    const posAttr = geo.getAttribute('position') as THREE.BufferAttribute;
+    const colAttr = geo.getAttribute('color') as THREE.BufferAttribute;
+    const col = this.selected.color;
+    for (let i = 0; i < n; i++) {
+      const p = this.trailPts[i];
+      posAttr.setXYZ(i, p.x, p.y, p.z);
+      const f = i / (n - 1); // 0 at the tail → 1 at the head
+      colAttr.setXYZ(i, col.r * f, col.g * f, col.b * f); // fade toward black (≈ the background)
+    }
+    geo.setDrawRange(0, n);
+    posAttr.needsUpdate = true; colAttr.needsUpdate = true;
+  }
 
   /** Toggle the glowing flow tracers on/off (they're a visual read-out, never affect the physics). */
   setFlowViz(on: boolean) { this.fieldFlow.setEnabled(on); }
