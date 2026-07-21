@@ -72,6 +72,7 @@ export interface Entity {
   specKind?: 'revolution' | 'curve' | 'surface' | 'implicit'; // which creator built a custom shape…
   spec?: RevolutionSpec | ParamCurveSpec | ParamSurfaceSpec | ImplicitSpec; // …and its equations, so
   //                    a saved scene can rebuild the exact shape on load (Phase 7 persistence)
+  gravityScale?: number; // per-object gravity multiplier (1 = normal, 0 = weightless, <0 = floats up)
 }
 
 /** One InstancedMesh + its per-instance entity slots, keyed by (shape kind × material). */
@@ -790,6 +791,15 @@ export class Sandbox {
     // back on so it can't swing through what it's hinged to.
     j.joint.setContactsEnabled(!on);
     j.a.body.wakeUp(); j.b.body.wakeUp();
+  }
+
+  /** Per-object gravity: 1 = normal, 0 = weightless (floats where left), negative = falls upward
+   *  (a balloon). Rapier scales world gravity per body; stored on the entity so the well/lift gravity-
+   *  suspension math stays correct for it too. */
+  setEntityGravityScale(e: Entity, scale: number) {
+    e.gravityScale = scale;
+    e.body.setGravityScale(scale, true);
+    e.body.wakeUp();
   }
 
   /** Freeze pins a body in place (switches it to a fixed body); calling again thaws it. */
@@ -1839,6 +1849,7 @@ export class Sandbox {
         pos: [t.x, t.y, t.z], quat: [r.x, r.y, r.z, r.w],
         linvel: [v.x, v.y, v.z], angvel: [w.x, w.y, w.z],
         frozen: e.frozen || undefined,
+        gravityScale: e.gravityScale != null && e.gravityScale !== 1 ? e.gravityScale : undefined,
       };
     });
 
@@ -1944,6 +1955,7 @@ export class Sandbox {
     e.prevPos.copy(at); e.currPos.copy(at);
     e.prevQuat.set(q[0], q[1], q[2], q[3]); e.currQuat.copy(e.prevQuat);
     e.lastVel.set(ed.linvel[0], ed.linvel[1], ed.linvel[2]);
+    if (ed.gravityScale != null && ed.gravityScale !== 1) this.setEntityGravityScale(e, ed.gravityScale);
     if (ed.frozen) this.toggleFreeze(e);
     return e;
   }
@@ -2709,7 +2721,9 @@ export class Sandbox {
         // gravity while pulling with zero force, so hundreds of objects coasted forever in perfect
         // zero-g, "orbiting around nothing" (Rafael's report; measured vy≈0 at 57 m/s, y≈52).
         const suspend = liftInf * Math.min(Math.max(this.fieldStrength, 0), 1);
-        if (suspend > 0) this._s.y += -this.gravityY * mass * suspend;
+        // cancel the body's ACTUAL felt gravity (world gravity × its per-object scale), so a
+        // weightless/floating object isn't wrongly shoved when it enters a well or lift tube
+        if (suspend > 0) this._s.y += -this.gravityY * mass * suspend * (e.gravityScale ?? 1);
         if (this._s.x || this._s.y || this._s.z) {
           e.body.applyImpulse({ x: this._s.x * FIXED, y: this._s.y * FIXED, z: this._s.z * FIXED }, true);
         }

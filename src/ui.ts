@@ -1509,13 +1509,26 @@ function buildInspector(sandbox: Sandbox) {
   const box = document.getElementById('inspector')!;
   // static skeleton: live-rewritten content + a persistent action row (so the button keeps its handler)
   const content = el('div');
+  // persistent per-object gravity control (survives the innerHTML refresh, so it keeps its handler)
+  const gravRow = el('div', '', 'field');
+  const gravLabel = el('label', 'Gravity × <b>1.0</b>');
+  const gravRange = el('input');
+  gravRange.type = 'range'; gravRange.min = '-2'; gravRange.max = '2'; gravRange.step = '0.1'; gravRange.value = '1';
+  gravRange.title = '1 = normal · 0 = weightless · negative = floats up (a balloon)';
+  gravRange.oninput = () => {
+    if (!sandbox.selected) return;
+    const v = parseFloat(gravRange.value);
+    sandbox.setEntityGravityScale(sandbox.selected, v);
+    gravLabel.querySelector('b')!.textContent = v.toFixed(1);
+  };
+  gravRow.append(gravLabel, gravRange);
   const actions = el('div', '', 'row');
   const bDelete = el('button', 'Delete object', 'danger');
   bDelete.onclick = () => {
     if (sandbox.selected) sandbox.deleteEntity(sandbox.selected);
   };
   actions.append(bDelete);
-  box.append(content, actions);
+  box.append(content, gravRow, actions);
 
   const render = () => {
     const e = sandbox.selected;
@@ -1550,6 +1563,12 @@ function buildInspector(sandbox: Sandbox) {
       sizeOrShape +
       prop('kinetic E', `${ke.toFixed(1)} J`) +
       prop('state', e.body.isSleeping() ? 'asleep' : 'awake');
+    // sync the gravity slider to this object (unless the user is mid-drag on it)
+    if (document.activeElement !== gravRange) {
+      const gs = e.gravityScale ?? 1;
+      gravRange.value = String(gs);
+      gravLabel.querySelector('b')!.textContent = gs.toFixed(1);
+    }
   };
   setInterval(render, 100);
 }

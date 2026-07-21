@@ -32,6 +32,7 @@ export interface EntityData {
   linvel: Vec3;
   angvel: Vec3;
   frozen?: boolean;
+  gravityScale?: number; // per-object gravity multiplier (omitted when the default 1)
 }
 
 /** A path field's flow curve — equations only; the sampled polyline is re-derived on load. */
