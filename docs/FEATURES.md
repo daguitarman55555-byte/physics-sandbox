@@ -151,9 +151,10 @@ A checklist so nothing is lost. `[x]` = in Phase 1 today · `[ ]` = planned (wit
       while staying bounded — no teleport-fling, and MAX_SPEED still caps the released throw.
 - [x] **Floor slams, hammer breakage & no-sphere reaccretion** (2026-07-20) — three breakage
       refinements. (1) **Hitting the floor hard shatters** — the ground is an infinite-mass
-      impactor, so specific energy Q = ½·v_down² (mass cancels); thresholded 2.5× a body-body hit,
-      so stone survives a casual drop but shatters from ~8 m (measured: stone whole at 4.4/7.7 m/s,
-      breaks at 12.5; brittle ice cracks at 6.3; tough steel survives 14). (2) **Drag-impact
+      impactor, so specific energy Q = ½·v_down² (mass cancels); thresholded 2.5× a body-body hit.
+      Durability tuned via the master `BREAK_Q` knob (45 J/kg·strength — scales every threshold at
+      once): stone survives a 13 m drop (16 m/s) and shatters near 20 m (20 m/s); brittle ice
+      survives 2 m but cracks by 5 m; tough steel shrugs off a 20 m slam. (2) **Drag-impact
       breakage** — a grabbed object can smash what it rams while staying whole itself (breakage is
       per-target: `canBreak` excludes the held/frozen body) — verified: a held hammer shattered a
       stone target into debris and survived. (3) **A destroyed-and-reassembled sphere never looks

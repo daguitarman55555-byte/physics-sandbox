@@ -769,6 +769,13 @@ storm mean 0.52 ms/step worst 11.5, peak 95 custom meshes, one round R=4.3 plane
 NB: pure-lumpy custom bodies keep BALL colliders (grow in place); the ±13% mesh pokes slightly past
 the ball at small R — acceptable (same as skinned planets always have). NB2: lumpyUnitSphere() is
 GONE, replaced by lumpyGeometry(R).
+DURABILITY BUMP (2026-07-20, Rafael "make everything more durable"): `BREAK_Q` 18 → 45 — the single
+master knob scaling EVERY shatter threshold (body-body AND floor both compute `BREAK_Q·strengthOf·
+[FLOOR_FACTOR]`), so material differences stay intact and one number tunes overall toughness. Break
+speed scales with √Q, so 2.5× the energy ≈ 1.6× the impact speed everything now survives. Verified:
+stone floor-survives 8 m & 13 m drops (was breaking at 8 m), shatters ~20 m; ice survives 2 m, cracks
+5 m; steel survives 20 m; stone pebble pairs bounce at 14 m/s closing (was shattering), break at 22.
+To make things tougher/softer later, this is the ONE lever.
 LIKELY NEXT: motion STREAKS for tracers; affected-object glow/tint; per-object trails; drawpad per-axis
 ortho cam. NB screenshotting a 500ms shockwave: pin `S.shocks[0].born = now-190` on an interval.
 Research dossier: docs/FORCES_RESEARCH.md.

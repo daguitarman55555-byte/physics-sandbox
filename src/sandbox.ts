@@ -131,7 +131,10 @@ const PLANET_NO_CCD_R = 1.2; // bodies past this radius never get CCD: a big bal
 // Impact breakage: a hit whose SPECIFIC energy (½μv²/m, PRE-impact velocities via lastVel — using
 // post-bounce speeds would make bouncy rubber break easier than brittle ice) exceeds the body's
 // strength shatters it into volume-conserving fragments that inherit its composition.
-const BREAK_Q = 18; // J/kg per strength unit — pebble pairs shatter at ~12 m/s closing, not at ~8
+const BREAK_Q = 45; // J/kg per strength unit — the master durability knob (scales EVERY shatter
+//                     threshold, body-body and floor, keeping material differences intact). Raised
+//                     from 18: things take a real slam to break now (break speed scales with √Q, so
+//                     2.5× the energy ≈ 1.6× the impact speed everything survives)
 const BREAK_BINDING = 0.15; // × v_esc² added when mutual gravity is on: self-gravity resists disruption
 const BREAK_MIN_R = 0.3; // fragments below this never re-shatter — no infinite dust
 const BREAKS_PER_STEP = 2;
