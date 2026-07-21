@@ -64,7 +64,12 @@ export interface Entity {
   //                      (measured: a planet's mass DOUBLED per absorb, compounding to ×1000)
   geoR?: number; // radius at which a lumpy accreted mesh's geometry was last built — growth past
   //                a threshold rebuilds it with fainter lumps, so big planets round out naturally
+  pool?: RenderPool; // cached InstancedMesh pool for box/sphere entities — resolved once (mat never
+  //                    changes for a pooled body), so syncRender skips a per-frame key build + Map.get
 }
+
+/** One InstancedMesh + its per-instance entity slots, keyed by (shape kind × material). */
+interface RenderPool { mesh: THREE.InstancedMesh; slots: Entity[] }
 
 export type Tool = 'grab' | 'connect' | 'freeze' | 'push' | 'brush';
 export type BrushMode = 'push' | 'pull' | 'swirl';
@@ -168,7 +173,7 @@ export class Sandbox {
   private nextId = 0;
   // one InstancedMesh per (shape kind × material) — created lazily, so plain boxes stay one draw
   // call and 100 steel spheres are still just one more. slots[i] = entity at instance i (picking).
-  private pools = new Map<string, { mesh: THREE.InstancedMesh; slots: Entity[] }>();
+  private pools = new Map<string, RenderPool>();
   private unitBox = new THREE.BoxGeometry(1, 1, 1);
   private unitSphere = new THREE.SphereGeometry(1, 48, 32); // smooth silhouette; still one instanced draw
   private texCache = new Map<string, THREE.Texture>(); // loaded PBR maps, keyed by url|repeat
@@ -2497,6 +2502,7 @@ export class Sandbox {
   }
 
   private syncRender(alpha: number) {
+    const now = performance.now(); // one clock read per frame, reused by every skin flush + the ghost pulse
     for (const pool of this.pools.values()) pool.slots.length = 0;
     for (const e of this.entities) {
       this._p.copy(e.prevPos).lerp(e.currPos, alpha);
@@ -2510,7 +2516,7 @@ export class Sandbox {
         // frozen reads as an icy glow; selection as a warm-grey lift; else no emissive
         selMat.emissive.setHex(e.frozen ? 0x1c4a7a : e === this.selected ? 0x3a4152 : 0x000000);
         // throttled GPU upload of any paint the planet took this frame (the accretion lag lever)
-        if (e.skin) e.skin.flushIfDue(performance.now());
+        if (e.skin) e.skin.flushIfDue(now);
         continue;
       }
       const scale = e.kind === 'box' ? e.size * 2 : e.size; // box geo is unit cube; sphere geo is unit radius
@@ -2523,7 +2529,9 @@ export class Sandbox {
         : e.mat.maps
           ? (e === this.selected ? SELECT_TINT : WHITE)
           : (e === this.selected ? SELECT_COLOR : e.color);
-      const pool = this.getPool(e.kind as 'box' | 'sphere', e.mat);
+      // pool ref is cached on the entity: a box/sphere's (kind × material) never changes, so we
+      // resolve it once instead of rebuilding a string key + Map.get for every body every frame
+      const pool = (e.pool ??= this.getPool(e.kind as 'box' | 'sphere', e.mat));
       const i = pool.slots.length;
       pool.mesh.setMatrixAt(i, this._m);
       pool.mesh.setColorAt(i, col);
@@ -2554,7 +2562,7 @@ export class Sandbox {
     }
     // an un-placed field breathes, so a ghost never reads as an already-placed one
     if (this.placing?.core) {
-      this.placing.core.scale.setScalar(1 + Math.sin(performance.now() * 0.005) * 0.18);
+      this.placing.core.scale.setScalar(1 + Math.sin(now * 0.005) * 0.18);
     }
 
     // live flow tracers: the live fields, plus the ghost being placed (so you preview its flow), minus
