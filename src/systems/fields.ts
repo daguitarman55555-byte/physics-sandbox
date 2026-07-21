@@ -24,7 +24,7 @@
 import * as THREE from 'three';
 import { parseExpression } from './expr';
 
-export type FieldKind = 'attractor' | 'repeller' | 'wind' | 'vortex' | 'tornado' | 'path' | 'gravitywell' | 'turbulence' | 'explosion';
+export type FieldKind = 'attractor' | 'repeller' | 'wind' | 'vortex' | 'tornado' | 'path' | 'gravitywell' | 'turbulence' | 'magnetic' | 'drag' | 'explosion';
 export type FieldShape = 'sphere' | 'box' | 'cylinder';
 
 /**
@@ -87,6 +87,12 @@ export const FIELD_INFO: Record<FieldKind, { strength: number; size: number; col
   // turbulence: `strength` is the drift speed of the eddies (target-velocity model, so mass-independent).
   // Softer default than the rest — its ever-shifting target makes the same number feel far stronger.
   turbulence: { strength: 6, size: 10, color: 0xe8d44d, label: 'Turbulence' },
+  // magnetic: F = q·v×B (q/m folded into strength) — force ⊥ velocity, so movers curve into circles/
+  // helices while keeping their speed. `strength` is the turn rate; aim B with the rotate gizmo.
+  magnetic: { strength: 4, size: 10, color: 0x6fb0ff, label: 'Magnetic' },
+  // drag: a slow-mo / terminal-velocity pocket. `strength` is the damping RATE (1/s) — how fast it
+  // bleeds off velocity; gravity still acts, so things fall slower and settle to a lower terminal speed.
+  drag: { strength: 5, size: 10, color: 0x9aa7b4, label: 'Drag zone' },
   // explosion is a ONE-SHOT: position the ghost, and Place DETONATES it (radial impulse, shockwave,
   // camera shake) instead of leaving a field behind. `strength` = blast speed (m/s) at the centre.
   explosion: { strength: 14, size: 10, color: 0xff7a3d, label: 'Explosion' },
@@ -209,6 +215,7 @@ function planeNormal(pts: Float32Array, n: number, out: THREE.Vector3): boolean 
 }
 
 const RESPONSE = 5; // how hard any field steers a body toward its target velocity (1/s) — uniform
+const DRAG_MAX = 50; // cap on a drag zone's damping rate (1/s) so rate·dt stays < 1 (no overshoot)
 const SOFT_EDGE = 0.55; // full strength inside this fraction of the region; smoothstep to 0 by the edge
 const PATH_LOOKAHEAD = 4; // samples ahead the flow steers toward (follows curvature + draws onto the path)
 const SWIRL_GAIN = 0.7; // path swirl scales with radius (0 at the centreline) and this cap — keeps it gentle
@@ -292,6 +299,21 @@ export function fieldForce(
   if (inf <= 0) return out;
   const speed = field.strength * gain; // target speed (m/s) — SAME meaning for every kind
 
+  if (field.kind === 'drag') {
+    // damp velocity toward zero (a slow-mo / terminal-velocity pocket). `strength` is the damping rate
+    // (1/s); the resulting Δv per step is rate·dt — capped below 1 so it can never overshoot into
+    // reverse. Mass cancels in the deceleration, so every body slows at the same rate.
+    const c = Math.min(field.strength * gain, DRAG_MAX) * inf;
+    return out.set(-vel.x * mass * c, -vel.y * mass * c, -vel.z * mass * c);
+  }
+  if (field.kind === 'magnetic') {
+    // F = q·v×B, with q/m folded into `strength`. The force is ⊥ to velocity, so it does no work — a
+    // body curves into a circle/helix at a mass-independent turn rate but keeps its speed. B points
+    // along the region's local +Y (aim it with the rotate gizmo). A resting body (v=0) feels nothing.
+    _tv.set(0, 1, 0).applyQuaternion(field.quat); // B direction
+    _d.crossVectors(vel, _tv); // v × B
+    return out.copy(_d).multiplyScalar(mass * speed * inf);
+  }
   if (field.kind === 'wind') {
     _tv.set(1, 0, 0).applyQuaternion(field.quat).multiplyScalar(speed); // blow toward wind velocity
   } else if (field.kind === 'vortex') {

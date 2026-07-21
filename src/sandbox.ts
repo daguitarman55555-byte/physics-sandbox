@@ -1593,9 +1593,11 @@ export class Sandbox {
         new THREE.LineBasicMaterial({ color: info.color, transparent: true, opacity: 0.28 }),
       ));
 
-      if (field.kind === 'wind') {
+      if (field.kind === 'wind' || field.kind === 'magnetic') {
+        // wind blows along local +X; a magnetic field's B points along local +Y — draw the right axis
+        const dirLocal = field.kind === 'magnetic' ? new THREE.Vector3(0, 1, 0) : new THREE.Vector3(1, 0, 0);
         const len = Math.min(field.size.x, 3.4);
-        g.add(new THREE.ArrowHelper(new THREE.Vector3(1, 0, 0), new THREE.Vector3(), Math.max(len, 1.6), info.color, 0.9, 0.6));
+        g.add(new THREE.ArrowHelper(dirLocal, new THREE.Vector3(), Math.max(len, 1.6), info.color, 0.9, 0.6));
       } else if (field.kind === 'vortex') {
         const ring = new THREE.Mesh(
           new THREE.TorusGeometry(field.size.x * 0.62, 0.05, 8, 44),
@@ -3056,8 +3058,8 @@ export class Sandbox {
       if (this.placing) this.cancelPlace(); else this.selectField(null);
     } else if (k === 'Delete' || k === 'Backspace') {
       this.removeActiveField();
-    } else if (lower === 'r' && (rec.field.kind === 'wind' || rec.field.kind === 'path' || rec.field.shape !== 'sphere')) {
-      this.transform.setMode(this.transform.mode === 'rotate' ? 'translate' : 'rotate'); // aim wind / turn the region or path
+    } else if (lower === 'r' && (rec.field.kind === 'wind' || rec.field.kind === 'magnetic' || rec.field.kind === 'path' || rec.field.shape !== 'sphere')) {
+      this.transform.setMode(this.transform.mode === 'rotate' ? 'translate' : 'rotate'); // aim wind/B / turn the region or path
       this.onFieldChange?.();
     } else if (lower === 'g') {
       this.transform.setMode('translate');

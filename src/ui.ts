@@ -1382,7 +1382,11 @@ function buildFieldsSection(panel: HTMLElement, sandbox: Sandbox) {
     pathLift.classList.toggle('hidden', !isPath);
     liftBtn.classList.toggle('primary', !!rec.field.lift);
     if (!isPath) customBox.classList.add('hidden'); // never leave the equation editor up on a non-path
-    (strWrap.firstChild as Text).textContent = isPath ? 'flow m/s' : rec.field.kind === 'gravitywell' ? 'mass' : 'speed m/s';
+    (strWrap.firstChild as Text).textContent = isPath ? 'flow m/s'
+      : rec.field.kind === 'gravitywell' ? 'mass'
+        : rec.field.kind === 'magnetic' ? 'turn rate'
+          : rec.field.kind === 'drag' ? 'damping'
+            : 'speed m/s';
     if (isPath) {
       const pf = rec.field.path!;
       for (const key of PATH_PRESET_KEYS) pathBtns[key].classList.toggle('on', pf.label === PATH_PRESETS[key].label);
@@ -1404,13 +1408,14 @@ function buildFieldsSection(panel: HTMLElement, sandbox: Sandbox) {
     bSole.classList.toggle('on', !!rec.field.sole);
     const p = rec.field.pos;
     const lock = sandbox.lockedAxis;
-    const canRotate = rec.field.kind === 'wind' || isPath || rec.field.shape !== 'sphere';
+    const canRotate = rec.field.kind === 'wind' || rec.field.kind === 'magnetic' || isPath || rec.field.shape !== 'sphere';
+    const aimKind = rec.field.kind === 'wind' || rec.field.kind === 'magnetic';
     hint.innerHTML =
       `x ${p.x.toFixed(1)} · y ${p.y.toFixed(1)} · z ${p.z.toFixed(1)}`
       + (lock ? ` · <b>${lock.toUpperCase()} locked</b>` : '')
       + (sandbox.gizmoMode === 'rotate' ? ' · <b>turning</b>' : '')
       + '<br><b>X/Y/Z</b> lock · <b>arrows</b>/<b>PgUp</b>/<b>PgDn</b> nudge · <b>Shift</b> fine'
-      + (canRotate ? ` · <b>R</b> ${rec.field.kind === 'wind' ? 'aim' : 'turn'}` : '')
+      + (canRotate ? ` · <b>R</b> ${aimKind ? 'aim' : 'turn'}` : '')
       + (editing ? '<br><b>Enter</b> apply · <b>Esc</b> cancel · <b>Del</b> delete' : '<br><b>Enter</b> place · <b>Esc</b> cancel');
     // one Apply/Place gate: edits only reach the live field here (nothing mutates the sim mid-edit)
     bPlace.textContent = editing ? 'Apply' : rec.field.kind === 'explosion' ? '💥 Detonate' : 'Place';
