@@ -1034,12 +1034,14 @@ function buildImplicitCreator(
 
 /** Tools section: the left-click mode (Grab / Connect / Freeze / Push) + the joint-type picker. */
 function buildToolsSection(panel: HTMLElement, sandbox: Sandbox) {
-  const toolDefs: Array<[Tool, string]> = [['grab', 'Grab'], ['connect', 'Connect'], ['freeze', 'Freeze'], ['push', 'Push'], ['brush', 'Brush']];
+  const toolDefs: Array<[Tool, string]> = [['grab', 'Grab'], ['connect', 'Connect'], ['freeze', 'Freeze'], ['push', 'Push'], ['blow', 'Blow'], ['duplicate', 'Duplicate'], ['brush', 'Brush']];
   const toolHints: Record<Tool, string> = {
     grab: 'Left-drag an object to move & throw it.',
     connect: 'Click two objects to link them, using the joint below.',
     freeze: 'Click an object to pin it in place; click again to release.',
     push: 'Click an object to shove it away from the camera.',
+    blow: 'Click anywhere for a one-shot gust that scatters nearby objects.',
+    duplicate: 'Click an object to drop an independent copy beside it.',
     brush: 'Hold & drag to push / pull / swirl nearby objects, using the mode below.',
   };
   const hint = el('div', '', 'preview');

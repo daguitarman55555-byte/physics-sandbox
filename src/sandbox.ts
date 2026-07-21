@@ -77,7 +77,7 @@ export interface Entity {
 /** One InstancedMesh + its per-instance entity slots, keyed by (shape kind × material). */
 interface RenderPool { mesh: THREE.InstancedMesh; slots: Entity[] }
 
-export type Tool = 'grab' | 'connect' | 'freeze' | 'push' | 'brush';
+export type Tool = 'grab' | 'connect' | 'freeze' | 'push' | 'blow' | 'duplicate' | 'brush';
 export type BrushMode = 'push' | 'pull' | 'swirl';
 
 interface JointRec {
@@ -114,6 +114,8 @@ const _UP = new THREE.Vector3(0, 1, 0); // world up — the draw tool's sketch p
 const BRUSH_RADIUS = 4.5; // metres — the force brush affects bodies within this of the cursor point
 const BRUSH_SPEED = 12; // target speed (m/s) the brush drives bodies toward
 const BRUSH_RESPONSE = 8; // how hard the brush steers toward that target velocity (1/s)
+const BLOW_RADIUS = 6; // metres — the blow tool's one-shot gust reaches this far from the click point
+const BLOW_SPEED = 14; // m/s — outward kick at the centre (falls off linearly to the edge)
 
 // Accretion merging: touching bodies fuse into one bigger sphere (planets form from rubble).
 const ACCRETE_EVERY = 10; // check cadence in physics steps (6 Hz) — merging need not be per-step
@@ -780,6 +782,60 @@ export class Sandbox {
     const mass = e.body.mass() || 1;
     const speed = 9; // m/s
     e.body.applyImpulse({ x: dir.x * mass * speed, y: dir.y * mass * speed, z: dir.z * mass * speed }, true);
+  }
+
+  /**
+   * One-shot "gust": shove every dynamic body within BLOW_RADIUS of `point` radially outward from it,
+   * with a small upward bias so a pile scatters and lifts rather than just sliding. Mass-scaled for a
+   * uniform kick speed; falls off linearly to the edge. Unlike Push (one object, camera-forward) and
+   * the Brush (a held, continuous drag), this is an instantaneous area burst at the clicked spot.
+   */
+  private blowAt(point: THREE.Vector3) {
+    for (const e of this.entities) {
+      if (e.frozen) continue;
+      const t = e.body.translation();
+      const dx = t.x - point.x, dy = t.y - point.y, dz = t.z - point.z;
+      const d = Math.hypot(dx, dy, dz);
+      if (d > BLOW_RADIUS) continue;
+      const inv = 1 / (d || 1);
+      const kick = BLOW_SPEED * (e.body.mass() || 1) * (1 - d / BLOW_RADIUS);
+      e.body.applyImpulse({ x: dx * inv * kick, y: (dy * inv + 0.4) * kick, z: dz * inv * kick }, true);
+      e.body.wakeUp();
+    }
+  }
+
+  /**
+   * Clone an object next to itself, at rest. Primitives copy their size/material/colour; custom shapes
+   * are rebuilt from the equations they were created with (Entity.spec) — so a duplicated spring or
+   * gyroid is a true independent copy. Emergent procedural bodies (accreted planets, debris) have no
+   * recipe, so they can't be duplicated (a no-op). The clone inherits the source's orientation.
+   */
+  duplicateEntity(e: Entity): Entity | null {
+    const t = e.body.translation();
+    const at = new THREE.Vector3(t.x + 2 * e.size + 0.5, t.y + 0.3, t.z);
+    let clone: Entity | null = null;
+    if (e.kind === 'box' || e.kind === 'sphere') {
+      clone = this.spawn(e.kind, at, e.size, e.mat);
+      clone.color.copy(e.color);
+    } else if (e.specKind && e.spec) {
+      const s = e.spec;
+      const res =
+        e.specKind === 'revolution' ? this.createRevolution(s as RevolutionSpec, e.mat)
+          : e.specKind === 'curve' ? this.createParamCurve(s as ParamCurveSpec, e.mat)
+            : e.specKind === 'surface' ? this.createParamSurface(s as ParamSurfaceSpec, e.mat)
+              : this.createImplicit(s as ImplicitSpec, e.mat);
+      if (res.ok) clone = res.entity;
+    }
+    if (!clone) return null;
+    const r = e.body.rotation();
+    clone.body.setTranslation({ x: at.x, y: at.y, z: at.z }, true);
+    clone.body.setRotation({ x: r.x, y: r.y, z: r.z, w: r.w }, true);
+    clone.body.setLinvel({ x: 0, y: 0, z: 0 }, true);
+    clone.body.setAngvel({ x: 0, y: 0, z: 0 }, true);
+    clone.prevPos.copy(at); clone.currPos.copy(at);
+    clone.prevQuat.set(r.x, r.y, r.z, r.w); clone.currQuat.copy(clone.prevQuat);
+    this.selected = clone;
+    return clone;
   }
 
   /** Connect-tool click handler: first pick selects A, second creates a joint; empty click cancels. */
@@ -2836,7 +2892,16 @@ export class Sandbox {
       if (picked) this.selected = picked.entity;
       if (this.tool === 'freeze' && picked) this.toggleFreeze(picked.entity);
       else if (this.tool === 'push' && picked) this.pushEntity(picked.entity);
+      else if (this.tool === 'duplicate' && picked) this.duplicateEntity(picked.entity);
       else if (this.tool === 'connect') this.connectPick(picked?.entity ?? null);
+      else if (this.tool === 'blow') {
+        // a one-shot gust centred on the object hit, or on a ground-plane point in empty space
+        const p = picked ? picked.point.clone()
+          : this.raycaster.ray.intersectPlane(
+            this.drawPlane.setFromNormalAndCoplanarPoint(_UP, this._p.set(0, this.controls.target.y, 0)),
+            new THREE.Vector3());
+        if (p) this.blowAt(p);
+      }
       return; // let OrbitControls keep the drag for camera moves
     }
 
