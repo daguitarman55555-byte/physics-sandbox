@@ -776,6 +776,35 @@ speed scales with √Q, so 2.5× the energy ≈ 1.6× the impact speed everythin
 stone floor-survives 8 m & 13 m drops (was breaking at 8 m), shatters ~20 m; ice survives 2 m, cracks
 5 m; steel survives 20 m; stone pebble pairs bounce at 14 m/s closing (was shattering), break at 22.
 To make things tougher/softer later, this is the ONE lever.
+RENDER-POOL MICRO-OPT (2026-07-21): syncRender rebuilt a `${kind}:${mat.id}` key + Map.get for every
+box/sphere every frame to find its InstancedMesh pool. A pooled body's (kind × material) never changes
+(no `e.mat =` anywhere), so the pool ref is now CACHED on the entity (`e.pool ??= getPool(...)`; new
+`RenderPool` interface + `Entity.pool`). Also hoisted the per-frame `performance.now()` to ONE read
+reused by every skin flush + the ghost pulse. Behavior-identical; verified live (224 objects, colors/
+shadows intact, no errors). Rapier's world.step still dominates (~99%) — this is a small, safe trim.
+PHASE 7 SAVE/LOAD SHIPPED (2026-07-21): first Phase-7 slice. New `systems/persistence.ts` = the JSON
+scene contract (SceneData/EntityData/FieldData/JointLink/WorldData) + material-by-id lookup + file
+download / file-pick / `isSceneData` validation + `QUICKSAVE_KEY`. Sandbox gained serializeScene()/
+loadScene()/spawnFromData()/addFieldFromData() + an `onSceneLoad` hook. UI: a "Scene" section (World
+panel) with 💾 Save file · 📂 Load file (download/upload JSON) and ⚡ Quick-save · ↺ Quick-load (one
+localStorage slot, survives refresh), plus a status line. WHAT ROUND-TRIPS EXACTLY: primitives
+(box/sphere w/ per-body palette color), CUSTOM SHAPES via their equations (new `Entity.spec`/`specKind`
+recorded in all four create* methods — rebuilt through createRevolution/Curve/Surface/Implicit then
+forced to the saved pose+velocity, since create* drop at a random height), FIELDS (path polylines
+re-sampled from the saved equations/stroke, not stored — keeps files small), JOINTS (by saved entity
+INDEX; rebuilt with lockJoint at the saved pose — no re-docking), and ALL world settings + camera.
+onSceneLoad re-syncs the World sliders/toggles (gravity/time/pull-G/pause/mutual-gravity/accretion/
+breakage) so the panel matches the loaded sim. HONEST LIMIT: emergent procedural bodies — accreted
+planets (their painted canvas skins) and shatter debris — have no equation to rebuild, so they're
+SKIPPED and COUNTED (a joint touching a skipped body is dropped too); serializeScene reports `skipped`.
+KEY LOAD DETAIL: do NOT call insertOrbits on a loaded gravity well — the saved velocities already
+encode the orbit; re-inserting would overwrite them. VERIFIED LIVE (console-driven round-trips +
+real UI buttons): 25 objects incl. a revolution + a vortex field + Moon gravity → clear → restore exact
+(skipped 0, specKind 'revolution' intact); spring-joint round-trip (1→0→1); UI Quick-save → Delete all
+→ Quick-load restored 27 objects; gravity slider snapped to −1.62; 30 fps; no console errors. NB: a
+plain (untextured) custom shape's palette tint is baked at mesh creation, so it may reload a different
+palette color — cosmetic only (shape/mass/physics/pose all exact). NEXT PHASE-7 SLICES: share URLs,
+record→GIF/MP4, time REWIND (ring-buffer of states), undo/redo, a named scene library.
 LIKELY NEXT: motion STREAKS for tracers; affected-object glow/tint; per-object trails; drawpad per-axis
 ortho cam. NB screenshotting a 500ms shockwave: pin `S.shocks[0].born = now-190` on an interval.
 Research dossier: docs/FORCES_RESEARCH.md.

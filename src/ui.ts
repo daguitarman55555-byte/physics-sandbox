@@ -21,6 +21,7 @@ import { exprToLatex } from './systems/expr';
 import { PLAIN, PRESETS as MATERIALS, type Material } from './systems/materials';
 import { FIELD_INFO, FIELD_SHAPES, PATH_PRESETS, PATH_PRESET_KEYS, type FieldKind, type FieldShape } from './systems/fields';
 import { JOINT_INFO, type JointKind } from './systems/joints';
+import { downloadScene, pickSceneFile, isSceneData, QUICKSAVE_KEY } from './systems/persistence';
 import type { Tool, BrushMode } from './sandbox';
 
 // fonts come from the CSS import above; no sounds, no popup keyboard — it's a typed input
@@ -574,6 +575,77 @@ function buildPanel(sandbox: Sandbox) {
   bDelAll.onclick = () => sandbox.clear();
   actionsRow.append(bReset, bDelAll);
   worldBody.append(actionsRow);
+
+  // --- Phase 7: save / load ---
+  buildSceneSection(section(panel, 'Scene', true), sandbox);
+
+  // After a scene loads, the sim holds the loaded values but these DOM controls still show the old
+  // ones — re-sync them so the panel matches what's now running.
+  sandbox.onSceneLoad = () => {
+    range.value = String(sandbox.gravityY);
+    label.querySelector('b')!.textContent = sandbox.gravityY.toFixed(2);
+    tRange.value = String(sandbox.getTimeScale());
+    tLabel.querySelector('b')!.textContent = `×${sandbox.getTimeScale().toFixed(1)}`;
+    sgRange.value = String(sandbox.selfGravityG);
+    sgLabel.querySelector('b')!.textContent = sandbox.selfGravityG.toFixed(1);
+    bSelf.classList.toggle('primary', sandbox.selfGravity);
+    bAccrete.classList.toggle('primary', sandbox.accretion);
+    bBreak.classList.toggle('primary', sandbox.breakage);
+    const paused = sandbox.isPaused;
+    bPause.textContent = paused ? '▶ Resume' : '⏸ Pause';
+    bPause.classList.toggle('primary', paused);
+  };
+}
+
+/** Scene section: save/load the whole sandbox to a JSON file, plus a one-slot browser quick-save. */
+function buildSceneSection(panel: HTMLElement, sandbox: Sandbox) {
+  const status = el('div', '', 'preview');
+  const say = (msg: string, err = false) => {
+    status.className = err ? 'preview err' : 'preview';
+    status.textContent = msg;
+  };
+
+  const fileRow = el('div', '', 'row');
+  const bSave = el('button', '💾 Save file', 'mini');
+  const bLoad = el('button', '📂 Load file', 'mini');
+  bSave.onclick = () => {
+    const data = sandbox.serializeScene();
+    const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-');
+    downloadScene(`scene-${stamp}.json`, data);
+    say(`Saved ${data.entities.length} objects · ${data.fields.length} fields${data.skipped ? ` (${data.skipped} procedural skipped)` : ''}.`);
+  };
+  bLoad.onclick = async () => {
+    const parsed = await pickSceneFile();
+    if (parsed == null) return; // cancelled or unreadable
+    if (!isSceneData(parsed)) { say('Not a valid scene file.', true); return; }
+    const skipped = sandbox.loadScene(parsed);
+    if (skipped < 0) { say('Unsupported scene version.', true); return; }
+    say(`Loaded ${parsed.entities.length} objects · ${parsed.fields.length} fields${skipped ? ` (${skipped} weren’t saved)` : ''}.`);
+  };
+  fileRow.append(bSave, bLoad);
+
+  const quickRow = el('div', '', 'row');
+  const bQSave = el('button', '⚡ Quick-save', 'mini');
+  const bQLoad = el('button', '↺ Quick-load', 'mini');
+  bQSave.onclick = () => {
+    try {
+      localStorage.setItem(QUICKSAVE_KEY, JSON.stringify(sandbox.serializeScene()));
+      say('Quick-saved to this browser (survives refresh).');
+    } catch { say('Quick-save failed (storage full?).', true); }
+  };
+  bQLoad.onclick = () => {
+    const raw = localStorage.getItem(QUICKSAVE_KEY);
+    if (!raw) { say('No quick-save found.', true); return; }
+    let parsed: unknown;
+    try { parsed = JSON.parse(raw); } catch { say('Quick-save is corrupt.', true); return; }
+    if (!isSceneData(parsed)) { say('Quick-save is invalid.', true); return; }
+    sandbox.loadScene(parsed);
+    say(`Quick-loaded ${parsed.entities.length} objects.`);
+  };
+  quickRow.append(bQSave, bQLoad);
+
+  const hint = el('div', 'Saves objects, custom shapes, fields, joints & world settings. Accreted planets & debris aren’t saved yet.', 'preview');
+  panel.append(fileRow, quickRow, status, hint);
 }
 
 function buildShapeCreator(

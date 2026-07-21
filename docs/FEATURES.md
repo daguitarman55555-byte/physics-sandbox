@@ -348,8 +348,11 @@ A checklist so nothing is lost. `[x]` = in Phase 1 today · `[ ]` = planned (wit
 - [ ] Fracture & destruction (fracture research track) · fluids/particles (GPU) · cloth & rope
 
 ## UX & sharing — `systems/share.ts` (Phase 7)
-- [ ] Save/load (JSON) + share URLs · record → GIF/MP4
-- [ ] Time: pause/step/slow-mo/**rewind** · debug overlays · undo/redo · scene library
+- [~] Save/load (JSON) — DONE (`systems/persistence.ts`): file download/upload + one-slot browser
+      quick-save (localStorage). Round-trips primitives, custom shapes (via their equations), fields,
+      joints, world settings & camera. NOT yet: accreted planets (painted skins) & shatter debris
+      (no equation to rebuild) — skipped & counted. Still to do: share URLs · record → GIF/MP4
+- [ ] Time: pause/step/slow-mo (DONE) · **rewind** (todo) · debug overlays · undo/redo · scene library
 
 ## Inspector & selection — `systems/inspector.ts`
 - [x] Single-select + live read-out (+ shape label for custom objects) + **Delete object** button

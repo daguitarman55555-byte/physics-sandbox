@@ -28,6 +28,9 @@ import { FieldFlow } from './systems/fieldviz';
 import { NBody } from './systems/nbody';
 import { mergeComp, PlanetSkin, setSkinDetail as setSkinDetailFlag, skinDetailHigh, type CompEntry } from './systems/planettex';
 import { buildJoint, anchorWorld, JOINT_INFO, type JointKind } from './systems/joints';
+import {
+  SCENE_VERSION, materialById, type SceneData, type EntityData, type FieldData,
+} from './systems/persistence';
 
 export type Kind = 'box' | 'sphere' | 'custom';
 
@@ -66,6 +69,9 @@ export interface Entity {
   //                a threshold rebuilds it with fainter lumps, so big planets round out naturally
   pool?: RenderPool; // cached InstancedMesh pool for box/sphere entities — resolved once (mat never
   //                    changes for a pooled body), so syncRender skips a per-frame key build + Map.get
+  specKind?: 'revolution' | 'curve' | 'surface' | 'implicit'; // which creator built a custom shape…
+  spec?: RevolutionSpec | ParamCurveSpec | ParamSurfaceSpec | ImplicitSpec; // …and its equations, so
+  //                    a saved scene can rebuild the exact shape on load (Phase 7 persistence)
 }
 
 /** One InstancedMesh + its per-instance entity slots, keyed by (shape kind × material). */
@@ -223,6 +229,7 @@ export class Sandbox {
   private placeValid = true;
   private axisLock: 'x' | 'y' | 'z' | null = null;
   onFieldChange?: () => void; // UI re-renders the field panel off this
+  onSceneLoad?: () => void; // UI re-syncs the World sliders/toggles after a scene loads
   private joints: JointRec[] = [];
   private docks: DockRec[] = []; // weld/hinge pairs currently being drawn together (pre-lock)
   private jointGroup = new THREE.Group(); // holds the connector lines (docks + joints)
@@ -558,6 +565,7 @@ export class Sandbox {
       mat, [tiles(2 * Math.PI * s.maxRadius), tiles(s.height)],
     );
     e.support = { points: s.hull, pad: 0 }; // collider = hull of exactly these points
+    e.specKind = 'revolution'; e.spec = spec; // remember the equations, so a save can rebuild it
     return { ok: true, entity: e };
   }
 
@@ -609,6 +617,7 @@ export class Sandbox {
       ends[i * 6 + 3] = cap.center[0] - axis.x; ends[i * 6 + 4] = cap.center[1] - axis.y; ends[i * 6 + 5] = cap.center[2] - axis.z;
     });
     e.support = { points: ends, pad: s.tube };
+    e.specKind = 'curve'; e.spec = spec;
     return { ok: true, entity: e };
   }
 
@@ -654,6 +663,7 @@ export class Sandbox {
     e.support = { points: s.supportPoints, pad: 0 }; // slab corners = the collider's extremes
     // open surfaces are visible from both sides (a Möbius strip has no inside)
     (e.mesh!.material as THREE.MeshStandardMaterial).side = THREE.DoubleSide;
+    e.specKind = 'surface'; e.spec = spec;
     return { ok: true, entity: e };
   }
 
@@ -692,6 +702,7 @@ export class Sandbox {
     // box-projected UVs are already in ~2-world-unit tiles, so repeat [1,1]
     const e = this.finishCustomEntity(body, s.geometry, p, s.maxRadius, s.volume, `implicit: ${spec.fxyz}`, mat, [1, 1]);
     e.support = { points: s.supportPoints, pad: 0 }; // box corners = the collider's extremes
+    e.specKind = 'implicit'; e.spec = spec;
     return { ok: true, entity: e };
   }
 
@@ -1718,6 +1729,169 @@ export class Sandbox {
     for (let i = 0; i < 20; i++) this.spawn(Math.random() < 0.5 ? 'box' : 'sphere');
   }
 
+  // ---------------------------------------------------------------- Phase 7: save / load
+  /**
+   * Snapshot the whole scene to a plain JSON document (see systems/persistence.ts). Everything a
+   * user BUILT round-trips: primitives, custom shapes (via their equations), fields, joints, world
+   * settings, camera. Emergent procedural bodies — accreted planets (painted skins) and shatter
+   * debris — have no equation to rebuild from, so they're skipped and counted; a joint touching a
+   * skipped body is dropped with it.
+   */
+  serializeScene(): SceneData {
+    const savable = (e: Entity) =>
+      e.kind === 'box' || e.kind === 'sphere' || (e.kind === 'custom' && !!e.spec);
+    const ents = this.entities.filter(savable);
+    const index = new Map<Entity, number>();
+    ents.forEach((e, i) => index.set(e, i));
+
+    const entities: EntityData[] = ents.map((e) => {
+      const t = e.body.translation(), r = e.body.rotation();
+      const v = e.body.linvel(), w = e.body.angvel();
+      return {
+        kind: e.kind, specKind: e.specKind, spec: e.spec,
+        size: e.size, matId: e.mat.id, color: e.color.getHex(),
+        pos: [t.x, t.y, t.z], quat: [r.x, r.y, r.z, r.w],
+        linvel: [v.x, v.y, v.z], angvel: [w.x, w.y, w.z],
+        frozen: e.frozen || undefined,
+      };
+    });
+
+    const fields: FieldData[] = this.fields.map((rec) => {
+      const f = rec.field;
+      const d: FieldData = {
+        kind: f.kind, shape: f.shape,
+        pos: [f.pos.x, f.pos.y, f.pos.z], quat: [f.quat.x, f.quat.y, f.quat.z, f.quat.w],
+        size: [f.size.x, f.size.y, f.size.z],
+        strength: f.strength, hidden: f.hidden, lift: f.lift, dir: f.dir, sole: f.sole,
+      };
+      if (f.path) d.path = {
+        spec: { ...f.path.spec }, label: f.path.label, scale: f.path.scale, swirl: f.path.swirl,
+        closed: f.path.closed, drawn: f.path.drawn ? Array.from(f.path.drawn) : undefined,
+      };
+      return d;
+    });
+
+    const joints = this.joints
+      .map((j) => ({ a: index.get(j.a), b: index.get(j.b), kind: j.kind }))
+      .filter((j): j is { a: number; b: number; kind: JointKind } => j.a != null && j.b != null);
+
+    return {
+      version: SCENE_VERSION,
+      world: {
+        gravityY: this.gravityY, timeScale: this.timeScale, paused: this.paused,
+        selfGravity: this.selfGravityOn, selfG: this.selfG,
+        accretion: this.accretionOn, breakage: this.breakageOn, fieldStrength: this.fieldStrength,
+      },
+      entities, fields, joints,
+      camera: {
+        pos: [this.camera.position.x, this.camera.position.y, this.camera.position.z],
+        target: [this.controls.target.x, this.controls.target.y, this.controls.target.z],
+      },
+      skipped: this.entities.length - ents.length || undefined,
+    };
+  }
+
+  /** Wipe the scene and rebuild it from a saved document. Returns the number of bodies it skipped
+   *  (procedural ones with no saved recipe), or -1 if the document is the wrong version. */
+  loadScene(data: SceneData): number {
+    if (!data || data.version !== SCENE_VERSION) return -1;
+    this.clear();       // entities + joints + grab
+    this.clearFields(); // fields + any in-progress placement/edit
+
+    const w = data.world;
+    this.setGravityY(w.gravityY);
+    this.setTimeScale(w.timeScale);
+    this.setPaused(w.paused);
+    this.setSelfGravity(w.selfGravity);
+    this.setSelfGravityG(w.selfG);
+    this.setAccretion(w.accretion);
+    this.setBreakage(w.breakage);
+    this.setFieldStrength(w.fieldStrength ?? 1);
+
+    // entities first, so joints can reference them by their saved array index
+    const built = data.entities.map((ed) => this.spawnFromData(ed));
+    for (const jl of data.joints) {
+      const a = built[jl.a], b = built[jl.b];
+      // rebuild the rigid joint directly at the saved pose (no re-docking — the bodies already sit
+      // where they were welded/hinged, so lockJoint locks them exactly there)
+      if (a && b) this.lockJoint(a, b, jl.kind as JointKind, this.makeConnectorLine(jl.kind as JointKind));
+    }
+    for (const fd of data.fields) this.addFieldFromData(fd);
+
+    if (data.camera) {
+      this.camera.position.set(data.camera.pos[0], data.camera.pos[1], data.camera.pos[2]);
+      this.controls.target.set(data.camera.target[0], data.camera.target[1], data.camera.target[2]);
+      this.controls.update();
+    }
+    this.onSceneLoad?.();
+    this.onFieldChange?.();
+    return data.skipped ?? 0;
+  }
+
+  /** Rebuild one saved body and force it to the saved pose + velocity (create* drop at a random spot). */
+  private spawnFromData(ed: EntityData): Entity | null {
+    const mat = materialById(ed.matId);
+    const at = new THREE.Vector3(ed.pos[0], ed.pos[1], ed.pos[2]);
+    let e: Entity | null = null;
+    if (ed.kind === 'box' || ed.kind === 'sphere') {
+      e = this.spawn(ed.kind, at, ed.size, mat);
+      e.color.setHex(ed.color); // restore this body's exact palette color
+    } else if (ed.specKind && ed.spec) {
+      const s = ed.spec;
+      const res =
+        ed.specKind === 'revolution' ? this.createRevolution(s as RevolutionSpec, mat)
+          : ed.specKind === 'curve' ? this.createParamCurve(s as ParamCurveSpec, mat)
+            : ed.specKind === 'surface' ? this.createParamSurface(s as ParamSurfaceSpec, mat)
+              : this.createImplicit(s as ImplicitSpec, mat);
+      if (!res.ok) return null;
+      e = res.entity;
+    }
+    if (!e) return null;
+
+    const q = ed.quat;
+    e.body.setTranslation({ x: ed.pos[0], y: ed.pos[1], z: ed.pos[2] }, true);
+    e.body.setRotation({ x: q[0], y: q[1], z: q[2], w: q[3] }, true);
+    e.body.setLinvel({ x: ed.linvel[0], y: ed.linvel[1], z: ed.linvel[2] }, true);
+    e.body.setAngvel({ x: ed.angvel[0], y: ed.angvel[1], z: ed.angvel[2] }, true);
+    // seed the interpolation + acceleration state so the body doesn't lerp from a stale pose or
+    // report a phantom acceleration spike on the first step after loading
+    e.prevPos.copy(at); e.currPos.copy(at);
+    e.prevQuat.set(q[0], q[1], q[2], q[3]); e.currQuat.copy(e.prevQuat);
+    e.lastVel.set(ed.linvel[0], ed.linvel[1], ed.linvel[2]);
+    if (ed.frozen) this.toggleFreeze(e);
+    return e;
+  }
+
+  /** Rebuild one field from saved data and add it live (marker + registry). Path polylines are
+   *  re-sampled from the stored equations / stroke rather than saved, keeping the file small. */
+  private addFieldFromData(fd: FieldData) {
+    const field: Field = {
+      id: this.nextFieldId++,
+      kind: fd.kind as FieldKind, shape: fd.shape as FieldShape,
+      pos: new THREE.Vector3(fd.pos[0], fd.pos[1], fd.pos[2]),
+      quat: new THREE.Quaternion(fd.quat[0], fd.quat[1], fd.quat[2], fd.quat[3]),
+      size: new THREE.Vector3(fd.size[0], fd.size[1], fd.size[2]),
+      strength: fd.strength, hidden: fd.hidden, lift: fd.lift, dir: fd.dir, sole: fd.sole,
+    };
+    if (fd.path) {
+      const p = fd.path;
+      if (p.drawn) {
+        const unit = Float32Array.from(p.drawn);
+        const s = this.scaledFromUnit(unit, p.scale, p.closed);
+        field.path = { spec: { ...p.spec }, label: p.label, scale: p.scale, swirl: p.swirl, pts: s.pts, tans: s.tans, closed: p.closed, drawn: unit };
+      } else {
+        const s = samplePath(p.spec, p.scale);
+        const pts = s ? s.pts : new Float32Array(0), tans = s ? s.tans : new Float32Array(0);
+        field.path = { spec: { ...p.spec }, label: p.label, scale: p.scale, swirl: p.swirl, pts, tans, closed: s ? s.closed : p.closed };
+      }
+    }
+    const rec: FieldRec = { field, marker: this.makeFieldMarker(field) };
+    this.fieldGroup.add(rec.marker);
+    this.tagMarker(rec);
+    rec.marker.visible = !field.hidden;
+    this.fields.push(rec);
+  }
+
   setGravityY(v: number) {
     this.gravityY = v;
     this.world.gravity = { x: 0, y: v, z: 0 };
@@ -1745,6 +1919,7 @@ export class Sandbox {
   setPaused(p: boolean) { this.paused = p; }
   get timeScaleValue() { return this.timeScale; }
   setTimeScale(v: number) { this.timeScale = THREE.MathUtils.clamp(v, 0.1, 3); }
+  getTimeScale(): number { return this.timeScale; }
 
   // ---------------------------------------------------------------- the loop
   start() {
