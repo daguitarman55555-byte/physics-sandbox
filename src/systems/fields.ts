@@ -24,7 +24,7 @@
 import * as THREE from 'three';
 import { parseExpression } from './expr';
 
-export type FieldKind = 'attractor' | 'repeller' | 'wind' | 'vortex' | 'tornado' | 'path' | 'gravitywell' | 'turbulence' | 'magnetic' | 'drag' | 'explosion';
+export type FieldKind = 'attractor' | 'repeller' | 'wind' | 'vortex' | 'tornado' | 'path' | 'gravitywell' | 'turbulence' | 'magnetic' | 'drag' | 'fluid' | 'explosion';
 export type FieldShape = 'sphere' | 'box' | 'cylinder';
 
 /**
@@ -93,6 +93,9 @@ export const FIELD_INFO: Record<FieldKind, { strength: number; size: number; col
   // drag: a slow-mo / terminal-velocity pocket. `strength` is the damping RATE (1/s) — how fast it
   // bleeds off velocity; gravity still acts, so things fall slower and settle to a lower terminal speed.
   drag: { strength: 5, size: 10, color: 0x9aa7b4, label: 'Drag zone' },
+  // fluid: a tank of water — Archimedes buoyancy + fluid drag. `strength` is the fluid DENSITY in the
+  // sim's water-units (1 = water, so a body lighter than water floats; >1 = mercury). Region top = surface.
+  fluid: { strength: 1, size: 10, color: 0x2a7fce, label: 'Fluid' },
   // explosion is a ONE-SHOT: position the ghost, and Place DETONATES it (radial impulse, shockwave,
   // camera shake) instead of leaving a field behind. `strength` = blast speed (m/s) at the centre.
   explosion: { strength: 14, size: 10, color: 0xff7a3d, label: 'Explosion' },
@@ -216,6 +219,8 @@ function planeNormal(pts: Float32Array, n: number, out: THREE.Vector3): boolean 
 
 const RESPONSE = 5; // how hard any field steers a body toward its target velocity (1/s) — uniform
 const DRAG_MAX = 50; // cap on a drag zone's damping rate (1/s) so rate·dt stays < 1 (no overshoot)
+const FLUID_DRAG = 3; // linear damping (1/s) a submerged body feels — water resists motion so things
+//                       settle at the surface and bob instead of ringing forever
 const SOFT_EDGE = 0.55; // full strength inside this fraction of the region; smoothstep to 0 by the edge
 const PATH_LOOKAHEAD = 4; // samples ahead the flow steers toward (follows curvature + draws onto the path)
 const SWIRL_GAIN = 0.7; // path swirl scales with radius (0 at the centreline) and this cap — keeps it gentle
@@ -291,6 +296,7 @@ export function fieldForce(
 ): THREE.Vector3 {
   out.set(0, 0, 0);
   if (field.kind === 'explosion') return out; // one-shot: it detonates on Place, never acts as a field
+  if (field.kind === 'fluid') return out; // buoyancy needs the body's volume — the Sandbox computes it
   if (field.kind === 'path') return field.path ? pathForce(field, bodyPos, vel, mass, gain, out) : out;
   if (field.kind === 'gravitywell') return wellForce(field, bodyPos, vel, mass, gain, out);
   if (field.kind === 'turbulence') return turbulenceForce(field, bodyPos, vel, mass, gain, out);
@@ -348,6 +354,35 @@ export function fieldForce(
     _tv.copy(_d).divideScalar(_d.length() || 1).multiplyScalar(sign * speed);
   }
   return out.set(_tv.x - vel.x, _tv.y - vel.y, _tv.z - vel.z).multiplyScalar(mass * RESPONSE * inf);
+}
+
+/**
+ * Buoyancy + fluid drag for a body inside a 'fluid' region (a tank of water). The region's TOP is the
+ * water surface (world-horizontal — water finds its level, so any region tilt is ignored for it).
+ * Archimedes: an upward force = fluidDensity·g·submergedVolume, so a body lighter than the fluid floats
+ * and a denser one sinks (both use the sim's density/1000 units, so `strength` 1 = water). Plus a linear
+ * drag ∝ the submerged fraction, so bodies settle at the surface and bob rather than oscillating forever.
+ * Written into `out` as a FORCE (the Sandbox multiplies by dt). Zero outside the region's footprint.
+ */
+export function fluidForce(
+  field: Field, bodyPos: THREE.Vector3, vel: THREE.Vector3, mass: number, volume: number, radius: number,
+  gravityY: number, gain: number, out: THREE.Vector3,
+): THREE.Vector3 {
+  out.set(0, 0, 0);
+  const sz = field.size;
+  const dx = bodyPos.x - field.pos.x, dz = bodyPos.z - field.pos.z;
+  const inFootprint = field.shape === 'box'
+    ? Math.abs(dx) < sz.x + radius && Math.abs(dz) < sz.z + radius
+    : Math.hypot(dx, dz) < sz.x + radius; // sphere / cylinder footprint
+  if (!inFootprint) return out;
+  const surfaceY = field.pos.y + (field.shape === 'sphere' ? sz.x : sz.y); // region top = water surface
+  const sub = Math.max(0, Math.min(1, (surfaceY - (bodyPos.y - radius)) / (2 * radius))); // submerged fraction
+  if (sub <= 0) return out;
+  const fluidDensity = field.strength * gain; // water-units (1 = water); >1 = a denser fluid (mercury)
+  out.y = fluidDensity * -gravityY * volume * sub; // Archimedes' upward force ∝ displaced volume
+  const c = FLUID_DRAG * mass * sub; // fluid drag: mass-scaled so deceleration is mass-independent
+  out.x -= vel.x * c; out.y -= vel.y * c; out.z -= vel.z * c;
+  return out;
 }
 
 /**

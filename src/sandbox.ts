@@ -23,7 +23,7 @@ import {
 } from './systems/shapes';
 import { buildImplicit, type ImplicitSpec } from './systems/implicit';
 import { PLAIN, type Material } from './systems/materials';
-import { fieldForce, fieldInfluence, pathInfluence, wellOrbitalVelocity, FIELD_INFO, samplePath, PATH_PRESETS, type Field, type FieldKind, type FieldShape, type CurveSpec } from './systems/fields';
+import { fieldForce, fieldInfluence, pathInfluence, fluidForce, wellOrbitalVelocity, FIELD_INFO, samplePath, PATH_PRESETS, type Field, type FieldKind, type FieldShape, type CurveSpec } from './systems/fields';
 import { FieldFlow } from './systems/fieldviz';
 import { NBody } from './systems/nbody';
 import { mergeComp, PlanetSkin, setSkinDetail as setSkinDetailFlag, skinDetailHigh, type CompEntry } from './systems/planettex';
@@ -1158,6 +1158,12 @@ export class Sandbox {
       field.shape = 'cylinder';
       field.size.set(10, 9, 10); // radius 10, half-height 9 → 18 tall
       field.pos.y = 6; // bottom at y = -3, floor debris well inside the inflow layer
+    }
+    if (kind === 'fluid') {
+      // a shallow tank sitting on the floor: bottom at y=0, water surface at the region top (y=10)
+      field.shape = 'box';
+      field.size.set(10, 5, 10);
+      field.pos.y = 5;
     }
     const rec: FieldRec = { field, marker: this.makeFieldMarker(field) };
     this.fieldGroup.add(rec.marker);
@@ -2703,6 +2709,12 @@ export class Sandbox {
         this._s.set(0, 0, 0);
         let liftInf = 0; // strongest gravity-suspension influence (a well's region, or a lift-flow tube)
         for (const { field } of this.fields) {
+          if (field.kind === 'fluid') {
+            // buoyancy needs the body's volume + radius + world gravity, which fieldForce doesn't take
+            fluidForce(field, this._p, this._fieldV, mass, this.volumeOf(e), e.size, this.gravityY, this.fieldStrength, this._fieldF);
+            this._s.add(this._fieldF);
+            continue;
+          }
           fieldForce(field, this._p, this._fieldV, mass, this.fieldStrength, this._fieldF);
           this._s.add(this._fieldF);
           if (field.kind === 'gravitywell') {
@@ -2843,9 +2855,11 @@ export class Sandbox {
     // live flow tracers: the live fields, plus the ghost being placed (so you preview its flow), minus
     // the one you're mid-edit on (its draft ghost stands in for it) — advected by each field's real force
     this._flowList.length = 0;
-    for (const r of this.fields) if (r !== this.editingOriginal) this._flowList.push(r.field);
-    // (explosion ghosts excluded: they exert no steady force, so a tracer cloud would just sit dead)
-    if (this.placing && this.placing.field.kind !== 'explosion') this._flowList.push(this.placing.field);
+    // fluid & explosion have no steady advecting force (buoyancy is handled outside fieldForce), so a
+    // tracer cloud would just sink or sit dead — skip them
+    const noFlow = (f: Field) => f.kind === 'explosion' || f.kind === 'fluid';
+    for (const r of this.fields) if (r !== this.editingOriginal && !noFlow(r.field)) this._flowList.push(r.field);
+    if (this.placing && !noFlow(this.placing.field)) this._flowList.push(this.placing.field);
     this.fieldFlow.update(this._flowList, this.fieldStrength, this.placing?.field.id ?? -1);
   }
   private _flowList: Field[] = []; // reused each frame to feed the flow viz without allocating

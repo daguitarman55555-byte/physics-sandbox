@@ -1406,7 +1406,8 @@ function buildFieldsSection(panel: HTMLElement, sandbox: Sandbox) {
       : rec.field.kind === 'gravitywell' ? 'mass'
         : rec.field.kind === 'magnetic' ? 'turn rate'
           : rec.field.kind === 'drag' ? 'damping'
-            : 'speed m/s';
+            : rec.field.kind === 'fluid' ? 'density'
+              : 'speed m/s';
     if (isPath) {
       const pf = rec.field.path!;
       for (const key of PATH_PRESET_KEYS) pathBtns[key].classList.toggle('on', pf.label === PATH_PRESETS[key].label);
