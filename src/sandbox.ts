@@ -2770,10 +2770,12 @@ export class Sandbox {
       // hard speed cap: a stray deep-overlap contact can otherwise inject unbounded energy into a
       // body, sending it off to infinity (and making it impossible to ever click again)
       const v = e.body.linvel();
-      const speed = Math.hypot(v.x, v.y, v.z);
+      let vx = v.x, vy = v.y, vz = v.z;
+      const speed = Math.sqrt(vx * vx + vy * vy + vz * vz); // plain sqrt — hypot's overflow guard isn't needed
       if (speed > MAX_SPEED) {
         const k = MAX_SPEED / speed;
-        e.body.setLinvel({ x: v.x * k, y: v.y * k, z: v.z * k }, true);
+        vx *= k; vy *= k; vz *= k;
+        e.body.setLinvel({ x: vx, y: vy, z: vz }, true);
       }
 
       // ADAPTIVE CCD: tunnel protection engages only on small fast bodies. Always-on CCD was THE
@@ -2797,10 +2799,10 @@ export class Sandbox {
       e.currPos.set(t.x, t.y, t.z);
       e.currQuat.set(r.x, r.y, r.z, r.w);
 
-      // acceleration over this step (post-cap velocity), for the forces readout
-      const vNow = e.body.linvel();
-      e.accel.set((vNow.x - e.lastVel.x) / FIXED, (vNow.y - e.lastVel.y) / FIXED, (vNow.z - e.lastVel.z) / FIXED);
-      e.lastVel.set(vNow.x, vNow.y, vNow.z);
+      // acceleration over this step — reuse the (possibly capped) velocity we already read above,
+      // instead of a second linvel() call into WASM (post-cap value is exactly vx/vy/vz)
+      e.accel.set((vx - e.lastVel.x) / FIXED, (vy - e.lastVel.y) / FIXED, (vz - e.lastVel.z) / FIXED);
+      e.lastVel.set(vx, vy, vz);
     }
     for (const e of lost) this.deleteEntity(e);
   }
