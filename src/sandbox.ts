@@ -116,6 +116,8 @@ const BRUSH_SPEED = 12; // target speed (m/s) the brush drives bodies toward
 const BRUSH_RESPONSE = 8; // how hard the brush steers toward that target velocity (1/s)
 const BLOW_RADIUS = 6; // metres — the blow tool's one-shot gust reaches this far from the click point
 const BLOW_SPEED = 14; // m/s — outward kick at the centre (falls off linearly to the edge)
+const HINGE_MOTOR_FACTOR = 2; // stiffness/damping factor of a hinge's velocity motor — how hard it
+//                               drives toward the target spin (acceleration-based, so mass-independent)
 
 // Accretion merging: touching bodies fuse into one bigger sphere (planets form from rubble).
 const ACCRETE_EVERY = 10; // check cadence in physics steps (6 Hz) — merging need not be per-step
@@ -239,6 +241,7 @@ export class Sandbox {
   private nextJointId = 0;
   tool: Tool = 'grab';
   jointKind: JointKind = 'fixed';
+  private hingeMotor = 0; // target spin speed (rad/s) for edge hinges; 0 = free-swinging (motor off)
   private connectA: Entity | null = null; // first object picked by the connect tool
 
   // interaction. Grabbing is physical: a collider-less kinematic body follows the cursor, tied to
@@ -766,6 +769,29 @@ export class Sandbox {
 
   setJointKind(kind: JointKind) { this.jointKind = kind; }
 
+  /** Target spin speed (rad/s) for hinge motors. Drives every existing hinge and any new one — so a
+   *  row of doors/wheels all spin together. 0 releases the motor (the hinge free-swings again). */
+  get hingeMotorSpeed() { return this.hingeMotor; }
+  setHingeMotorSpeed(v: number) {
+    this.hingeMotor = v;
+    for (const j of this.joints) if (j.kind === 'edge') this.applyMotor(j);
+  }
+
+  /** (Re)configure a hinge's motor from the current `hingeMotor` speed. Off (factor 0) when speed is 0
+   *  so the hinge swings freely; an acceleration-based velocity motor otherwise (mass-independent spin). */
+  private applyMotor(j: JointRec) {
+    const on = this.hingeMotor !== 0;
+    // an edge hinge is a revolute joint at runtime; the motor methods live on that subtype
+    const rev = j.joint as RAPIER.RevoluteImpulseJoint;
+    rev.configureMotorModel(RAPIER.MotorModel.AccelerationBased);
+    rev.configureMotorVelocity(this.hingeMotor, on ? HINGE_MOTOR_FACTOR : 0);
+    // a MOTORIZED hinge spins freely like a wheel/turntable, so drop in-pair collision (otherwise the
+    // panel swings ~90° and jams against its partner). A FREE (motor-off) hinge stays a door: collision
+    // back on so it can't swing through what it's hinged to.
+    j.joint.setContactsEnabled(!on);
+    j.a.body.wakeUp(); j.b.body.wakeUp();
+  }
+
   /** Freeze pins a body in place (switches it to a fixed body); calling again thaws it. */
   toggleFreeze(e: Entity) {
     e.frozen = !e.frozen;
@@ -902,7 +928,9 @@ export class Sandbox {
     // its partner, so the colliders are what stop the swing. Contact with every OTHER body is unaffected.
     if (kind === 'fixed') joint.setContactsEnabled(false);
     a.body.wakeUp(); b.body.wakeUp();
-    this.joints.push({ id: this.nextJointId++, kind, a, b, joint, localA: built.localA, localB: built.localB, line });
+    const rec: JointRec = { id: this.nextJointId++, kind, a, b, joint, localA: built.localA, localB: built.localB, line };
+    this.joints.push(rec);
+    if (kind === 'edge' && this.hingeMotor !== 0) this.applyMotor(rec); // spin new hinges if the motor's on
   }
 
   private quatOf(body: RAPIER.RigidBody): THREE.Quaternion {

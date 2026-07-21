@@ -1049,12 +1049,29 @@ function buildToolsSection(panel: HTMLElement, sandbox: Sandbox) {
   const brushRow = el('div', '', 'row wrap');
   const toolBtns = {} as Record<Tool, HTMLButtonElement>;
 
+  // hinge motor: a live spin speed applied to every hinge (existing + new) — motorized doors/wheels.
+  // Only relevant while the Connect tool is set to Hinge, so the row hides otherwise.
+  const motorRow = el('div', '', 'field');
+  const motorLabel = el('label', 'Hinge motor <b>0.0</b> rad/s');
+  const motorRange = el('input');
+  motorRange.type = 'range'; motorRange.min = '-6'; motorRange.max = '6'; motorRange.step = '0.2'; motorRange.value = '0';
+  motorRange.oninput = () => {
+    const v = parseFloat(motorRange.value);
+    sandbox.setHingeMotorSpeed(v);
+    motorLabel.querySelector('b')!.textContent = v.toFixed(1);
+  };
+  motorRow.append(motorLabel, motorRange);
+  const syncMotorRow = () => {
+    motorRow.style.display = sandbox.tool === 'connect' && sandbox.jointKind === 'edge' ? '' : 'none';
+  };
+
   const setTool = (t: Tool) => {
     sandbox.setTool(t);
     for (const k of Object.keys(toolBtns) as Tool[]) toolBtns[k].classList.toggle('primary', k === t);
     hint.textContent = toolHints[t];
     jointRow.style.display = t === 'connect' ? '' : 'none'; // joint picker only matters for Connect
     brushRow.style.display = t === 'brush' ? '' : 'none'; // brush-mode chips only matter for Brush
+    syncMotorRow();
   };
 
   const toolRow = el('div', '', 'row wrap');
@@ -1070,6 +1087,7 @@ function buildToolsSection(panel: HTMLElement, sandbox: Sandbox) {
   const setJoint = (k: JointKind) => {
     sandbox.setJointKind(k);
     for (const kk of Object.keys(jointBtns) as JointKind[]) jointBtns[kk].classList.toggle('on', kk === k);
+    syncMotorRow(); // the motor slider only applies to hinges
   };
   for (const k of Object.keys(JOINT_INFO) as JointKind[]) {
     const b = el('button', JOINT_INFO[k].label, 'mini chip');
@@ -1091,7 +1109,7 @@ function buildToolsSection(panel: HTMLElement, sandbox: Sandbox) {
     brushRow.append(b);
   }
 
-  panel.append(jointRow, brushRow, hint);
+  panel.append(jointRow, motorRow, brushRow, hint);
   setJoint(sandbox.jointKind);
   setBrush(sandbox.brush);
   setTool('grab');
