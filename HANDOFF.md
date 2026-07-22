@@ -805,8 +805,46 @@ real UI buttons): 25 objects incl. a revolution + a vortex field + Moon gravity 
 plain (untextured) custom shape's palette tint is baked at mesh creation, so it may reload a different
 palette color — cosmetic only (shape/mass/physics/pose all exact). NEXT PHASE-7 SLICES: share URLs,
 record→GIF/MP4, time REWIND (ring-buffer of states), undo/redo, a named scene library.
-LIKELY NEXT: motion STREAKS for tracers; affected-object glow/tint; per-object trails; drawpad per-axis
-ortho cam. NB screenshotting a 500ms shockwave: pin `S.shocks[0].born = now-190` on an interval.
+TIER 1 SHIPPED (2026-07-21, 8 features, each its own commit+push): (1) MAGNETIC field — F=q·v×B (q/m
+folded into `strength`), force ⊥ velocity so movers curve into circles/helices keeping their speed; B
+along local +Y, aim arrow. (2) DRAG-ZONE field — damps velocity toward 0 (slow-mo/terminal-velocity
+pocket); `strength`=damping rate, capped DRAG_MAX 50 so rate·dt<1. Both are branches in fields.ts
+`fieldForce` after the inf gate; auto-wired into buttons/editor (per-kind strength label). (3) BLOW
+tool — one-shot radial gust (BLOW_RADIUS 6, BLOW_SPEED 14, up-bias) at the clicked point/object; a Tool
+mode. (4) DUPLICATE tool — clones primitives (size/mat/colour) and custom shapes (rebuilt from the new
+`Entity.spec`) beside the original at rest; procedural bodies (no recipe) = no-op. (5) HINGE MOTORS —
+Connect-tool "Hinge motor" slider drives an acceleration-based velocity motor (`configureMotorVelocity`
+on the RevoluteImpulseJoint; HINGE_MOTOR_FACTOR 2) on every edge hinge; a MOTORIZED hinge drops in-pair
+collision (`setContactsEnabled(false)`) so it free-spins like a wheel, motor-off restores the door.
+(6) PER-OBJECT GRAVITY — inspector "Gravity ×" slider → Rapier `setGravityScale` (1 normal / 0
+weightless / <0 floats up), stored on `Entity.gravityScale`, save/load round-tripped, and the well/lift
+gravity-suspension now multiplies by it. (7) BUOYANCY — a "Fluid" field kind (a water tank): region top
+= surface, Archimedes upward force = fluidDensity·g·submergedVolume + fluid drag, computed with the
+body's volume in the Sandbox field loop (`fluidForce` export; fieldForce returns 0 for it); `strength`=
+density in water-units (1=water), so wood floats / steel sinks (verified 9.91 vs 0.5). Excluded from
+flow tracers. (8) MOTION TRAIL — a fading ribbon on the SELECTED object (preallocated line, per-vertex
+colour fading to background, 90-pt ring), automatic on selection, Display "Trails" toggle, one object
+so zero cost at scale. All 8 verified live via console physics probes + real UI (magnetic speed held
+6.2 while curving; drag 8→1.2; blow scattered 8 spheres ~12 m/s; hinge span 3.82 rad/s; gravity −1→
+y930 up / 0→hover / 1→floor; wood/steel float/sink; trail 90 pts). NB motor methods are on
+RevoluteImpulseJoint not the base ImpulseJoint (cast needed); motor target 0 with factor 0 = free hinge.
+PERF: per-step post-solve loop now reads linvel() ONCE (reused capped components for the accel readout,
+no 2nd WASM call) + plain sqrt not hypot. Verified 1000 objects, cap holds (max 22<60), 30 fps.
+MENU REORGANIZED (2026-07-21, research-based — IxDF/UXPin progressive disclosure, Justinmind/Eleken
+toggle grouping): top-level sections 10→7 — the 4 shape creators now NEST under one "Create shapes"
+(`section(createBody, …)`; creators call new `openAncestorSections(panel)` to pop both levels). World
+split into labelled sub-groups via a new `.subhead` (divider label): Time (pause+scale), Simulation
+(mutual gravity + G, accretion, breakage — a `row wrap`, no longer a cramped 4-in-a-row), Display
+(HD skins + new Trails toggle). Separated rendering (HD skins) from physics MODES. Panel 232→244px;
+`.subhead` + nested-`.sec` CSS (indent + left border). onSceneLoad resync + all handler var names
+unchanged. Verified: 7 sections, Create shapes expands to 4 nested creators, clean layout, no errors.
+TUNING (2026-07-21, Rafael "accrete/break too easily, mutual gravity too strong"): mutual-gravity
+default `selfG` 2→1; accretion `ACCRETE_SPEED` 2→1 + new `ACCRETE_ESCAPE_FRAC` 0.5 (was 0.7, both fuse
+sites); `BREAK_Q` 45→90. All monotonic in the asked direction. Verified: default G reads 1; a 2.2 m/s
+head-on pair that fused before now BOUNCES (2 objects, 0 accreted); resting pair still fuses.
+LIKELY NEXT: affected-object glow/tint; trail for non-selected fast bodies; drawpad per-axis ortho cam;
+then Tier-2 (rewind, share URLs, save accreted planets). NB screenshotting a 500ms shockwave: pin
+`S.shocks[0].born = now-190` on an interval.
 Research dossier: docs/FORCES_RESEARCH.md.
 STANDING RULE (Rafael, 2026-07-16): git commit AND push after EVERY build — don't wait to be asked.
 

@@ -227,6 +227,13 @@ A checklist so nothing is lost. `[x]` = in Phase 1 today · `[ ]` = planned (wit
 - [x] **Turbulence tamed** — turbulence steers with its own gentle response (1.6/s vs the shared 5/s):
       its target velocity keeps changing direction, so a body is always far from target and the shared
       response never let up (felt like a blender, reported by Rafael). Default eddy speed 8→6 too.
+- [x] **Magnetic field** (2026-07-21) — F=q·v×B (q/m folded into strength): force ⊥ velocity, so movers
+      curve into circles/helices while keeping their speed; B along local +Y (aim with the gizmo).
+- [x] **Drag-zone field** (2026-07-21) — damps velocity toward zero: a slow-mo / terminal-velocity
+      pocket (strength = damping rate).
+- [x] **Buoyancy — Fluid field** (2026-07-21) — a tank of water: region top = surface, Archimedes
+      upward force ∝ displaced volume + fluid drag; strength = fluid density (1 = water), so a body
+      lighter than the fluid floats and a denser one sinks (verified wood 9.91 / steel 0.5).
 - [x] **Field placement & editing** — picking a kind spawns a translucent **hologram** at the view
       centre that exerts **no force** until you confirm it (the commit-or-cancel pattern every 3D
       builder uses). Position it with an axis-constrained **gizmo** (three.js TransformControls,
@@ -332,11 +339,17 @@ A checklist so nothing is lost. `[x]` = in Phase 1 today · `[ ]` = planned (wit
       (verified: 45°-diagonal door turned in, seated at contact, swung 77° open, worst penetration
       2 mm). A locked weld instead turns collision OFF within the pair (it's one rigid body — can't
       clip itself, and it kills the collider-vs-joint jitter). Spring/rope stay center-to-center
-      tethers. Live connector lines; removed automatically when either body is deleted. (Motors/slider
-      still to come.)
+      tethers. Live connector lines; removed automatically when either body is deleted.
+- [x] **Hinge motors** (2026-07-21) — a "Hinge motor" slider (Connect tool, Hinge selected) drives an
+      acceleration-based velocity motor on every edge hinge (existing + new); a motorized hinge drops
+      in-pair collision so it free-spins like a wheel/turntable, motor-off restores the door.
 - [x] **Tools** — a left-click **mode** selector: Grab (default) · Connect · **Freeze** (pin a body
-      in place, icy tint; click again to release) · **Push** (shove away from the camera). (Blow /
-      duplicate still to come.)
+      in place, icy tint; click again to release) · **Push** (shove away from the camera) · **Blow**
+      (one-shot radial gust at the click) · **Duplicate** (drop an independent copy of an object).
+- [x] **Per-object gravity** (2026-07-21) — inspector "Gravity ×" slider (Rapier gravityScale): 1
+      normal, 0 weightless, negative floats up; saved/loaded.
+- [x] **Motion trail** (2026-07-21) — a fading ribbon follows the selected object (Display "Trails"
+      toggle) so you can read its path.
 
 ## Effects & chemistry — `systems/effects.ts`, `systems/chemistry.ts` (Phase 5)
 - [ ] Temperature: heat sources · conduction · thermal expansion · melt→swap (Module T rule)
