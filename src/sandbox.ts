@@ -2362,21 +2362,19 @@ export class Sandbox {
   /** Displace a sphere geometry radially by three random low-frequency waves. The displacement is
    *  a pure function of direction, so UV-seam duplicate vertices stay welded and the skin's
    *  equirect mapping survives untouched. */
-  private displaceSphere(geo: THREE.BufferGeometry, amps: [number, number, number]): THREE.BufferGeometry {
+  /** Radially displace a sphere by a sum of direction-projected sine waves `[amplitude, frequency]`.
+   *  Direction-pure (a pure function of vertex DIRECTION), so UV-seam duplicate vertices stay welded
+   *  and an equirect skin's UVs survive a rebuild. More/higher-frequency waves = a rougher, rubblier
+   *  surface; fewer/lower = a smooth planet. */
+  private displaceSphere(geo: THREE.BufferGeometry, waves: Array<[number, number]>): THREE.BufferGeometry {
     const p = geo.attributes.position as THREE.BufferAttribute;
-    const dirs = [
-      new THREE.Vector3().randomDirection(),
-      new THREE.Vector3().randomDirection(),
-      new THREE.Vector3().randomDirection(),
-    ];
-    const ph = [Math.random() * 6.28, Math.random() * 6.28, Math.random() * 6.28];
+    const dirs = waves.map(() => new THREE.Vector3().randomDirection());
+    const ph = waves.map(() => Math.random() * 6.28);
     const v = new THREE.Vector3();
     for (let i = 0; i < p.count; i++) {
       v.set(p.getX(i), p.getY(i), p.getZ(i)).normalize();
-      const bump = 1
-        + amps[0] * Math.sin(v.dot(dirs[0]) * 3.1 + ph[0])
-        + amps[1] * Math.sin(v.dot(dirs[1]) * 5.3 + ph[1])
-        + amps[2] * Math.sin(v.dot(dirs[2]) * 8.7 + ph[2]);
+      let bump = 1;
+      for (let w = 0; w < waves.length; w++) bump += waves[w][0] * Math.sin(v.dot(dirs[w]) * waves[w][1] + ph[w]);
       p.setXYZ(i, p.getX(i) * bump, p.getY(i) * bump, p.getZ(i) * bump);
     }
     geo.computeVertexNormals();
@@ -2385,24 +2383,28 @@ export class Sandbox {
 
   /** A lumpy rock for debris: strong displacement, asteroid look. */
   private potatoGeometry(R: number): THREE.BufferGeometry {
-    return this.displaceSphere(new THREE.SphereGeometry(R, 24, 16), [0.16, 0.1, 0.07]);
+    return this.displaceSphere(new THREE.SphereGeometry(R, 24, 16), [[0.16, 3.1], [0.1, 5.3], [0.07, 8.7]]);
   }
 
-  /** A lumpy UNIT sphere for accreted bodies (mesh is scaled by R). Relative bumpiness FADES as R
-   *  grows — a small reassembled body reads as rubble, a large one rounds out like a real planet
-   *  under self-gravity (hydrostatic equilibrium). Direction-pure displacement, so the equirect
-   *  skin UVs survive a rebuild unchanged. */
+  /** A lumpy UNIT sphere for accreted bodies (mesh is scaled by R). Bumpiness FADES as R grows — a
+   *  small aggregate reads as an angular RUBBLE chunk (pronounced, higher-frequency lumps), a large
+   *  one rounds out like a real planet under self-gravity (hydrostatic equilibrium — the size vs.
+   *  gravity/strength threshold). Direction-pure displacement, so the equirect skin UVs survive. */
   private lumpyGeometry(R: number): THREE.BufferGeometry {
-    const k = 0.13 / (1 + Math.max(0, R - 0.5) * 0.7); // ±13% at R≈0.5 → ±2% by R≈8
-    return this.displaceSphere(new THREE.SphereGeometry(1, 64, 48), [k, k * 0.65, k * 0.42]);
+    const a = 0.16 / (1 + Math.max(0, R - 0.5) * 0.7); // ±(rubbly) at R≈0.5 → nearly round by R≈8
+    return this.displaceSphere(new THREE.SphereGeometry(1, 64, 48),
+      [[a, 2.6], [a * 0.7, 4.9], [a * 0.5, 8.3], [a * 0.34, 13.1], [a * 0.22, 18.7]]);
   }
 
   /** A render material for a pure-material accreted body (no skin): the dominant material's PBR
    *  maps, or a solid-color standard material for Plain. */
   private accretedMaterialFor(dom: CompEntry): THREE.MeshStandardMaterial {
-    return dom.mat.maps
+    const m = dom.mat.maps
       ? this.pbrMaterial(dom.mat, [2, 1])
       : new THREE.MeshStandardMaterial({ color: dom.color, metalness: 0.1, roughness: 0.6 });
+    m.flatShading = true; // per-face normals → the lumps read as rock FACETS (a jagged rubble chunk,
+    //                       not a smooth blob); only pure accreted bodies use this — skins stay smooth
+    return m;
   }
 
   /** Attach a fresh lumpy custom mesh (unit geometry × R scale) to an entity. */
