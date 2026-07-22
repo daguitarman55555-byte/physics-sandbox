@@ -123,7 +123,10 @@ const TRAIL_MAX = 90; // points in the selected object's motion trail (~1.5 s of
 
 // Accretion merging: touching bodies fuse into one bigger sphere (planets form from rubble).
 const ACCRETE_EVERY = 10; // check cadence in physics steps (6 Hz) — merging need not be per-step
-const ACCRETE_SPEED = 2; // base max relative speed (m/s) to fuse — fast impacts bounce, slow contact
+const ACCRETE_SPEED = 1; // base max relative speed (m/s) to fuse — fast impacts bounce, slow contact
+//                          (lowered 2→1: objects were fusing too readily on gentle contact)
+const ACCRETE_ESCAPE_FRAC = 0.5; // fraction of escape velocity below which a grown body captures a
+//                                  toucher (lowered 0.7→0.5 so planets are less greedy)
 //                          sticks. Scaled up by the pair's ESCAPE VELOCITY (√(2G·M/r), like real
 //                          accretion: below escape speed you're captured), so a grown planet swallows
 //                          what touches it — without this, a moon can roll on the surface at ~2 m/s
@@ -148,10 +151,10 @@ const PLANET_NO_CCD_R = 1.2; // bodies past this radius never get CCD: a big bal
 // Impact breakage: a hit whose SPECIFIC energy (½μv²/m, PRE-impact velocities via lastVel — using
 // post-bounce speeds would make bouncy rubber break easier than brittle ice) exceeds the body's
 // strength shatters it into volume-conserving fragments that inherit its composition.
-const BREAK_Q = 45; // J/kg per strength unit — the master durability knob (scales EVERY shatter
+const BREAK_Q = 90; // J/kg per strength unit — the master durability knob (scales EVERY shatter
 //                     threshold, body-body and floor, keeping material differences intact). Raised
-//                     from 18: things take a real slam to break now (break speed scales with √Q, so
-//                     2.5× the energy ≈ 1.6× the impact speed everything survives)
+//                     18→45→90: things take a real slam to break now (break speed scales with √Q, so
+//                     each doubling of Q ≈ 1.4× the impact speed everything survives)
 const BREAK_BINDING = 0.15; // × v_esc² added when mutual gravity is on: self-gravity resists disruption
 const BREAK_MIN_R = 0.3; // fragments below this never re-shatter — no infinite dust
 const BREAKS_PER_STEP = 2;
@@ -195,7 +198,8 @@ export class Sandbox {
   // under a star's well can accrete into planets. Opt-in: it keeps the whole scene awake.
   private nbody = new NBody();
   private selfGravityOn = false;
-  private selfG = 2; // G in sandbox units — 2 drifts two 1 kg spheres 2 m apart together in ~2 s
+  private selfG = 1; // G in sandbox units — lowered 2→1 (mutual gravity read too strong); the World
+  //                    panel's "Pull strength G" slider (0–10) tunes it live from here
   // Accretion: slow-touching bodies fuse into one. Independent of mutual gravity — pairs with it
   // for solar systems, but a plain pile on the floor can fuse too.
   private accretionOn = false;
@@ -2176,7 +2180,7 @@ export class Sandbox {
         const va = a.body.linvel(), vb = b.body.linvel();
         const vPost = Math.hypot(va.x - vb.x, va.y - vb.y, va.z - vb.z);
         const vEsc2 = (2 * this.selfG * (ma + mb)) / (a.size + b.size);
-        if (vPost <= Math.max(ACCRETE_SPEED, 0.7 * Math.sqrt(vEsc2))) {
+        if (vPost <= Math.max(ACCRETE_SPEED, ACCRETE_ESCAPE_FRAC * Math.sqrt(vEsc2))) {
           this.mergePair(a, b);
           merges++;
           continue;
@@ -2489,7 +2493,7 @@ export class Sandbox {
           if (this.jointed(e, o)) return; // welded/tethered pairs are constructions — never fuse them
           const va = e.body.linvel(), vb = o.body.linvel();
           const vEsc = Math.sqrt((2 * this.selfG * (e.body.mass() + o.body.mass())) / (e.size + o.size));
-          if (Math.hypot(va.x - vb.x, va.y - vb.y, va.z - vb.z) > Math.max(ACCRETE_SPEED, 0.7 * vEsc)) return;
+          if (Math.hypot(va.x - vb.x, va.y - vb.y, va.z - vb.z) > Math.max(ACCRETE_SPEED, ACCRETE_ESCAPE_FRAC * vEsc)) return;
           // contactPairsWith includes near-misses the broad phase tracks — demand a real manifold
           if (!this.pairInContact(e, o)) return;
           partner = o;
