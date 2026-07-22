@@ -533,7 +533,7 @@ function buildPanel(sandbox: Sandbox) {
   bSelf.onclick = () => { const on = !sandbox.selfGravity; sandbox.setSelfGravity(on); bSelf.classList.toggle('primary', on); };
   // accretion: slow-touching bodies fuse into one growing sphere
   const bAccrete = el('button', '🪐 Accretion', 'mini');
-  bAccrete.title = 'Slow-touching objects fuse into one growing sphere — planets form from rubble';
+  bAccrete.title = 'Gravitationally-bound bodies fuse into planets — needs Mutual gravity (a plain pile with no self-gravity won’t clump)';
   bAccrete.onclick = () => { const on = !sandbox.accretion; sandbox.setAccretion(on); bAccrete.classList.toggle('primary', on); };
   // breakage: violent impacts shatter bodies into debris
   const bBreak = el('button', '💥 Breakage', 'mini');

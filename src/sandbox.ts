@@ -123,10 +123,14 @@ const TRAIL_MAX = 90; // points in the selected object's motion trail (~1.5 s of
 
 // Accretion merging: touching bodies fuse into one bigger sphere (planets form from rubble).
 const ACCRETE_EVERY = 10; // check cadence in physics steps (6 Hz) — merging need not be per-step
-const ACCRETE_SPEED = 1; // base max relative speed (m/s) to fuse — fast impacts bounce, slow contact
-//                          (lowered 2→1: objects were fusing too readily on gentle contact)
-const ACCRETE_ESCAPE_FRAC = 0.5; // fraction of escape velocity below which a grown body captures a
-//                                  toucher (lowered 0.7→0.5 so planets are less greedy)
+// Accretion is GRAVITATIONAL (like real planetesimal formation): two bodies fuse only when they're
+// gravitationally BOUND — their rebound speed after contact is below the pair's mutual escape velocity
+// v_esc = √(2·G·M/r) (Ohtsuki 1993; Morbidelli 2018 — "ε·v_collision < v_escape → stick"). There is no
+// flat cohesion floor: macroscopic bodies don't spontaneously weld, so a pile of blocks with no mutual
+// gravity has ~zero escape velocity and NEVER clumps. Real accretion needs self-gravity — so does this.
+const ACCRETE_BIND_FRAC = 0.9; // fuse if rebound speed < this fraction of escape velocity (slight margin)
+const MIN_BIND_VESC = 0.25; // escape velocity (m/s) below which gravity is too weak to bind a pair at all
+//                             → no accretion (this is what stops a plain floor pile from balling up)
 //                          sticks. Scaled up by the pair's ESCAPE VELOCITY (√(2G·M/r), like real
 //                          accretion: below escape speed you're captured), so a grown planet swallows
 //                          what touches it — without this, a moon can roll on the surface at ~2 m/s
@@ -2179,8 +2183,10 @@ export class Sandbox {
         && this.canAccrete(a) && this.canAccrete(b) && !this.jointed(a, b)) {
         const va = a.body.linvel(), vb = b.body.linvel();
         const vPost = Math.hypot(va.x - vb.x, va.y - vb.y, va.z - vb.z);
-        const vEsc2 = (2 * this.selfG * (ma + mb)) / (a.size + b.size);
-        if (vPost <= Math.max(ACCRETE_SPEED, ACCRETE_ESCAPE_FRAC * Math.sqrt(vEsc2))) {
+        // gravitational binding: G only counts when mutual gravity is actually acting
+        const effG = this.selfGravityOn ? this.selfG : 0;
+        const vEsc = Math.sqrt((2 * effG * (ma + mb)) / (a.size + b.size));
+        if (vEsc >= MIN_BIND_VESC && vPost <= ACCRETE_BIND_FRAC * vEsc) {
           this.mergePair(a, b);
           merges++;
           continue;
@@ -2492,8 +2498,10 @@ export class Sandbox {
           if (o.mergedTick === this.tick || e.mergedTick === this.tick) return; // one merge per body per step
           if (this.jointed(e, o)) return; // welded/tethered pairs are constructions — never fuse them
           const va = e.body.linvel(), vb = o.body.linvel();
-          const vEsc = Math.sqrt((2 * this.selfG * (e.body.mass() + o.body.mass())) / (e.size + o.size));
-          if (Math.hypot(va.x - vb.x, va.y - vb.y, va.z - vb.z) > Math.max(ACCRETE_SPEED, ACCRETE_ESCAPE_FRAC * vEsc)) return;
+          const effG = this.selfGravityOn ? this.selfG : 0; // no mutual gravity → no binding → no fuse
+          const vEsc = Math.sqrt((2 * effG * (e.body.mass() + o.body.mass())) / (e.size + o.size));
+          if (vEsc < MIN_BIND_VESC) return; // too weak to gravitationally bind — they just pile up
+          if (Math.hypot(va.x - vb.x, va.y - vb.y, va.z - vb.z) > ACCRETE_BIND_FRAC * vEsc) return;
           // contactPairsWith includes near-misses the broad phase tracks — demand a real manifold
           if (!this.pairInContact(e, o)) return;
           partner = o;
