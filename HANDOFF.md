@@ -842,9 +842,28 @@ TUNING (2026-07-21, Rafael "accrete/break too easily, mutual gravity too strong"
 default `selfG` 2→1; accretion `ACCRETE_SPEED` 2→1 + new `ACCRETE_ESCAPE_FRAC` 0.5 (was 0.7, both fuse
 sites); `BREAK_Q` 45→90. All monotonic in the asked direction. Verified: default G reads 1; a 2.2 m/s
 head-on pair that fused before now BOUNCES (2 objects, 0 accreted); resting pair still fuses.
-LIKELY NEXT: affected-object glow/tint; trail for non-selected fast bodies; drawpad per-axis ortho cam;
-then Tier-2 (rewind, share URLs, save accreted planets). NB screenshotting a 500ms shockwave: pin
-`S.shocks[0].born = now-190` on an interval.
+ACCRETION MADE REALISTIC (2026-07-21, Rafael "100 blocks shouldn't accrete; mutual gravity too strong;
+better merged shape"; researched: Ohtsuki 1993 / Morbidelli 2018 sticking, hydrostatic-equilibrium
+shape threshold). TWO slices: (A) TRIGGER — accretion is now GRAVITATIONAL. Removed the flat cohesion
+floor (`ACCRETE_SPEED` gone); a pair fuses only when gravitationally BOUND (rebound speed <
+`ACCRETE_BIND_FRAC` 0.9 · v_esc) AND the escape velocity is meaningful (≥ `MIN_BIND_VESC` 0.25 m/s),
+with G counted only while `selfGravityOn` (`effG`). So a plain pile (no mutual gravity) has ~0 escape
+velocity and NEVER clumps (verified: 100 blocks stayed 100), while a self-gravitating cloud still
+accretes (80 spheres → 1 planet). Both fuse sites (impact drain + 6 Hz scan) updated; accretion tooltip
+now says it needs Mutual gravity. NB this REVERSES the old "accretion ≠ mutual gravity" decoupling —
+deliberately, for realism. (B) SHAPE (interim; Rafael picked "angular rubble now, compounds later") —
+small aggregates read as jagged RUBBLE CHUNKS, not smooth balls: `displaceSphere` now takes
+`[amp,freq]` wave lists; `lumpyGeometry` uses 5 waves (freqs to 18.7) + bumpier small-R amplitude
+(0.16), still fading with R so big bodies round out (hydrostatic equilibrium); pure accreted bodies get
+`material.flatShading=true` so lumps read as rock FACETS (skinned planets keep smooth shading; debris
+unaffected — own material). Ball collider unchanged (accepted approximation). Verified faceted asteroid
+look at R 1.21. STILL TODO (the "compounds later" half): true UNION shapes for merges (box+cylinder
+looks like their union) = compound collider + union mesh + mass/skin/breakage rework — a dedicated,
+higher-risk slice. Also earlier this session: mutual-gravity default selfG 2→1, BREAK_Q 45→90.
+Tuning knobs live in the constants block near the top of sandbox.ts.
+LIKELY NEXT: the compound-union merge shapes (the "later" half); affected-object glow/tint; drawpad
+per-axis ortho cam; Tier-2 (rewind, share URLs, save accreted planets). NB screenshotting a 500ms
+shockwave: pin `S.shocks[0].born = now-190` on an interval.
 Research dossier: docs/FORCES_RESEARCH.md.
 STANDING RULE (Rafael, 2026-07-16): git commit AND push after EVERY build — don't wait to be asked.
 
