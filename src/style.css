@@ -26,7 +26,7 @@ body { background: var(--bg); color: var(--text); font-family: var(--sans); }
 
 /* control panel (top-right) — a movable, resizable window like every other panel */
 #panel {
-  position: fixed; top: 14px; right: 16px; width: 232px; background: var(--panel);
+  position: fixed; top: 14px; right: 16px; width: 244px; background: var(--panel);
   border: 1px solid var(--border); border-radius: 12px; padding: 14px; display: flex; flex-direction: column;
   gap: 12px; box-shadow: 0 12px 34px rgba(0,0,0,.4); font-size: 13px;
   max-height: calc(100vh - 28px); overflow: auto;
@@ -47,6 +47,11 @@ body { background: var(--bg); color: var(--text); font-family: var(--sans); }
 #panel .sec.collapsed .chev { transform: rotate(-90deg); }
 #panel .sec.collapsed .sec-body { display: none; }
 #panel .sec-body { display: flex; flex-direction: column; gap: 10px; }
+/* a labelled sub-group inside a section (e.g. "Simulation" / "Display" under World) */
+#panel .subhead { font-family: var(--mono); font-size: 9.5px; letter-spacing: .12em; text-transform: uppercase;
+  color: var(--muted); font-weight: 600; margin-top: 2px; padding-top: 8px; border-top: 1px solid var(--border); }
+/* nested sub-sections (the shape creators live under one "Create" parent) sit slightly indented */
+#panel .sec .sec { padding-left: 8px; border-left: 1px solid var(--border); }
 
 /* material picker chips */
 #panel .chip { flex: 0 1 auto; display: inline-flex; align-items: center; gap: 6px; }

@@ -229,6 +229,7 @@ export class Sandbox {
   private trailLine!: THREE.Line;
   private trailPts: THREE.Vector3[] = [];
   private trailFor: Entity | null = null;
+  private trailsOn = true; // whether the selected object leaves a motion trail (a Display toggle)
   private _selPos = new THREE.Vector3();
   // field placement/editing: the gizmo, the ghost awaiting confirmation, and the live selection
   private transform!: TransformControls;
@@ -2896,7 +2897,7 @@ export class Sandbox {
   private updateTrail(pos: THREE.Vector3 | null) {
     if (this.selected !== this.trailFor) { this.trailPts.length = 0; this.trailFor = this.selected; }
     const geo = this.trailLine.geometry;
-    if (!pos || !this.selected) {
+    if (!pos || !this.selected || !this.trailsOn) {
       if (this.trailLine.visible) { this.trailLine.visible = false; geo.setDrawRange(0, 0); }
       this.trailPts.length = 0;
       return;
@@ -2923,6 +2924,13 @@ export class Sandbox {
   /** Toggle the glowing flow tracers on/off (they're a visual read-out, never affect the physics). */
   setFlowViz(on: boolean) { this.fieldFlow.setEnabled(on); }
   get flowViz(): boolean { return this.fieldFlow.isEnabled; }
+
+  /** Toggle the selected-object motion trail (a pure visual read-out). */
+  get trailsEnabled(): boolean { return this.trailsOn; }
+  setTrailsEnabled(on: boolean) {
+    this.trailsOn = on;
+    if (!on) { this.trailPts.length = 0; this.trailLine.visible = false; this.trailLine.geometry.setDrawRange(0, 0); }
+  }
 
   // ---------------------------------------------------------------- interaction
   private setPointer(e: PointerEvent) {

@@ -101,6 +101,12 @@ function section(panel: HTMLElement, title: string, open: boolean): HTMLElement 
   return body;
 }
 
+/** Expand a node and every collapsible section above it (so a nested creator pops fully open). */
+function openAncestorSections(node: HTMLElement) {
+  let cur: HTMLElement | null = node;
+  while (cur) { if (cur.classList.contains('sec')) cur.classList.remove('collapsed'); cur = cur.parentElement; }
+}
+
 /** The panel-wide active material: every spawn/create call reads it; creators sync their density. */
 interface MaterialsHook {
   get(): Material;
@@ -448,15 +454,16 @@ function buildPanel(sandbox: Sandbox) {
   spawn.append(bBox, bSphere, b100);
   spawnBody.append(spawn);
 
-  // --- Phase 2 shape creators (collapsed until needed) ---
-  // each creator returns its "apply a catalog entry" function; the shape library dispatches to them
+  // --- Phase 2 shape creators: nested under ONE "Create shapes" group so they don't clutter the top
+  // level; each creator returns its "apply a catalog entry" function; the shape library dispatches to them
   let library: ShapeLibrary | null = null;
   const openLib = (tab: LibTab) => { (library ??= new ShapeLibrary(appliers)).open(tab); };
+  const createBody = section(panel, 'Create shapes', false);
   const appliers: LibAppliers = {
-    rev: buildShapeCreator(section(panel, 'Create · f(x) revolution', false), sandbox, materials, () => openLib('rev')),
-    curve: buildCurveCreator(section(panel, 'Create · parametric curve', false), sandbox, materials, () => openLib('curve')),
-    surface: buildSurfaceCreator(section(panel, 'Create · parametric surface', false), sandbox, materials, () => openLib('surface')),
-    implicit: buildImplicitCreator(section(panel, 'Create · implicit f(x,y,z)', false), sandbox, materials, () => openLib('implicit')),
+    rev: buildShapeCreator(section(createBody, 'f(x) revolution', false), sandbox, materials, () => openLib('rev')),
+    curve: buildCurveCreator(section(createBody, 'Parametric curve', false), sandbox, materials, () => openLib('curve')),
+    surface: buildSurfaceCreator(section(createBody, 'Parametric surface', false), sandbox, materials, () => openLib('surface')),
+    implicit: buildImplicitCreator(section(createBody, 'Implicit f(x,y,z)', false), sandbox, materials, () => openLib('implicit')),
   };
 
   // --- Phase 4: interaction tools ---
@@ -492,45 +499,9 @@ function buildPanel(sandbox: Sandbox) {
   presets.append(gEarth, gMoon, gZero);
   worldBody.append(presets);
 
-  // mutual gravity: every object pulls every other (Barnes-Hut N-body) — the solar-system maker.
-  // Pairs naturally with Zero-G + a gravity well: the well is the star, this makes the rubble clump.
-  const sgRow = el('div', '', 'row');
-  const bSelf = el('button', '☄ Mutual gravity', 'mini');
-  bSelf.onclick = () => {
-    const on = !sandbox.selfGravity;
-    sandbox.setSelfGravity(on);
-    bSelf.classList.toggle('primary', on);
-  };
-  // accretion is independent of mutual gravity: pair them for solar systems, or fuse a plain
-  // pile on the floor with accretion alone
-  const bAccrete = el('button', '🪐 Accretion', 'mini');
-  bAccrete.title = 'Slow-touching objects fuse into one growing sphere — planets form from rubble';
-  bAccrete.onclick = () => {
-    const on = !sandbox.accretion;
-    sandbox.setAccretion(on);
-    bAccrete.classList.toggle('primary', on);
-  };
-  // impact breakage: the destructive half of the accretion lifecycle
-  const bBreak = el('button', '💥 Breakage', 'mini');
-  bBreak.title = 'Violent impacts shatter bodies into debris that inherits their materials';
-  bBreak.onclick = () => {
-    const on = !sandbox.breakage;
-    sandbox.setBreakage(on);
-    bBreak.classList.toggle('primary', on);
-  };
-  // planet texture detail: HD = full-grain 2048px skins (~25 MB GPU each); off = 4× smaller
-  const bHD = el('button', '✨ HD skins', 'mini primary');
-  bHD.title = 'Maximum texture detail on accreted planets — turn off on weaker machines';
-  bHD.onclick = () => {
-    const hi = !sandbox.skinDetail;
-    sandbox.setSkinDetail(hi);
-    bHD.classList.toggle('primary', hi);
-  };
-  sgRow.append(bSelf, bAccrete, bBreak, bHD);
-  worldBody.append(sgRow);
-
-  // time controls: pause, and a wall-time multiplier. Physics always steps its fixed 1/60 s —
-  // the scale only changes how many steps run per second, so forces/impulses stay identical.
+  // === Time: pause + a wall-time multiplier. Physics always steps its fixed 1/60 s — the scale only
+  // changes how many steps run per second, so forces/impulses stay identical. ===
+  worldBody.append(el('div', 'Time', 'subhead'));
   const timeRow = el('div', '', 'row');
   const bPause = el('button', '⏸ Pause', 'mini');
   bPause.onclick = () => {
@@ -539,9 +510,6 @@ function buildPanel(sandbox: Sandbox) {
     bPause.textContent = p ? '▶ Resume' : '⏸ Pause';
     bPause.classList.toggle('primary', p);
   };
-  timeRow.append(bPause);
-  worldBody.append(timeRow);
-
   const tField = el('div', '', 'field');
   const tLabel = el('label', 'Time scale <b>×1.0</b>');
   const tRange = el('input');
@@ -553,8 +521,25 @@ function buildPanel(sandbox: Sandbox) {
     tLabel.querySelector('b')!.textContent = `×${v.toFixed(1)}`;
   };
   tField.append(tLabel, tRange);
-  worldBody.append(tField);
+  timeRow.append(bPause);
+  worldBody.append(timeRow, tField);
 
+  // === Simulation: emergent-physics MODES (they change how bodies behave), grouped together. ===
+  worldBody.append(el('div', 'Simulation', 'subhead'));
+  const simRow = el('div', '', 'row wrap'); // wrap so long labels lay out cleanly, never squished
+  // mutual gravity: every object pulls every other (Barnes-Hut N-body) — the solar-system maker
+  const bSelf = el('button', '☄ Mutual gravity', 'mini');
+  bSelf.title = 'Every object gravitationally pulls every other — rubble can clump into planets';
+  bSelf.onclick = () => { const on = !sandbox.selfGravity; sandbox.setSelfGravity(on); bSelf.classList.toggle('primary', on); };
+  // accretion: slow-touching bodies fuse into one growing sphere
+  const bAccrete = el('button', '🪐 Accretion', 'mini');
+  bAccrete.title = 'Slow-touching objects fuse into one growing sphere — planets form from rubble';
+  bAccrete.onclick = () => { const on = !sandbox.accretion; sandbox.setAccretion(on); bAccrete.classList.toggle('primary', on); };
+  // breakage: violent impacts shatter bodies into debris
+  const bBreak = el('button', '💥 Breakage', 'mini');
+  bBreak.title = 'Violent impacts shatter bodies into debris that inherits their materials';
+  bBreak.onclick = () => { const on = !sandbox.breakage; sandbox.setBreakage(on); bBreak.classList.toggle('primary', on); };
+  simRow.append(bSelf, bAccrete, bBreak);
   const sgField = el('div', '', 'field');
   const sgLabel = el('label', `Pull strength G <b>${sandbox.selfGravityG.toFixed(1)}</b>`);
   const sgRange = el('input');
@@ -566,9 +551,25 @@ function buildPanel(sandbox: Sandbox) {
     sgLabel.querySelector('b')!.textContent = v.toFixed(1);
   };
   sgField.append(sgLabel, sgRange);
-  worldBody.append(sgField);
+  worldBody.append(simRow, sgField);
 
+  // === Display: rendering-only toggles — they change how the scene LOOKS, never the physics. ===
+  worldBody.append(el('div', 'Display', 'subhead'));
+  const dispRow = el('div', '', 'row wrap');
+  // planet texture detail: HD = full-grain 2048px skins (~25 MB GPU each); off = 4× smaller
+  const bHD = el('button', '✨ HD skins', 'mini primary');
+  bHD.title = 'Maximum texture detail on accreted planets — turn off on weaker machines';
+  bHD.onclick = () => { const hi = !sandbox.skinDetail; sandbox.setSkinDetail(hi); bHD.classList.toggle('primary', hi); };
+  // motion trail on the selected object
+  const bTrails = el('button', '✦ Trails', 'mini primary');
+  bTrails.title = 'Draw a fading motion trail behind the selected object';
+  bTrails.onclick = () => { const on = !sandbox.trailsEnabled; sandbox.setTrailsEnabled(on); bTrails.classList.toggle('primary', on); };
+  dispRow.append(bHD, bTrails);
+  worldBody.append(dispRow);
+
+  // === scene actions ===
   const actionsRow = el('div', '', 'row');
+  actionsRow.style.marginTop = '4px';
   const bReset = el('button', 'Reset scene');
   bReset.onclick = () => sandbox.reset();
   const bDelAll = el('button', 'Delete all', 'danger');
@@ -721,7 +722,7 @@ function buildShapeCreator(
   refresh();
 
   return (e) => {
-    panel.parentElement?.classList.remove('collapsed'); // pop the section open so the fields show
+    openAncestorSections(panel); // pop the creator AND its "Create shapes" parent open so the fields show
     rev.set(e.expr);
     aInput.value = String(e.a);
     bInput.value = String(e.b);
@@ -820,7 +821,7 @@ function buildCurveCreator(
   refresh();
 
   return (e) => {
-    panel.parentElement?.classList.remove('collapsed');
+    openAncestorSections(panel);
     applyPreset(e);
     refresh(true);
   };
@@ -947,7 +948,7 @@ function buildSurfaceCreator(
   refresh();
 
   return (e) => {
-    panel.parentElement?.classList.remove('collapsed');
+    openAncestorSections(panel);
     applyPreset(e);
     refresh(true);
   };
@@ -1025,7 +1026,7 @@ function buildImplicitCreator(
   refresh();
 
   return (e) => {
-    panel.parentElement?.classList.remove('collapsed');
+    openAncestorSections(panel);
     mf.set(e.fxyz);
     sizeInput.value = String(e.size);
     refresh(true);
