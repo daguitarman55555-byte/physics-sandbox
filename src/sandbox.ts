@@ -198,6 +198,13 @@ const BREAK_FRAG_ALPHA = 1.9; // rank-size power-law exponent for fragment volum
 //                               larger pieces + many smaller ones, the brittle-fracture distribution
 const BREAKS_PER_STEP = 2;
 const CRATER_SPEED = 5; // m/s — bounce-regime hits above this scar a skinned planet's surface
+// Crater EROSION (giant-impact realism): an energetic-but-not-catastrophic hit excavates a crater from
+// a big body — it loses ejecta near the impact site and shrinks, instead of just absorbing the impactor.
+// This is what lets a small body chip parts off a big one and two planets grind each other down.
+const CRATER_ERODE_MIN_R = 1.0; // only bodies this big erode (planets, not pebbles — small ones shatter)
+const CRATER_EXCAVATE_K = 0.6; // excavation efficiency: excavated mass ≈ K·E / target specific-strength
+const CRATER_EXCAVATE_MAX = 0.28; // one crater excavates at most this fraction of the body (more → shatter)
+const CRATER_EJECTA_MIN_R = 0.18; // don't erode if the excavated chunk would be smaller than this radius
 const FLOOR_BREAK_FACTOR = 2.5; // the ground is tougher to shatter against than a body-body hit:
 //                                 Q = ½·v_down² vs FACTOR × the material threshold, so a plain
 //                                 object breaks from a ~4.5 m free-fall slam but not a casual drop
@@ -2240,6 +2247,7 @@ export class Sandbox {
         big === a ? pb.x - pa.x : pa.x - pb.x,
         big === a ? pb.y - pa.y : pa.y - pb.y,
         big === a ? pb.z - pa.z : pa.z - pb.z);
+      let bigShattered = false;
       for (const [tgt, m] of [[a, ma], [b, mb]] as Array<[Entity, number]>) {
         if (breaks.n >= BREAKS_PER_STEP || !this.canBreak(tgt)) continue;
         const Q = E / m; // specific energy: the SMALLER body of a pair takes the worse beating
@@ -2247,15 +2255,24 @@ export class Sandbox {
         if (Q > thr) {
           this.shatter(tgt, Q, thr);
           breaks.n++;
+          if (tgt === big) bigShattered = true;
         }
       }
-      // the bigger body survived a hard hit → an impact scar on its skin (the impactor may well
-      // have shattered against it — that's exactly when the scar should show)
-      if (vPre > CRATER_SPEED && big.skin && big.body.isValid() && impactDir.lengthSq() > 1e-9) {
+      // if the big body SURVIVED the impactor but the hit was energetic, it doesn't just shrug it off:
+      // ERODE a crater from it — it loses ejecta and shrinks (a small body chips a big one; two planets
+      // grind each other down). Only when it wasn't fully disrupted above.
+      let eroded = false;
+      if (!bigShattered && breaks.n < BREAKS_PER_STEP && this.canBreak(big) && big.body.isValid()
+        && impactDir.lengthSq() > 1e-9) {
+        eroded = this.craterErode(big, E, impactDir);
+        if (eroded) breaks.n++;
+      }
+      // a fast hit that neither shattered nor eroded still leaves a cosmetic scar on a skinned planet
+      // (π-scaling: crater diameter ∝ E^¼ ∝ √v)
+      if (!eroded && vPre > CRATER_SPEED && big.skin && big.body.isValid() && impactDir.lengthSq() > 1e-9) {
         const q = big.body.rotation();
         impactDir.normalize()
           .applyQuaternion(new THREE.Quaternion(q.x, q.y, q.z, q.w).invert());
-        // π-scaling: crater diameter ∝ E^¼ ∝ √v (rigid-sphere impact) — a faster hit scars wider
         const craterR = THREE.MathUtils.clamp(smallSize * (0.8 + 0.35 * Math.sqrt(vPre)), 0.35, big.size * 0.85);
         big.skin.crater(impactDir, craterR, big.size);
       }
@@ -2366,6 +2383,89 @@ export class Sandbox {
       ent.lastVel.copy(vel);
       ent.mergedTick = this.tick; // fragments settle for a step before they can merge again
     }
+  }
+
+  /**
+   * Crater EROSION (giant-impact realism): a hard-but-not-catastrophic hit excavates a crater from a
+   * big body. It loses a chunk of mass as ejecta near the impact site and SHRINKS — so a small body
+   * chips parts off a big one, and two planets grind each other down in a collision instead of the
+   * bigger simply swallowing the smaller. Excavated mass follows crater energy scaling (m_ex ∝ E /
+   * the target's specific strength), capped so a single crater can't disrupt the whole body. Mass and
+   * momentum are conserved: the ejecta carry momentum out, the body recoils. Returns true if it eroded.
+   */
+  private craterErode(big: Entity, E: number, dirWorld: THREE.Vector3): boolean {
+    // only planet-like BALL bodies erode this way (a skinned/lumpy custom, or a sphere); boxes,
+    // rubble compounds (they carry `support`), and pebbles fall through to the normal shatter/bounce
+    if (big.support || big.size < CRATER_ERODE_MIN_R) return false;
+    if (!(big.kind === 'sphere' || big.kind === 'custom')) return false;
+    if (this.entities.length + 6 >= MAX_INSTANCES) return false;
+    const M = big.body.mass(), V = this.volumeOf(big);
+    if (!(M > 0) || !(V > 0)) return false;
+    const density = M / V;
+
+    // excavated mass = the energy the impact can process against the body's specific strength, capped
+    const specStr = Math.max(1, BREAK_Q * this.strengthOf(big));
+    const mEx = THREE.MathUtils.clamp(CRATER_EXCAVATE_K * E / specStr, 0, CRATER_EXCAVATE_MAX * M);
+    const Vex = mEx / density;
+    const Rex = Math.cbrt((3 * Vex) / (4 * Math.PI));
+    if (Rex < CRATER_EJECTA_MIN_R) return false; // too little to excavate — leave it to the cosmetic scar
+
+    const t = big.body.translation();
+    const center = new THREE.Vector3(t.x, t.y, t.z);
+    const nrm = dirWorld.clone().normalize(); // centre → impact site = the outward crater normal
+    const surfacePt = center.clone().addScaledVector(nrm, big.size);
+    const comp = this.compOf(big);
+    const totalCompVol = comp.reduce((s, c) => s + c.vol, 0) || 1;
+    const bv = big.body.linvel();
+    const bigVel = new THREE.Vector3(bv.x, bv.y, bv.z);
+
+    // spall a few ejecta fragments totaling Vex, up-and-out along the impact normal (power-law sizes)
+    const nFrag = THREE.MathUtils.clamp(2 + Math.floor(Rex * 3), 2, 5);
+    const weights: number[] = [];
+    for (let i = 1; i <= nFrag; i++) weights.push(Math.pow(i, -1.6) * (0.7 + 0.6 * Math.random()));
+    const wSum = weights.reduce((s, x) => s + x, 0) || 1;
+    const ejSpeed = Math.min(2 + 0.4 * Math.sqrt(E / M), 8);
+    const recoil = new THREE.Vector3();
+    for (let i = 0; i < nFrag; i++) {
+      const Vi = (Vex * weights[i]) / wSum;
+      const Ri = Math.cbrt((3 * Vi) / (4 * Math.PI));
+      if (Ri < 0.08) continue;
+      const dir = nrm.clone().addScaledVector(new THREE.Vector3().randomDirection(), 0.6).normalize();
+      const pos = surfacePt.clone().addScaledVector(dir, Ri * 0.6);
+      const frag = this.makeDebris(Ri, pos, comp, totalCompVol, density);
+      const v = bigVel.clone().addScaledVector(dir, ejSpeed);
+      frag.body.setLinvel({ x: v.x, y: v.y, z: v.z }, true);
+      frag.lastVel.copy(v);
+      frag.mergedTick = this.tick;
+      recoil.addScaledVector(dir, -ejSpeed * density * Vi); // momentum the body must recoil to conserve
+    }
+
+    // shrink the body to conserve volume/mass (density preserved), rebuilding its ball collider
+    const Vnew = Math.max(V - Vex, 1e-3);
+    const Rnew = Math.cbrt((3 * Vnew) / (4 * Math.PI));
+    let fr = 0, re = 0;
+    for (const c of comp) { fr += (c.vol / totalCompVol) * c.mat.friction; re += (c.vol / totalCompVol) * c.mat.restitution; }
+    this.unregisterColliders(big);
+    this.world.removeCollider(big.body.collider(0), false);
+    this.world.createCollider(RAPIER.ColliderDesc.ball(Rnew).setDensity(density).setFriction(fr).setRestitution(re), big.body);
+    this.registerColliders(big);
+    big.size = Rnew; big.volume = Vnew;
+    big.bbCenter.set(0, 0, 0); big.bbHalf.setScalar(Rnew);
+    big.mergedTick = this.tick; // no second merge/erode for it this step
+    if (big.mesh) this.growLumpyMesh(big, Rnew); // skinned/lumpy: resync the mesh scale (skin unchanged)
+
+    // recoil so total momentum is conserved (Δv = recoil / new mass)
+    const Mnew = density * Vnew;
+    big.body.setLinvel({ x: bv.x + recoil.x / Mnew, y: bv.y + recoil.y / Mnew, z: bv.z + recoil.z / Mnew }, true);
+    big.body.wakeUp();
+
+    // scar the impact site on a skinned planet, sized to the crater
+    if (big.skin) {
+      const q = big.body.rotation();
+      const dirLocal = nrm.clone().applyQuaternion(new THREE.Quaternion(q.x, q.y, q.z, q.w).invert());
+      big.skin.crater(dirLocal, Math.max(0.35, Rex * 1.6), big.size);
+    }
+    return true;
   }
 
   /**
