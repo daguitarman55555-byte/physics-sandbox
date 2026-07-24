@@ -857,13 +857,33 @@ small aggregates read as jagged RUBBLE CHUNKS, not smooth balls: `displaceSphere
 (0.16), still fading with R so big bodies round out (hydrostatic equilibrium); pure accreted bodies get
 `material.flatShading=true` so lumps read as rock FACETS (skinned planets keep smooth shading; debris
 unaffected — own material). Ball collider unchanged (accepted approximation). Verified faceted asteroid
-look at R 1.21. STILL TODO (the "compounds later" half): true UNION shapes for merges (box+cylinder
-looks like their union) = compound collider + union mesh + mass/skin/breakage rework — a dedicated,
-higher-risk slice. Also earlier this session: mutual-gravity default selfG 2→1, BREAK_Q 45→90.
+look at R 1.21. Also earlier this session: mutual-gravity default selfG 2→1, BREAK_Q 45→90.
 Tuning knobs live in the constants block near the top of sandbox.ts.
-LIKELY NEXT: the compound-union merge shapes (the "later" half); affected-object glow/tint; drawpad
-per-axis ortho cam; Tier-2 (rewind, share URLs, save accreted planets). NB screenshotting a 500ms
-shockwave: pin `S.shocks[0].born = now-190` on an interval.
+COMPOUND (RUBBLE-PILE) MERGES SHIPPED (2026-07-21, the "compounds later" half — DONE): a small
+accreted aggregate now keeps its component SHAPES as a rigid compound (box+sphere = a box stuck to a
+sphere, each with its own collider/geometry/material), rounding into a sphere only past hydrostatic
+equilibrium (`HYDRO_R` 2.6 equivalent-radius, or `MAX_CHUNKS` 10 parts). New `Chunk` type +
+`Entity.chunks`; `mergeCompound` gathers both bodies' shapes as WORLD-space chunks (`worldChunksOf` →
+`chunkFromBody`: box→cuboid, sphere→ball, custom→convex hull of its world-scaled geometry, up to 60
+sampled pts), rebases onto the c.o.m., and builds ONE body with a density-0 collider per part + an
+explicit inertia tensor (per-part equivalent-sphere own-inertia + parallel axis, diagonalized via
+shapes.ts `eigenSymmetric3` → `frameFromEigen`) so mass is EXACT (verified 1.524→1.524, 120.9 across
+160 bodies). Union mesh = `mergeGeometries(geos, true)` with per-chunk material GROUPS + material
+ARRAY; new shared `disposeMaterials` frees the array in deleteEntity/clear/disposeMesh, and syncRender
+tints every element (emissive on an array would've thrown). Drag support pts gathered from part
+corners. Routing lives in mergePair before the sphere paths: `R_eq ≤ HYDRO_R && chunkCount ≤
+MAX_CHUNKS` → mergeCompound, else the sphere path (a compound has `support`, so it hits fresh-build and
+rounds). Gotchas that worked out: worldChunksOf CLONES geometry+material so deleting the parents is
+safe; a rounded planet re-entering a compound is one hull chunk (so chunk counts can drop). Verified:
+box+sphere union drops & lands (y 0.5), 16-body → 6-chunk rubble, 160-body → rounded 1-collider planet,
+breakage on a compound shatters clean; no console errors. HONEST NOTES: compound collider per-part is
+box/ball/hull (concavity of a custom part is convex-hulled); compounds aren't save/loadable yet (no
+spec, skipped like planets); mixed compounds show distinct chunk materials (no blended skin below
+HYDRO_R — realistic). NEXT for accretion realism if pushed further: per-part fracture (a compound
+sheds individual chunks instead of shattering to debris); Roche/tidal breakup.
+LIKELY NEXT (Rafael's plan): do the SAME realism pass on BREAKAGE, then MUTUAL GRAVITY, then the
+FORCES. Also queued: affected-object glow/tint; drawpad per-axis ortho cam; Tier-2 (rewind, share URLs,
+save accreted planets/compounds). NB screenshotting a 500ms shockwave: pin `S.shocks[0].born = now-190`.
 Research dossier: docs/FORCES_RESEARCH.md.
 STANDING RULE (Rafael, 2026-07-16): git commit AND push after EVERY build — don't wait to be asked.
 
