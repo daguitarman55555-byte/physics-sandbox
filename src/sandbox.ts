@@ -148,6 +148,17 @@ const TRAIL_MAX = 90; // points in the selected object's motion trail (~1.5 s of
 
 // Accretion merging: touching bodies fuse into one bigger sphere (planets form from rubble).
 const ACCRETE_EVERY = 10; // check cadence in physics steps (6 Hz) — merging need not be per-step
+// Roche / TIDAL breakup: a self-gravitating body (an accreted rubble-pile moon/planet) is torn apart
+// when it wanders inside the ROCHE LIMIT of a much more massive body — where the tidal (differential-
+// gravity) stress across it exceeds the self-gravity holding it together. Rubble piles are fluid-like,
+// so we use the FLUID Roche limit d = 2.44·R_sat·(M/m)^(1/3) (the rigid (2M/m)^(1/3) form sits almost at
+// the primary's surface). Only accreted/gravity-bound bodies disrupt — a small solid rock is held by
+// material strength, not gravity, so it isn't shredded.
+const ROCHE_COEFF = 2.44; // the fluid Roche coefficient
+const ROCHE_EVERY = 15; // check cadence in steps (~4 Hz)
+const ROCHE_MIN_R = 1.5; // only accreted bodies at least this big tidally disrupt (gravity-dominated)
+const ROCHE_MASS_RATIO = 30; // the primary must be at least this many× the satellite's mass to shred it
+const TIDAL_SEVERITY = 1.7; // effective Q/Q* of the tidal break — gentle-ish; orbital shear does the rest
 // Accretion is GRAVITATIONAL (like real planetesimal formation): two bodies fuse only when they're
 // gravitationally BOUND — their rebound speed after contact is below the pair's mutual escape velocity
 // v_esc = √(2·G·M/r) (Ohtsuki 1993; Morbidelli 2018 — "ε·v_collision < v_escape → stick"). There is no
@@ -261,6 +272,7 @@ export class Sandbox {
   // for solar systems, but a plain pile on the floor can fuse too.
   private accretionOn = false;
   private accreteTick = 0;
+  private rocheTick = 0; // cadence counter for the tidal (Roche) disruption check
   private skinBudget = 0; // reset each accretion check; consumed by merges that must BUILD a skin
   private breakageOn = false; // impact breakage — the destructive half of the accretion lifecycle
   // Collision events feed IMPACT-time accretion: in zero-G a thrown body bounces off a planet in
@@ -2698,6 +2710,41 @@ export class Sandbox {
   }
 
   /**
+   * Tidal (Roche) disruption: find the most massive body (the "primary"), and shred any accreted,
+   * gravity-bound satellite that has wandered inside its ROCHE LIMIT — the distance where the tidal
+   * (differential-gravity) stress across the satellite overcomes the self-gravity holding it together,
+   * d < R·(2·M/m)^(1/3). Only accreted/rubble bodies qualify: a small solid rock is held by material
+   * strength, not gravity, so it isn't shredded. The break is gentle — orbital shear then draws the
+   * fragments into a tidal stream ("string of pearls") on its own.
+   */
+  private stepRoche() {
+    let primary: Entity | null = null, maxM = 0;
+    for (const e of this.entities) { const m = e.body.mass(); if (m > maxM) { maxM = m; primary = e; } }
+    if (!primary || maxM <= 0) return;
+    const pt = primary.body.translation();
+    let broken = 0;
+    for (const e of this.entities) {
+      if (broken >= 1) break; // one dramatic disruption per check
+      if (e === primary || !(e.accreted || e.chunks) || e.size < ROCHE_MIN_R || !this.canBreak(e)) continue;
+      const m = e.body.mass();
+      if (!(m > 0) || maxM < m * ROCHE_MASS_RATIO) continue; // primary must dominate
+      const t = e.body.translation();
+      const d = Math.hypot(t.x - pt.x, t.y - pt.y, t.z - pt.z);
+      const dRoche = ROCHE_COEFF * e.size * Math.cbrt(maxM / m); // fluid Roche limit for a rubble pile
+      if (d < dRoche && d > e.size + primary.size + 0.5) { // inside the limit, not already contacting
+        this.tidalDisrupt(e);
+        broken++;
+      }
+    }
+  }
+
+  /** Break a body apart tidally (gently — the fragments spread into a stream under orbital shear). */
+  private tidalDisrupt(e: Entity) {
+    const thr = BREAK_Q * this.strengthOf(e);
+    this.shatter(e, thr * TIDAL_SEVERITY, thr); // routes a compound to disaggregation automatically
+  }
+
+  /**
    * Fuse two bodies, conserving mass (exactly — collider density M/V), momentum, and angular
    * momentum (orbital + approximate spin, capped). Realistic accretion shape: the LARGER body
    * SURVIVES — it keeps its identity, orientation, spin history, and painted surface — grows to
@@ -3151,6 +3198,12 @@ export class Sandbox {
     if (this.accretionOn && this.entities.length > 1 && ++this.accreteTick >= ACCRETE_EVERY) {
       this.accreteTick = 0;
       this.stepAccretion();
+    }
+
+    // tidal (Roche) disruption: an accreted moon that wanders inside a big planet's Roche limit shreds
+    if (this.selfGravityOn && this.breakageOn && this.entities.length > 1 && ++this.rocheTick >= ROCHE_EVERY) {
+      this.rocheTick = 0;
+      this.stepRoche();
     }
 
     // force fields: sum each field's force on every awake dynamic body, apply as impulse = F·dt
