@@ -881,7 +881,28 @@ box/ball/hull (concavity of a custom part is convex-hulled); compounds aren't sa
 spec, skipped like planets); mixed compounds show distinct chunk materials (no blended skin below
 HYDRO_R — realistic). NEXT for accretion realism if pushed further: per-part fracture (a compound
 sheds individual chunks instead of shattering to debris); Roche/tidal breakup.
-LIKELY NEXT (Rafael's plan): do the SAME realism pass on BREAKAGE, then MUTUAL GRAVITY, then the
+DRAG WHILE PAUSED + HARDER ACCRETION (2026-07-21): (1) you can now reposition objects while PAUSED —
+physics is frozen so the normal joint-pull grab (in stepPhysics) never runs; new `dragWhilePaused()`
+(called from the render loop when `paused && grab`) sets the grabbed body's transform directly to keep
+the grabbed spot under the cursor (clamped above floor + in bounds), zeros velocity, and moves the kin
+anchor to match so unpausing resumes seamlessly. Grab record gained `grabOffset` (body centre − grab
+point). Verified: box moved (0,0.5,0)→(-0.69,1.56,1.49) paused, stays put on release. (2) accretion a
+little harder: `ACCRETE_BIND_FRAC` 0.9→0.7, `MIN_BIND_VESC` 0.25→0.4.
+REALISTIC BREAKAGE — SLICE 1 (2026-07-21, researched: Leinhardt & Stewart universal largest-remnant
+law, Grady-Kipp fragmentation, π-scaling craters): `shatter` now takes `(Q, thr)` and distributes
+fragment SIZES by physics instead of a fixed split. LARGEST-REMNANT LAW: `fLr = clamp(-0.5(Q/Q*−1)+0.5,
+0.08, 0.5)` — a marginal hit (Q≈Q*) leaves a ~half-mass remnant + a few pieces; a violent one (Q≥2Q*)
+is super-catastrophic (pulverized, no dominant survivor). The non-remnant mass follows a POWER-LAW
+rank-size distribution (`v_i ∝ i^-BREAK_FRAG_ALPHA` 1.9 — few larger, many smaller), with a finite
+minimum fragment radius (`BREAK_MIN_FRAG` 0.12; crumbs fold into the remnant — no dust). Fragment COUNT
+grows with severity + size (`nFrag = clamp(2+5(sup−1)+R0·1.5, 2, 13)`). Crater size now π-scales
+(diameter ∝ E^¼ ∝ √v). Headroom guard +8→+14. Verified live (stone floor slams, mass EXACT): marginal
+Q/Q*≈1.16 → 5 fragments / largest 42%; violent Q/Q*≈5.6 → 16 fragments / largest 24%. NEXT BREAKAGE
+SLICES: cratering/spall regime (a sub-shatter hit ejects a chip + dents any body, not just skinned
+planets); a COMPOUND sheds its individual chunks instead of shattering to generic debris; irregular
+(hull) fragment shapes with fracture-plane faces; Roche/tidal breakup; then move on to the MUTUAL
+GRAVITY and FORCES realism passes.
+LIKELY NEXT (Rafael's plan): finish the BREAKAGE realism (slices above), then MUTUAL GRAVITY, then the
 FORCES. Also queued: affected-object glow/tint; drawpad per-axis ortho cam; Tier-2 (rewind, share URLs,
 save accreted planets/compounds). NB screenshotting a 500ms shockwave: pin `S.shocks[0].born = now-190`.
 Research dossier: docs/FORCES_RESEARCH.md.
