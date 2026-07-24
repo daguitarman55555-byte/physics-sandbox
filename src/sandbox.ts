@@ -18,9 +18,10 @@ import { TransformControls } from 'three/examples/jsm/controls/TransformControls
 import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment.js';
 import RAPIER from '@dimforge/rapier3d-compat';
 import {
-  buildRevolution, buildParamCurve, buildParamSurface,
+  buildRevolution, buildParamCurve, buildParamSurface, eigenSymmetric3,
   type RevolutionSpec, type ParamCurveSpec, type ParamSurfaceSpec,
 } from './systems/shapes';
+import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import { buildImplicit, type ImplicitSpec } from './systems/implicit';
 import { PLAIN, type Material } from './systems/materials';
 import { fieldForce, fieldInfluence, pathInfluence, fluidForce, wellOrbitalVelocity, FIELD_INFO, samplePath, PATH_PRESETS, type Field, type FieldKind, type FieldShape, type CurveSpec } from './systems/fields';
@@ -73,6 +74,29 @@ export interface Entity {
   spec?: RevolutionSpec | ParamCurveSpec | ParamSurfaceSpec | ImplicitSpec; // …and its equations, so
   //                    a saved scene can rebuild the exact shape on load (Phase 7 persistence)
   gravityScale?: number; // per-object gravity multiplier (1 = normal, 0 = weightless, <0 = floats up)
+  chunks?: Chunk[]; // present for a rubble-pile COMPOUND: the component shapes it's fused from, each
+  //                   kept as its own collider + geometry so a box+sphere merge looks like their union
+}
+
+/**
+ * One component shape inside a rubble-pile COMPOUND (a small accreted aggregate that keeps its parts'
+ * shapes instead of melting into a sphere). Position/orientation are in the compound body's LOCAL
+ * frame; geometry is in the chunk's own centered frame; material/geometry are OWNED (disposed with the
+ * compound). A large enough aggregate rounds into a sphere (hydrostatic equilibrium) and drops chunks.
+ */
+interface Chunk {
+  geometry: THREE.BufferGeometry; // component geometry, centred, in the chunk's own frame
+  material: THREE.Material; // render material (owned)
+  offset: THREE.Vector3; // chunk centre in the compound's local frame
+  quat: THREE.Quaternion; // chunk orientation in the compound's local frame
+  shape: 'box' | 'sphere' | 'hull';
+  half: THREE.Vector3; // box half-extents (shape 'box')
+  radius: number; // bounding radius — the 'sphere' collider radius and the inertia radius
+  hull?: Float32Array; // hull points in the chunk's frame (shape 'hull')
+  mass: number;
+  volume: number;
+  mat: Material; // physics preset (friction / restitution / composition)
+  color: THREE.Color;
 }
 
 /** One InstancedMesh + its per-instance entity slots, keyed by (shape kind × material). */
@@ -131,6 +155,11 @@ const ACCRETE_EVERY = 10; // check cadence in physics steps (6 Hz) — merging n
 const ACCRETE_BIND_FRAC = 0.9; // fuse if rebound speed < this fraction of escape velocity (slight margin)
 const MIN_BIND_VESC = 0.25; // escape velocity (m/s) below which gravity is too weak to bind a pair at all
 //                             → no accretion (this is what stops a plain floor pile from balling up)
+// A merged aggregate keeps its component shapes as a rubble-pile COMPOUND while it's small; once it
+// grows past this equivalent-sphere radius (or part count), gravity wins over material strength and it
+// ROUNDS into a sphere/planet — real hydrostatic equilibrium (why big bodies are round, small ones aren't).
+const HYDRO_R = 2.6; // equivalent-sphere radius (m) at/below which merges stay rubble compounds
+const MAX_CHUNKS = 10; // hard cap on a compound's parts (perf); a merge past this rounds into a sphere
 //                          sticks. Scaled up by the pair's ESCAPE VELOCITY (√(2G·M/r), like real
 //                          accretion: below escape speed you're captured), so a grown planet swallows
 //                          what touches it — without this, a moon can roll on the surface at ~2 m/s
@@ -1812,11 +1841,7 @@ export class Sandbox {
     if (e.mesh) {
       this.scene.remove(e.mesh);
       e.mesh.geometry.dispose();
-      const mm = e.mesh.material as THREE.MeshStandardMaterial;
-      if (mm.userData.ownedTex) { // baked planet canvases — ours alone (pool maps are shared)
-        mm.map?.dispose(); mm.normalMap?.dispose(); mm.roughnessMap?.dispose(); mm.metalnessMap?.dispose();
-      }
-      mm.dispose();
+      this.disposeMaterials(e.mesh); // handles a compound's per-chunk material array too
       const mi = this.customMeshes.indexOf(e.mesh);
       if (mi >= 0) this.customMeshes.splice(mi, 1);
     }
@@ -1833,11 +1858,7 @@ export class Sandbox {
       if (e.mesh) {
         this.scene.remove(e.mesh);
         e.mesh.geometry.dispose();
-        const mm = e.mesh.material as THREE.MeshStandardMaterial;
-        if (mm.userData.ownedTex) {
-          mm.map?.dispose(); mm.normalMap?.dispose(); mm.roughnessMap?.dispose(); mm.metalnessMap?.dispose();
-        }
-        mm.dispose();
+        this.disposeMaterials(e.mesh);
       }
     }
     this.entities.length = 0;
@@ -2419,16 +2440,22 @@ export class Sandbox {
     return mesh;
   }
 
+  /** Dispose a mesh's material(s) — handles the single case and a compound's per-chunk material ARRAY,
+   *  freeing any owned planet-skin canvases (pool textures are shared, so those stay). */
+  private disposeMaterials(mesh: THREE.Mesh) {
+    const mats = (Array.isArray(mesh.material) ? mesh.material : [mesh.material]) as THREE.MeshStandardMaterial[];
+    for (const m of mats) {
+      if (m.userData.ownedTex) { m.map?.dispose(); m.normalMap?.dispose(); m.roughnessMap?.dispose(); m.metalnessMap?.dispose(); }
+      m.dispose();
+    }
+  }
+
   /** Free an entity's custom mesh (geometry + its own material/canvases), if it has one. */
   private disposeMesh(e: Entity) {
     if (!e.mesh) return;
     this.scene.remove(e.mesh);
     e.mesh.geometry.dispose();
-    const m = e.mesh.material as THREE.MeshStandardMaterial;
-    if (m.userData.ownedTex) {
-      m.map?.dispose(); m.normalMap?.dispose(); m.roughnessMap?.dispose(); m.metalnessMap?.dispose();
-    }
-    m.dispose();
+    this.disposeMaterials(e.mesh);
     const i = this.customMeshes.indexOf(e.mesh);
     if (i >= 0) this.customMeshes.splice(i, 1);
     e.mesh = undefined;
@@ -2575,6 +2602,18 @@ export class Sandbox {
       if (j.a === small || j.b === small) inherited.push({ kind: j.kind, other: j.a === small ? j.b : j.a });
     }
 
+    // RUBBLE-PILE COMPOUND: while the aggregate is small, keep both bodies' real SHAPES as a union (a
+    // box+sphere reads as a box stuck to a sphere) instead of melting into a ball — only once it grows
+    // past the hydrostatic-equilibrium size does it ROUND into a planet (the sphere paths below).
+    const chunkCount = (big.chunks?.length ?? 1) + (small.chunks?.length ?? 1);
+    if (R <= HYDRO_R && chunkCount <= MAX_CHUNKS) {
+      for (const j of this.joints) { // both bodies are consumed, so gather big's connections too
+        if (j.a === big || j.b === big) inherited.push({ kind: j.kind, other: j.a === big ? j.b : j.a });
+      }
+      this.mergeCompound(big, small, com, vel, L, comp, count, inherited);
+      return;
+    }
+
     let e: Entity;
     // grow in place when big has a BALL collider (pool sphere, skinned planet, or pure lumpy
     // accreted body — none carry `support`); boxes and hull-collider debris rebuild fresh
@@ -2654,6 +2693,167 @@ export class Sandbox {
     for (const { kind, other } of inherited) {
       if (other === e || !this.entities.includes(other)) continue; // partner is us, or merged away
       if (this.jointed(e, other)) continue; // both parents shared this partner — one link is enough
+      this.lockJoint(e, other, kind, this.makeConnectorLine(kind));
+    }
+  }
+
+  /** Owned render material matching an entity (cloned/fresh, safe to dispose with the compound). */
+  private chunkMaterialFor(e: Entity): THREE.Material {
+    if (e.mesh) {
+      const m = (e.mesh.material as THREE.Material).clone();
+      m.userData = {}; // don't carry ownedTex — the source keeps its own canvases
+      return m;
+    }
+    if (e.mat.maps) return this.pbrMaterial(e.mat, e.texRepeat ?? [1, 1]);
+    return new THREE.MeshStandardMaterial({ color: e.color, metalness: 0.1, roughness: 0.6 });
+  }
+
+  /** Up to `maxPts` sampled vertex positions of a geometry, as a flat xyz array (for a hull collider). */
+  private hullPointsOf(geo: THREE.BufferGeometry, maxPts: number): Float32Array {
+    const pos = geo.attributes.position as THREE.BufferAttribute;
+    const step = Math.max(1, Math.floor(pos.count / maxPts));
+    const pts: number[] = [];
+    for (let i = 0; i < pos.count; i += step) pts.push(pos.getX(i), pos.getY(i), pos.getZ(i));
+    return new Float32Array(pts);
+  }
+
+  /** A single-shape body → one Chunk, in WORLD space (offset = world pos, quat = world orientation).
+   *  Geometry + material are OWNED copies, so the source can be deleted right after. */
+  private chunkFromBody(e: Entity, wp: THREE.Vector3, wq: THREE.Quaternion): Chunk {
+    const material = this.chunkMaterialFor(e);
+    const volume = this.volumeOf(e);
+    const mass = e.body.mass() || (e.mat.density / 1000) * volume;
+    const base = { material, offset: wp.clone(), quat: wq.clone(), mass, volume, mat: e.mat, color: e.color.clone() };
+    if (e.kind === 'box') {
+      const s = e.size;
+      return { ...base, geometry: new THREE.BoxGeometry(2 * s, 2 * s, 2 * s), shape: 'box', half: new THREE.Vector3(s, s, s), radius: s * Math.sqrt(3) };
+    }
+    if (e.kind === 'sphere') {
+      const s = e.size;
+      return { ...base, geometry: new THREE.SphereGeometry(s, 20, 14), shape: 'sphere', half: new THREE.Vector3(s, s, s), radius: s };
+    }
+    // custom: keep its actual (world-scaled) geometry, hull-collide it
+    const geo = e.mesh!.geometry.clone();
+    const sc = e.mesh!.scale; geo.scale(sc.x, sc.y, sc.z);
+    return { ...base, geometry: geo, shape: 'hull', half: new THREE.Vector3(e.size, e.size, e.size), radius: e.size, hull: this.hullPointsOf(geo, 60) };
+  }
+
+  /** Every component Chunk of a body in WORLD space (a compound → its parts transformed out; a
+   *  single body → one chunk). Geometry/material are cloned so the source can be deleted afterward. */
+  private worldChunksOf(e: Entity): Chunk[] {
+    const t = e.body.translation(), r = e.body.rotation();
+    const wp = new THREE.Vector3(t.x, t.y, t.z);
+    const wq = new THREE.Quaternion(r.x, r.y, r.z, r.w);
+    if (e.chunks) {
+      return e.chunks.map((c) => ({
+        geometry: c.geometry.clone(), material: (c.material as THREE.Material).clone(),
+        offset: c.offset.clone().applyQuaternion(wq).add(wp), quat: wq.clone().multiply(c.quat),
+        shape: c.shape, half: c.half.clone(), radius: c.radius, hull: c.hull ? c.hull.slice() : undefined,
+        mass: c.mass, volume: c.volume, mat: c.mat, color: c.color.clone(),
+      }));
+    }
+    return [this.chunkFromBody(e, wp, wq)];
+  }
+
+  /** Right-handed rotation quaternion from three (principal-axis) eigenvectors. */
+  private frameFromEigen(v: THREE.Vector3[]): THREE.Quaternion {
+    const x = v[0].clone().normalize(), y = v[1].clone().normalize(), z = v[2].clone().normalize();
+    if (x.clone().cross(y).dot(z) < 0) z.negate(); // enforce a right-handed basis
+    return new THREE.Quaternion().setFromRotationMatrix(new THREE.Matrix4().makeBasis(x, y, z));
+  }
+
+  /**
+   * Fuse two bodies into a rubble-pile COMPOUND: every component shape of both is kept as its own
+   * collider + geometry, so a box+sphere reads as a box stuck to a sphere (not a ball). Mass is
+   * conserved exactly (density-0 colliders + an explicit inertia tensor summed over the parts, then
+   * diagonalized). Both parents are consumed; joints transfer. Used only while the aggregate is small
+   * — a bigger one rounds into a sphere/planet (mergePair's sphere paths) at hydrostatic equilibrium.
+   */
+  private mergeCompound(
+    big: Entity, small: Entity, com: THREE.Vector3, vel: THREE.Vector3, L: THREE.Vector3,
+    comp: CompEntry[], count: number, inherited: Array<{ kind: JointKind; other: Entity }>,
+  ) {
+    const chunks = [...this.worldChunksOf(big), ...this.worldChunksOf(small)]; // clones — safe to delete
+    const M = chunks.reduce((s, c) => s + c.mass, 0);
+    const V = chunks.reduce((s, c) => s + c.volume, 0);
+    for (const c of chunks) c.offset.sub(com); // rebase onto the compound's centre of mass
+
+    // inertia tensor about the c.o.m.: each chunk's own (equivalent-sphere) inertia + parallel axis
+    const J = [[0, 0, 0], [0, 0, 0], [0, 0, 0]];
+    for (const c of chunks) {
+      const reff = Math.cbrt((3 * c.volume) / (4 * Math.PI));
+      const Iown = 0.4 * c.mass * reff * reff, m = c.mass, d = c.offset, d2 = d.lengthSq();
+      J[0][0] += Iown + m * (d2 - d.x * d.x); J[1][1] += Iown + m * (d2 - d.y * d.y); J[2][2] += Iown + m * (d2 - d.z * d.z);
+      J[0][1] -= m * d.x * d.y; J[0][2] -= m * d.x * d.z; J[1][2] -= m * d.y * d.z;
+    }
+    J[1][0] = J[0][1]; J[2][0] = J[0][2]; J[2][1] = J[1][2];
+    const eig = eigenSymmetric3(J);
+    const principal = eig.values.map((x) => Math.max(x, 1e-4));
+    const frame = this.frameFromEigen(eig.vectors);
+
+    this.deleteEntity(big); this.deleteEntity(small); // consume both parents (their clones live on)
+
+    const body = this.world.createRigidBody(
+      RAPIER.RigidBodyDesc.dynamic().setTranslation(com.x, com.y, com.z)
+        .setAdditionalMassProperties(M, { x: 0, y: 0, z: 0 },
+          { x: principal[0], y: principal[1], z: principal[2] }, { x: frame.x, y: frame.y, z: frame.z, w: frame.w }),
+    );
+    for (const c of chunks) { // one density-0 collider per part; mass comes from the tensor above
+      let cd: RAPIER.ColliderDesc | null;
+      if (c.shape === 'box') cd = RAPIER.ColliderDesc.cuboid(c.half.x, c.half.y, c.half.z);
+      else if (c.shape === 'sphere') cd = RAPIER.ColliderDesc.ball(c.radius);
+      else cd = RAPIER.ColliderDesc.convexHull(c.hull!) ?? RAPIER.ColliderDesc.ball(c.radius);
+      if (!cd) continue;
+      this.world.createCollider(cd.setTranslation(c.offset.x, c.offset.y, c.offset.z)
+        .setRotation({ x: c.quat.x, y: c.quat.y, z: c.quat.z, w: c.quat.w })
+        .setDensity(0).setFriction(c.mat.friction).setRestitution(c.mat.restitution), body);
+    }
+
+    // union mesh: each part's geometry baked to its pose, merged with per-part material groups
+    const unit = new THREE.Vector3(1, 1, 1);
+    const geos = chunks.map((c) => c.geometry.clone().applyMatrix4(new THREE.Matrix4().compose(c.offset, c.quat, unit)));
+    const mats = chunks.map((c) => c.material);
+    const merged = mergeGeometries(geos, true) ?? geos[0];
+    for (const g of geos) if (g !== merged) g.dispose();
+    merged.computeBoundingBox(); merged.computeBoundingSphere();
+    const mesh = new THREE.Mesh(merged, mats);
+    mesh.castShadow = mesh.receiveShadow = true;
+    mesh.position.copy(com);
+    this.scene.add(mesh); this.customMeshes.push(mesh);
+
+    // bounding radius + drag-clamp support points from the parts
+    let size = 0.1; const supp: number[] = [];
+    for (const c of chunks) {
+      size = Math.max(size, c.offset.length() + c.radius);
+      if (c.shape === 'box') {
+        for (const sx of [-1, 1]) for (const sy of [-1, 1]) for (const sz of [-1, 1]) {
+          const p = new THREE.Vector3(sx * c.half.x, sy * c.half.y, sz * c.half.z).applyQuaternion(c.quat).add(c.offset);
+          supp.push(p.x, p.y, p.z);
+        }
+      } else for (const ax of [[c.radius, 0, 0], [-c.radius, 0, 0], [0, c.radius, 0], [0, -c.radius, 0], [0, 0, c.radius], [0, 0, -c.radius]]) {
+        supp.push(c.offset.x + ax[0], c.offset.y + ax[1], c.offset.z + ax[2]);
+      }
+    }
+
+    const bb = merged.boundingBox!;
+    const e: Entity = {
+      id: this.nextId++, kind: 'custom', body, size, mat: comp[0].mat, color: comp[0].color.clone(),
+      prevPos: com.clone(), prevQuat: new THREE.Quaternion(), currPos: com.clone(), currQuat: new THREE.Quaternion(),
+      lastVel: vel.clone(), accel: new THREE.Vector3(),
+      bbCenter: bb.getCenter(new THREE.Vector3()), bbHalf: bb.getSize(new THREE.Vector3()).multiplyScalar(0.5),
+      mesh, volume: V, chunks, comp, accreted: count, label: `rubble ×${count}`,
+      support: { points: new Float32Array(supp), pad: 0 }, mergedTick: this.tick,
+    };
+    mesh.userData.entity = e;
+    this.entities.push(e); this.registerColliders(e);
+
+    body.setLinvel({ x: vel.x, y: vel.y, z: vel.z }, true);
+    const spin = L.clone().divideScalar(0.4 * M * size * size);
+    if (spin.length() > ACCRETE_MAX_SPIN) spin.setLength(ACCRETE_MAX_SPIN);
+    body.setAngvel({ x: spin.x, y: spin.y, z: spin.z }, true);
+
+    for (const { kind, other } of inherited) { // transfer the parents' connections
+      if (other === e || !this.entities.includes(other) || this.jointed(e, other)) continue;
       this.lockJoint(e, other, kind, this.makeConnectorLine(kind));
     }
   }
@@ -2835,9 +3035,12 @@ export class Sandbox {
         const mesh = e.mesh!;
         mesh.position.copy(this._p);
         mesh.quaternion.copy(this._q);
-        const selMat = mesh.material as THREE.MeshStandardMaterial;
-        // frozen reads as an icy glow; selection as a warm-grey lift; else no emissive
-        selMat.emissive.setHex(e.frozen ? 0x1c4a7a : e === this.selected ? 0x3a4152 : 0x000000);
+        // frozen reads as an icy glow; selection as a warm-grey lift; else no emissive. A compound
+        // carries a material ARRAY (one per chunk), so tint every one.
+        const hex = e.frozen ? 0x1c4a7a : e === this.selected ? 0x3a4152 : 0x000000;
+        const mm = mesh.material;
+        if (Array.isArray(mm)) for (const m of mm) (m as THREE.MeshStandardMaterial).emissive?.setHex(hex);
+        else (mm as THREE.MeshStandardMaterial).emissive.setHex(hex);
         // throttled GPU upload of any paint the planet took this frame (the accretion lag lever)
         if (e.skin) e.skin.flushIfDue(now);
         continue;
