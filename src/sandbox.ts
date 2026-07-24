@@ -205,6 +205,14 @@ const CRATER_ERODE_MIN_R = 1.0; // only bodies this big erode (planets, not pebb
 const CRATER_EXCAVATE_K = 0.6; // excavation efficiency: excavated mass ≈ K·E / target specific-strength
 const CRATER_EXCAVATE_MAX = 0.28; // one crater excavates at most this fraction of the body (more → shatter)
 const CRATER_EJECTA_MIN_R = 0.18; // don't erode if the excavated chunk would be smaller than this radius
+// Runaway guards. (1) A gravitationally BOUND impact (relative speed below escape velocity) can't
+// disrupt — its energy ≈ the binding energy, so the pair merges/settles. Without this, mutual gravity
+// pulls debris back onto a planet and every re-impact shatters, a cascade that GAINS energy each hit.
+const BREAK_UNBOUND = 1.1; // impact must exceed escape velocity by this factor to break (self-gravity on)
+// (2) Ejecta kinetic energy is capped to this fraction of the impact's specific energy, so breakage can
+// never ADD net energy to the scene (the rest goes to fracturing/heat) — no uncontrolled speed-up.
+const EJECT_FRAC = 0.25;
+const BREAK_SOFT_CAP = 1200; // safety net: suspend breakage above this object count so a cascade can't explode
 const FLOOR_BREAK_FACTOR = 2.5; // the ground is tougher to shatter against than a body-body hit:
 //                                 Q = ½·v_down² vs FACTOR × the material threshold, so a plain
 //                                 object breaks from a ~4.5 m free-fall slam but not a casual drop
@@ -2234,9 +2242,14 @@ export class Sandbox {
       // SHATTER — breakage is per-TARGET (canBreak), so a grabbed body can break what it rams
       // while staying whole itself (you keep your hammer); welded/tethered pairs stay intact
       if (!this.breakageOn || this.jointed(a, b)) continue;
+      if (this.entities.length > BREAK_SOFT_CAP) continue; // safety net — never let a cascade explode
       const vEsc2 = (2 * this.selfG * (ma + mb)) / (a.size + b.size);
       const vPre = Math.hypot(
         a.lastVel.x - b.lastVel.x, a.lastVel.y - b.lastVel.y, a.lastVel.z - b.lastVel.z);
+      // GRAVITATIONALLY BOUND impacts don't disrupt: their energy ≈ the binding energy, so the pair
+      // merges/settles instead of shattering. This stops the runaway where mutual gravity pulls debris
+      // back onto a planet and every re-impact shatters — an energy-gaining cascade.
+      if (this.selfGravityOn && vPre < Math.sqrt(vEsc2) * BREAK_UNBOUND) continue;
       const E = 0.5 * ((ma * mb) / (ma + mb)) * vPre * vPre; // impact energy in the pair frame
       const binding = this.selfGravityOn ? BREAK_BINDING * vEsc2 : 0; // self-gravity resists disruption
       // capture the impact geometry BEFORE any shatter deletes a body
@@ -2280,7 +2293,7 @@ export class Sandbox {
 
     // FLOOR SLAMS — the ground is an infinite-mass impactor: specific energy Q = ½·v_down² (mass
     // cancels), thresholded higher than a body hit so a casual drop survives but a hard slam breaks
-    if (this.breakageOn) {
+    if (this.breakageOn && this.entities.length <= BREAK_SOFT_CAP) {
       for (const e of floorHits) {
         if (breaks.n >= BREAKS_PER_STEP) break;
         if (!e.body.isValid() || !this.canBreak(e)) continue;
@@ -2354,8 +2367,10 @@ export class Sandbox {
     for (let i = vols.length - 1; i >= 1; i--) {
       if (radius(vols[i]) < BREAK_MIN_FRAG) { vols[0] += vols[i]; vols.splice(i, 1); }
     }
-    // ejection speed scales with the excess specific energy (√, momentum-like), capped
-    const vEj = Math.min(1 + 0.5 * Math.sqrt(Math.max(0, Q - thr)), 9);
+    // ejection speed is ENERGY-BOUNDED: ½vEj² ≤ EJECT_FRAC · the excess specific energy (Q − thr), so
+    // the ejecta can never carry away more KE than the impact delivered — breakage can't add energy to
+    // the scene (which was the runaway). The rest of the energy goes to fracturing/heat.
+    const vEj = Math.min(9, Math.sqrt(2 * EJECT_FRAC * Math.max(0.4, Q - thr)));
 
     this.deleteEntity(e);
 
@@ -2424,7 +2439,9 @@ export class Sandbox {
     const weights: number[] = [];
     for (let i = 1; i <= nFrag; i++) weights.push(Math.pow(i, -1.6) * (0.7 + 0.6 * Math.random()));
     const wSum = weights.reduce((s, x) => s + x, 0) || 1;
-    const ejSpeed = Math.min(2 + 0.4 * Math.sqrt(E / M), 8);
+    // energy-bounded ejecta (½v² ≤ EJECT_FRAC · the big body's specific impact energy E/M) — so eroding
+    // can't inject energy and start a cascade
+    const ejSpeed = Math.min(8, Math.sqrt(2 * EJECT_FRAC * (E / M)));
     const recoil = new THREE.Vector3();
     for (let i = 0; i < nFrag; i++) {
       const Vi = (Vex * weights[i]) / wSum;
