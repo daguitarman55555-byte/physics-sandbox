@@ -192,6 +192,10 @@ const BREAK_Q = 90; // J/kg per strength unit — the master durability knob (sc
 //                     each doubling of Q ≈ 1.4× the impact speed everything survives)
 const BREAK_BINDING = 0.15; // × v_esc² added when mutual gravity is on: self-gravity resists disruption
 const BREAK_MIN_R = 0.3; // fragments below this never re-shatter — no infinite dust
+const BREAK_MIN_FRAG = 0.12; // minimum fragment radius (m) — smaller shards fold into the largest
+//                              remnant instead (Grady-Kipp's finite minimum fragment size; no dust)
+const BREAK_FRAG_ALPHA = 1.9; // rank-size power-law exponent for fragment volumes (v_i ∝ i^-α): a few
+//                               larger pieces + many smaller ones, the brittle-fracture distribution
 const BREAKS_PER_STEP = 2;
 const CRATER_SPEED = 5; // m/s — bounce-regime hits above this scar a skinned planet's surface
 const FLOOR_BREAK_FACTOR = 2.5; // the ground is tougher to shatter against than a body-body hit:
@@ -2241,7 +2245,7 @@ export class Sandbox {
         const Q = E / m; // specific energy: the SMALLER body of a pair takes the worse beating
         const thr = BREAK_Q * this.strengthOf(tgt) + binding;
         if (Q > thr) {
-          this.shatter(tgt, Math.min(1 + 0.3 * Math.sqrt(Q - thr), 7));
+          this.shatter(tgt, Q, thr);
           breaks.n++;
         }
       }
@@ -2251,7 +2255,9 @@ export class Sandbox {
         const q = big.body.rotation();
         impactDir.normalize()
           .applyQuaternion(new THREE.Quaternion(q.x, q.y, q.z, q.w).invert());
-        big.skin.crater(impactDir, Math.max(0.35, smallSize * 1.3), big.size);
+        // π-scaling: crater diameter ∝ E^¼ ∝ √v (rigid-sphere impact) — a faster hit scars wider
+        const craterR = THREE.MathUtils.clamp(smallSize * (0.8 + 0.35 * Math.sqrt(vPre)), 0.35, big.size * 0.85);
+        big.skin.crater(impactDir, craterR, big.size);
       }
     }
 
@@ -2266,7 +2272,7 @@ export class Sandbox {
         const Q = 0.5 * vDown * vDown;
         const thr = BREAK_Q * this.strengthOf(e) * FLOOR_BREAK_FACTOR;
         if (Q > thr) {
-          this.shatter(e, Math.min(1 + 0.3 * Math.sqrt(Q - thr), 7));
+          this.shatter(e, Q, thr);
           breaks.n++;
         }
       }
@@ -2289,17 +2295,23 @@ export class Sandbox {
   }
 
   /**
-   * Shatter a body into volume-conserving fragments that inherit its composition and density
-   * (total mass exact), its rigid-body velocity field (v = v₀ + ω×r), and a radial ejection kick
-   * scaled by the excess impact energy — with the big remnant absorbing the shards' counter-
-   * momentum so the total is unchanged. Big chunks get a lumpy potato mesh; small ones stay in
-   * the cheap instanced pools.
+   * Shatter a body into volume-conserving fragments (total mass exact) that inherit its composition,
+   * its rigid-body velocity field (v = v₀ + ω×r), and a radial ejection kick — the big remnant absorbs
+   * the shards' counter-momentum so the total is conserved. Big chunks get a lumpy potato mesh; small
+   * ones stay in the cheap instanced pools.
+   *
+   * The fragment SIZES follow impact-fragmentation physics (Leinhardt & Stewart; Grady-Kipp):
+   *  - LARGEST-REMNANT LAW: M_lr/M = -0.5(Q/Q*−1)+0.5, so a marginal hit (Q≈Q*) leaves a big half-mass
+   *    remnant + a few pieces, while a violent one (Q≥2·Q*) is super-catastrophic — pulverized into many
+   *    small fragments with no dominant survivor.
+   *  - POWER-LAW distribution for the rest (rank-size v_i ∝ i^−α): a few larger pieces, many smaller.
+   *  - More energy → MORE, finer fragments (higher strain rate), down to a finite minimum size.
    */
-  private shatter(e: Entity, vEj: number) {
+  private shatter(e: Entity, Q: number, thr: number) {
     const M = e.body.mass();
     const V = this.volumeOf(e);
     if (!(M > 0) || !(V > 0)) return;
-    if (this.entities.length + 8 >= MAX_INSTANCES) return; // no room for fragments — it survives
+    if (this.entities.length + 14 >= MAX_INSTANCES) return; // no room for fragments — it survives
     const t = e.body.translation(), vl = e.body.linvel(), w = e.body.angvel();
     const center = new THREE.Vector3(t.x, t.y, t.z);
     const parentVel = new THREE.Vector3(vl.x, vl.y, vl.z);
@@ -2309,17 +2321,24 @@ export class Sandbox {
     const comp = this.compOf(e);
     const totalCompVol = comp.reduce((s, c) => s + c.vol, 0) || 1;
 
-    // volume split: one big remnant + shards; sub-0.12 m crumbs fold back into the remnant
-    const n = Math.min(3 + Math.floor(R0 * 2), 7);
-    const w0 = 0.38 + Math.random() * 0.2;
-    const raws: number[] = [];
-    for (let i = 1; i < n; i++) raws.push(0.3 + Math.random());
-    const rSum = raws.reduce((s, x) => s + x, 0) || 1;
-    const vols = [V * w0, ...raws.map((r) => (V * (1 - w0) * r) / rSum)];
+    const sup = Q / Math.max(thr, 1e-6); // Q/Q* — how far past the threshold (≥ 1 here), the severity
+    // largest-remnant fraction from the universal law, clamped: 0.5 at threshold → ~0.08 when pulverized
+    const fLr = THREE.MathUtils.clamp(-0.5 * (sup - 1) + 0.5, 0.08, 0.5);
+    // fragment count grows with severity + body size (finer fragmentation at higher strain rate)
+    const nFrag = THREE.MathUtils.clamp(Math.round(2 + 5 * (sup - 1) + R0 * 1.5), 2, 13);
+
+    // power-law (rank-size) volumes for the non-remnant mass; sub-minimum crumbs fold into the remnant
+    const restV = V * (1 - fLr);
+    const weights: number[] = [];
+    for (let i = 1; i <= nFrag; i++) weights.push(Math.pow(i, -BREAK_FRAG_ALPHA) * (0.7 + 0.6 * Math.random()));
+    const wSum = weights.reduce((s, x) => s + x, 0) || 1;
+    const vols = [V * fLr, ...weights.map((x) => (restV * x) / wSum)];
     const radius = (vol: number) => Math.cbrt((3 * vol) / (4 * Math.PI));
     for (let i = vols.length - 1; i >= 1; i--) {
-      if (radius(vols[i]) < 0.12) { vols[0] += vols[i]; vols.splice(i, 1); }
+      if (radius(vols[i]) < BREAK_MIN_FRAG) { vols[0] += vols[i]; vols.splice(i, 1); }
     }
+    // ejection speed scales with the excess specific energy (√, momentum-like), capped
+    const vEj = Math.min(1 + 0.5 * Math.sqrt(Math.max(0, Q - thr)), 9);
 
     this.deleteEntity(e);
 
