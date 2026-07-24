@@ -926,10 +926,33 @@ the shatter loop (tracks `bigShattered`); a skinned planet still gets a scaled s
 ×2). The full 2-planet recipe: two big bodies + Mutual gravity + Accretion + Breakage all on → collide;
 slow=merge, fast=erode/disrupt into a debris field that re-accretes. NEXT BREAKAGE: compounds shed
 their real chunks; irregular hull-fragment shapes; Roche/tidal breakup. Then MUTUAL GRAVITY + FORCES.
-LIKELY NEXT (Rafael's plan): finish the BREAKAGE realism (slices above), then MUTUAL GRAVITY, then the
-FORCES. Also queued: affected-object glow/tint; drawpad per-axis ortho cam; Tier-2 (rewind, share URLs,
-save accreted planets/compounds). NB screenshotting a 500ms shockwave: pin `S.shocks[0].born = now-190`.
-Research dossier: docs/FORCES_RESEARCH.md.
+RUNAWAY CASCADE FIX + BREAKAGE TUNING + PROFILE (2026-07-21, Rafael: "debris speeding up uncontrollably
+toward a planet, chain-reacting into more and more debris"). REPRODUCED: object count exploded 14→397+,
+everything pinned at the 60 m/s cap, total KE ballooned 16×, and MASS VANISHED (525→246 as pieces flew
+off the map past VOID_Y). Root causes: (1) breakage/erosion INJECTED energy — ejection kicks weren't
+tied to the impact energy, so each hit ADDED KE; (2) mutual gravity recycled the debris back onto the
+planet and every bound re-impact shattered → exponential, energy-gaining cascade. FIXES (all in the
+body-body breakage section + shatter/craterErode): (a) gravitationally BOUND impacts (relative speed <
+escape·`BREAK_UNBOUND` 1.1) no longer disrupt — their energy ≈ the binding energy, so the pair merges/
+settles; only hyperbolic (unbound) collisions break. (b) Ejecta KE capped to `EJECT_FRAC` 0.25 of the
+impact's specific energy in BOTH `shatter` (`vEj = min(9, √(2·EJECT_FRAC·(Q−thr)))`) and `craterErode`
+(`ejSpeed = min(8, √(2·EJECT_FRAC·E/M))`) — breakage can never add net energy. (c) `BREAK_SOFT_CAP` 1200
+suspends breakage above that many objects (safety net, body-body + floor). VERIFIED: same scenario now
+stable at 162 objects, mass EXACT (525.1→525.1), max speed 25.7 (nothing at the cap), KE 16× lower.
+Also TUNED crater excavation down (`CRATER_EXCAVATE_MAX` 0.28→0.1, `CRATER_EXCAVATE_K` 0.6→0.4): a hit
+CHIPS a big body instead of obliterating it — small (0.5) impactor @40 → planet chipped 3.0→2.99 &
+survives; bigger (1.5) @45 → partial disruption, large 2.35 remnant + debris (was ground to dust).
+PERF PROFILE (all systems on, 1000 objects): 7.8 ms/step, <½ the 16.7 ms budget. Breakdown — Rapier+
+core 0.38 ms, self-gravity octree 1.14 ms (dominant JS cost; nbody.ts is already SoA/allocation-free/
+accuracy-tuned — no safe win there), accretion+breakage 0.07 ms. Micro-opt: `strengthOf` fast-path for
+single-material bodies (skip compOf's array+colour-clone alloc on the impact hot path). The code is
+already well optimized; the runaway fix was the real perf win (it prevented the thousands-of-bodies
+cascade). NB the accreted-planet count label can read absurdly high (e.g. ×4980) after re-accretion
+lifecycles — cosmetic (mergeComp counts compound; not investigated), NOT a mass bug (mass stays exact).
+LIKELY NEXT (Rafael's plan): finish the BREAKAGE realism (compounds shed real chunks; hull-fragment
+shapes; Roche/tidal), then MUTUAL GRAVITY, then the FORCES. Also queued: affected-object glow/tint;
+drawpad per-axis ortho cam; Tier-2 (rewind, share URLs, save accreted planets/compounds). NB
+screenshotting a 500ms shockwave: pin `S.shocks[0].born = now-190`. Research dossier: docs/FORCES_RESEARCH.md.
 STANDING RULE (Rafael, 2026-07-16): git commit AND push after EVERY build — don't wait to be asked.
 
 Stability hardening (2026-07-13): dynamic bodies now spawn with CCD enabled and reject deeply-
