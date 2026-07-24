@@ -2342,6 +2342,8 @@ export class Sandbox {
    *  - More energy → MORE, finer fragments (higher strain rate), down to a finite minimum size.
    */
   private shatter(e: Entity, Q: number, thr: number) {
+    // a rubble-pile COMPOUND breaks apart into its real component chunks, not generic debris
+    if (e.chunks && e.chunks.length >= 2) { this.disaggregateCompound(e, Q, thr); return; }
     const M = e.body.mass();
     const V = this.volumeOf(e);
     if (!(M > 0) || !(V > 0)) return;
@@ -2756,7 +2758,7 @@ export class Sandbox {
       for (const j of this.joints) { // both bodies are consumed, so gather big's connections too
         if (j.a === big || j.b === big) inherited.push({ kind: j.kind, other: j.a === big ? j.b : j.a });
       }
-      this.mergeCompound(big, small, com, vel, L, comp, count, inherited);
+      this.mergeCompound(big, small, vel, L, count, inherited);
       return;
     }
 
@@ -2915,14 +2917,31 @@ export class Sandbox {
    * diagonalized). Both parents are consumed; joints transfer. Used only while the aggregate is small
    * — a bigger one rounds into a sphere/planet (mergePair's sphere paths) at hydrostatic equilibrium.
    */
-  private mergeCompound(
-    big: Entity, small: Entity, com: THREE.Vector3, vel: THREE.Vector3, L: THREE.Vector3,
-    comp: CompEntry[], count: number, inherited: Array<{ kind: JointKind; other: Entity }>,
-  ) {
-    const chunks = [...this.worldChunksOf(big), ...this.worldChunksOf(small)]; // clones — safe to delete
-    const M = chunks.reduce((s, c) => s + c.mass, 0);
+  /** Composition (material / volume / colour, blended per material) derived from a set of chunks. */
+  private deriveComp(chunks: Chunk[]): CompEntry[] {
+    const out: CompEntry[] = [];
+    for (const c of chunks) {
+      const hit = out.find((x) => x.mat.id === c.mat.id);
+      if (!hit) out.push({ mat: c.mat, vol: c.volume, color: c.color.clone() });
+      else { hit.color.lerp(c.color, c.volume / (hit.vol + c.volume)); hit.vol += c.volume; }
+    }
+    return out.length ? out.sort((a, b) => b.vol - a.vol) : [{ mat: PLAIN, vol: 1, color: new THREE.Color() }];
+  }
+
+  /**
+   * Build ONE rigid body from world-space Chunks: a collider per part + a merged union mesh (per-part
+   * material groups) + exact mass (density-0 colliders + a summed, diagonalized inertia tensor). Comp
+   * is derived from the chunks. `asCompound` sets the `chunks` field so the body can later disaggregate;
+   * false makes a frozen-shape single body (a shed rock). Created AT REST — the caller sets velocity.
+   * Returns the entity plus its total mass and bounding radius (the caller needs them for spin/momentum).
+   */
+  private buildBodyFromChunks(chunks: Chunk[], asCompound: boolean, label: string, accreted: number): { entity: Entity; M: number; size: number } {
+    const M = chunks.reduce((s, c) => s + c.mass, 0) || 1e-6;
     const V = chunks.reduce((s, c) => s + c.volume, 0);
-    for (const c of chunks) c.offset.sub(com); // rebase onto the compound's centre of mass
+    const com = new THREE.Vector3();
+    for (const c of chunks) com.addScaledVector(c.offset, c.mass);
+    com.divideScalar(M);
+    for (const c of chunks) c.offset.sub(com); // rebase onto the body's centre of mass
 
     // inertia tensor about the c.o.m.: each chunk's own (equivalent-sphere) inertia + parallel axis
     const J = [[0, 0, 0], [0, 0, 0], [0, 0, 0]];
@@ -2936,8 +2955,6 @@ export class Sandbox {
     const eig = eigenSymmetric3(J);
     const principal = eig.values.map((x) => Math.max(x, 1e-4));
     const frame = this.frameFromEigen(eig.vectors);
-
-    this.deleteEntity(big); this.deleteEntity(small); // consume both parents (their clones live on)
 
     const body = this.world.createRigidBody(
       RAPIER.RigidBodyDesc.dynamic().setTranslation(com.x, com.y, com.z)
@@ -2981,26 +2998,79 @@ export class Sandbox {
       }
     }
 
+    const comp = this.deriveComp(chunks);
     const bb = merged.boundingBox!;
     const e: Entity = {
       id: this.nextId++, kind: 'custom', body, size, mat: comp[0].mat, color: comp[0].color.clone(),
       prevPos: com.clone(), prevQuat: new THREE.Quaternion(), currPos: com.clone(), currQuat: new THREE.Quaternion(),
-      lastVel: vel.clone(), accel: new THREE.Vector3(),
+      lastVel: new THREE.Vector3(), accel: new THREE.Vector3(),
       bbCenter: bb.getCenter(new THREE.Vector3()), bbHalf: bb.getSize(new THREE.Vector3()).multiplyScalar(0.5),
-      mesh, volume: V, chunks, comp, accreted: count, label: `rubble ×${count}`,
+      mesh, volume: V, comp, accreted, label,
       support: { points: new Float32Array(supp), pad: 0 }, mergedTick: this.tick,
     };
+    if (asCompound) e.chunks = chunks; // keep the parts so it can disaggregate/merge again
+    else for (const c of chunks) c.geometry.dispose(); // frozen shape — the un-baked clones aren't kept
     mesh.userData.entity = e;
     this.entities.push(e); this.registerColliders(e);
+    return { entity: e, M, size };
+  }
 
-    body.setLinvel({ x: vel.x, y: vel.y, z: vel.z }, true);
+  private mergeCompound(
+    big: Entity, small: Entity, vel: THREE.Vector3, L: THREE.Vector3,
+    count: number, inherited: Array<{ kind: JointKind; other: Entity }>,
+  ) {
+    const chunks = [...this.worldChunksOf(big), ...this.worldChunksOf(small)]; // clones — safe to delete
+    this.deleteEntity(big); this.deleteEntity(small); // consume both parents (their clones live on)
+    const { entity: e, M, size } = this.buildBodyFromChunks(chunks, true, `rubble ×${count}`, count);
+
+    e.lastVel.copy(vel);
+    e.body.setLinvel({ x: vel.x, y: vel.y, z: vel.z }, true);
     const spin = L.clone().divideScalar(0.4 * M * size * size);
     if (spin.length() > ACCRETE_MAX_SPIN) spin.setLength(ACCRETE_MAX_SPIN);
-    body.setAngvel({ x: spin.x, y: spin.y, z: spin.z }, true);
+    e.body.setAngvel({ x: spin.x, y: spin.y, z: spin.z }, true);
 
     for (const { kind, other } of inherited) { // transfer the parents' connections
       if (other === e || !this.entities.includes(other) || this.jointed(e, other)) continue;
       this.lockJoint(e, other, kind, this.makeConnectorLine(kind));
+    }
+  }
+
+  /**
+   * A rubble-pile COMPOUND shatters by shedding its actual component chunks — each becomes its own
+   * body keeping its shape and material (a stone cube + an ice sphere fly apart as a cube and a
+   * sphere, not generic debris). Ejection is energy-bounded, so a marginal hit barely separates them
+   * (they re-settle / re-accrete) while a violent one scatters them. Momentum is conserved exactly.
+   */
+  private disaggregateCompound(e: Entity, Q: number, thr: number) {
+    const chunks = this.worldChunksOf(e); // world-space clones (offset = world position)
+    if (this.entities.length + chunks.length >= MAX_INSTANCES) return; // no room — leave it whole
+    const bt = e.body.translation(), bl = e.body.linvel(), bw = e.body.angvel();
+    const com = new THREE.Vector3(bt.x, bt.y, bt.z);
+    const cvel = new THREE.Vector3(bl.x, bl.y, bl.z);
+    const cspin = new THREE.Vector3(bw.x, bw.y, bw.z);
+    const M = chunks.reduce((s, c) => s + c.mass, 0) || 1e-6;
+    this.deleteEntity(e);
+
+    const ejSpeed = Math.min(6, Math.sqrt(2 * EJECT_FRAC * Math.max(0.2, Q - thr)));
+    const frags: Array<{ ent: Entity; vel: THREE.Vector3; mass: number }> = [];
+    for (const c of chunks) {
+      const worldPos = c.offset.clone(); // BEFORE buildBodyFromChunks rebases it to the chunk's own com
+      const { entity } = this.buildBodyFromChunks([c], false, 'fragment', 1); // a single shed rock
+      const r = worldPos.sub(com);
+      const dir = r.lengthSq() > 1e-6 ? r.clone().normalize() : new THREE.Vector3().randomDirection();
+      const vel = cvel.clone().add(new THREE.Vector3().crossVectors(cspin, r)).addScaledVector(dir, ejSpeed);
+      frags.push({ ent: entity, vel, mass: c.mass });
+    }
+    // conserve linear momentum exactly: a uniform velocity shift so Σ mᵢvᵢ = M·v_compound
+    const P = new THREE.Vector3();
+    for (const f of frags) P.addScaledVector(f.vel, f.mass);
+    const dv = cvel.clone().multiplyScalar(M).sub(P).divideScalar(M);
+    for (const f of frags) {
+      f.vel.add(dv);
+      f.ent.body.setLinvel({ x: f.vel.x, y: f.vel.y, z: f.vel.z }, true);
+      f.ent.body.setAngvel({ x: cspin.x, y: cspin.y, z: cspin.z }, true);
+      f.ent.lastVel.copy(f.vel);
+      f.ent.mergedTick = this.tick;
     }
   }
 
