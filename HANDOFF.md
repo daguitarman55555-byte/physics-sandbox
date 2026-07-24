@@ -949,10 +949,33 @@ single-material bodies (skip compOf's array+colour-clone alloc on the impact hot
 already well optimized; the runaway fix was the real perf win (it prevented the thousands-of-bodies
 cascade). NB the accreted-planet count label can read absurdly high (e.g. ×4980) after re-accretion
 lifecycles — cosmetic (mergeComp counts compound; not investigated), NOT a mass bug (mass stays exact).
-LIKELY NEXT (Rafael's plan): finish the BREAKAGE realism (compounds shed real chunks; hull-fragment
-shapes; Roche/tidal), then MUTUAL GRAVITY, then the FORCES. Also queued: affected-object glow/tint;
-drawpad per-axis ortho cam; Tier-2 (rewind, share URLs, save accreted planets/compounds). NB
-screenshotting a 500ms shockwave: pin `S.shocks[0].born = now-190`. Research dossier: docs/FORCES_RESEARCH.md.
+BREAKAGE REALISM COMPLETED — 3 FINAL SLICES (2026-07-21):
+ (1) COMPOUND DISAGGREGATION — a rubble-pile compound (≥2 chunks) now breaks apart into its ACTUAL
+     component shapes, not generic debris: extracted `buildBodyFromChunks(chunks, asCompound, label,
+     accreted)` from mergeCompound (builds one body from world-space chunks — colliders + union mesh +
+     exact inertia; asCompound keeps `chunks` for future disaggregation, else a frozen single shape);
+     new `disaggregateCompound` releases each chunk as its own body keeping geometry/material, ejection
+     energy-bounded (marginal hit → barely separates → re-settles; violent → scatters), momentum
+     conserved via a uniform velocity shift. Wired into `shatter` (compound branch first). Verified:
+     box+sphere+box compound shattered into box(24 verts)/sphere(315)/box(24) fragments, mass exact.
+ (2) SHARD FRAGMENTS — debris (R≥DEBRIS_POTATO_R) are now angular convex-polyhedron SHARDS with flat
+     fracture faces (`shardGeometry` = `ConvexGeometry` of 9–13 random points, flatShading, hull =
+     collider, icosahedron fallback), not smooth potatoes. `potatoGeometry` removed. Verified: stone
+     ball floor-slam → convex-polyhedron shards (10–18 flat faces each) that tumble/settle like rocks.
+ (3) ROCHE / TIDAL BREAKUP — `stepRoche` (~4 Hz, when mutual gravity + breakage on): the most massive
+     body is the "primary"; any accreted, gravity-bound satellite (accreted||chunks, size≥ROCHE_MIN_R
+     1.5, primary ≥ROCHE_MASS_RATIO 30× its mass) inside the FLUID Roche limit `d < ROCHE_COEFF 2.44 ·
+     R_sat·(M/m)^(1/3)` is `tidalDisrupt`ed (a gentle `shatter` at Q=thr·TIDAL_SEVERITY 1.7; orbital
+     shear spreads the fragments into a stream). NB the fluid coefficient matters — the rigid (2M/m)^⅓
+     form puts the limit at the primary's surface (no window before contact). Verified: an accreted
+     moon at d=12 inside the 14.6 Roche limit (ratio 52.7) shredded into a debris cloud around the
+     primary, mass exact (2397→2397), gentle (max 9). Honest note: a shredded/shattered cloud of SMALL
+     fragments secondary-breaks a bit against itself (tiny mutual v_esc → the unbound gate barely
+     protects them), so counts run higher than the primary fragment count — bounded, gentle, mass-exact.
+LIKELY NEXT (Rafael's plan): BREAKAGE realism is DONE — next is the MUTUAL GRAVITY realism pass, then
+the FORCES. Also queued: affected-object glow/tint; drawpad per-axis ortho cam; Tier-2 (rewind, share
+URLs, save accreted planets/compounds). NB screenshotting a 500ms shockwave: pin `S.shocks[0].born =
+now-190`. Research dossier: docs/FORCES_RESEARCH.md.
 STANDING RULE (Rafael, 2026-07-16): git commit AND push after EVERY build — don't wait to be asked.
 
 Stability hardening (2026-07-13): dynamic bodies now spawn with CCD enabled and reject deeply-
