@@ -22,6 +22,7 @@ import {
   type RevolutionSpec, type ParamCurveSpec, type ParamSurfaceSpec,
 } from './systems/shapes';
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
+import { ConvexGeometry } from 'three/examples/jsm/geometries/ConvexGeometry.js';
 import { buildImplicit, type ImplicitSpec } from './systems/implicit';
 import { PLAIN, type Material } from './systems/materials';
 import { fieldForce, fieldInfluence, pathInfluence, fluidForce, wellOrbitalVelocity, FIELD_INFO, samplePath, PATH_PRESETS, type Field, type FieldKind, type FieldShape, type CurveSpec } from './systems/fields';
@@ -2503,11 +2504,11 @@ export class Sandbox {
     const dom = comp[0];
     let e: Entity;
     if (R >= DEBRIS_POTATO_R) {
-      // a real irregular body: the collider is the CONVEX HULL of the displaced mesh, so chunks
-      // tumble and settle like rocks instead of rolling away forever. Mass is set directly
-      // (density × nominal volume) — exact conservation without knowing the hull's own volume;
-      // Rapier derives the inertia tensor from the hull shape.
-      const geo = this.potatoGeometry(R);
+      // a real irregular SHARD: an angular convex polyhedron with flat FRACTURE FACES (how brittle
+      // rock actually breaks), collider = its convex hull so chunks tumble and settle like rocks.
+      // Mass is set directly (density × nominal volume) — exact conservation without the hull's own
+      // volume; Rapier derives the inertia tensor from the hull shape.
+      const geo = this.shardGeometry(R);
       const body = this.world.createRigidBody(
         RAPIER.RigidBodyDesc.dynamic().setTranslation(pos.x, pos.y, pos.z));
       const pts = (geo.attributes.position as THREE.BufferAttribute).array as Float32Array;
@@ -2516,7 +2517,9 @@ export class Sandbox {
         .setMass(density * Vi);
       this.world.createCollider(desc, body);
       e = this.finishCustomEntity(body, geo, pos, R, Vi, 'debris', dom.mat, [2, 1]);
-      if (!dom.mat.maps) (e.mesh!.material as THREE.MeshStandardMaterial).color.copy(dom.color);
+      const dm = e.mesh!.material as THREE.MeshStandardMaterial;
+      dm.flatShading = true; dm.needsUpdate = true; // per-face normals → sharp fracture facets
+      if (!dom.mat.maps) dm.color.copy(dom.color);
       e.support = { points: pts, pad: 0 }; // exact drag floor-clamp over the hull's defining points
     } else {
       e = this.spawn('sphere', pos, R, dom.mat);
@@ -2550,9 +2553,14 @@ export class Sandbox {
     return geo;
   }
 
-  /** A lumpy rock for debris: strong displacement, asteroid look. */
-  private potatoGeometry(R: number): THREE.BufferGeometry {
-    return this.displaceSphere(new THREE.SphereGeometry(R, 24, 16), [[0.16, 3.1], [0.1, 5.3], [0.07, 8.7]]);
+  /** An angular rock SHARD for debris: a convex polyhedron from a handful of random points, giving
+   *  flat fracture faces (how brittle rock breaks). Its hull doubles as the collider. Falls back to a
+   *  low-poly icosahedron if the random points come out degenerate/coplanar. */
+  private shardGeometry(R: number): THREE.BufferGeometry {
+    const n = 9 + Math.floor(Math.random() * 5); // 9–13 points → a chunky angular shard (fewer slivers)
+    const pts: THREE.Vector3[] = [];
+    for (let i = 0; i < n; i++) pts.push(new THREE.Vector3().randomDirection().multiplyScalar(R * (0.72 + Math.random() * 0.4)));
+    try { return new ConvexGeometry(pts); } catch { return new THREE.IcosahedronGeometry(R, 0); }
   }
 
   /** A lumpy UNIT sphere for accreted bodies (mesh is scaled by R). Bumpiness FADES as R grows — a
