@@ -2317,10 +2317,12 @@ export class Sandbox {
 
   /** Impact-shatter resistance: the volume-weighted strength of everything the body is made of. */
   private strengthOf(e: Entity): number {
-    const comp = this.compOf(e);
-    const total = comp.reduce((s, c) => s + c.vol, 0) || 1;
+    // fast path (the common one, hit per impact pair in the contact drain): a single-material body's
+    // strength is just its material's — skip compOf's array + colour-clone allocation
+    if (!e.comp) return e.mat.strength ?? 1;
+    const total = e.comp.reduce((s, c) => s + c.vol, 0) || 1;
     let s = 0;
-    for (const c of comp) s += (c.vol / total) * (c.mat.strength ?? 1);
+    for (const c of e.comp) s += (c.vol / total) * (c.mat.strength ?? 1);
     return s;
   }
 
