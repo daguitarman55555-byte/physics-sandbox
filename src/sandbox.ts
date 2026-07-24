@@ -202,8 +202,10 @@ const CRATER_SPEED = 5; // m/s — bounce-regime hits above this scar a skinned 
 // a big body — it loses ejecta near the impact site and shrinks, instead of just absorbing the impactor.
 // This is what lets a small body chip parts off a big one and two planets grind each other down.
 const CRATER_ERODE_MIN_R = 1.0; // only bodies this big erode (planets, not pebbles — small ones shatter)
-const CRATER_EXCAVATE_K = 0.6; // excavation efficiency: excavated mass ≈ K·E / target specific-strength
-const CRATER_EXCAVATE_MAX = 0.28; // one crater excavates at most this fraction of the body (more → shatter)
+const CRATER_EXCAVATE_K = 0.4; // excavation efficiency: excavated mass ≈ K·E / target specific-strength
+const CRATER_EXCAVATE_MAX = 0.1; // one crater excavates at most this fraction of the body — a hit CHIPS
+//                                  a big body (it takes a sustained pounding to grind one down), never
+//                                  removes a big slab in a single crater
 const CRATER_EJECTA_MIN_R = 0.18; // don't erode if the excavated chunk would be smaller than this radius
 // Runaway guards. (1) A gravitationally BOUND impact (relative speed below escape velocity) can't
 // disrupt — its energy ≈ the binding energy, so the pair merges/settles. Without this, mutual gravity
