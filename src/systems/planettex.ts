@@ -53,6 +53,11 @@ const minW = () => (hiDetail ? 1024 : 256);
 const maxW = () => (hiDetail ? 2048 : 512); // albedo/normal cap (rough/metal bake at half)
 const TILE_M = 2; // one source-texture tile ≈ 2 m of surface, matching the instanced pools
 const FLUSH_MS = 300; // min interval between GPU re-uploads of a planet's canvases (the lag lever)
+// Cap the skin's metalness scalar (the metalness MAP still modulates it, so steel patches stay the
+// most metallic). At the full 1.0 a steel-bearing planet became a pure mirror of the deliberately-dark
+// scene environment and rendered as gleaming BLACK; a rubble/accreted world isn't polished chrome, so
+// 0.45 keeps metal reading as darker metallic rock with a diffuse base instead of a black mirror.
+const SKIN_METALNESS = 0.45;
 
 type LayerKind = 'albedo' | 'normal' | 'rough' | 'metal';
 interface Layer { kind: LayerKind; canvas: HTMLCanvasElement; ctx: CanvasRenderingContext2D; tex: THREE.CanvasTexture }
@@ -118,7 +123,7 @@ export class PlanetSkin {
     // scalar factors sit at 1 — the painted maps carry every material's own values
     this.material = new THREE.MeshStandardMaterial({
       map: a.tex, normalMap: n.tex, roughnessMap: r.tex, metalnessMap: m.tex,
-      roughness: 1, metalness: 1,
+      roughness: 1, metalness: SKIN_METALNESS, // capped — full 1.0 made steel-bearing planets black mirrors
     });
     this.material.userData.ownedTex = true; // deleteEntity/clear dispose all four canvases
     this.fill(base, radius);
