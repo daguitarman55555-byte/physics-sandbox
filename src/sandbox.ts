@@ -152,9 +152,11 @@ const ACCRETE_EVERY = 10; // check cadence in physics steps (6 Hz) — merging n
 // v_esc = √(2·G·M/r) (Ohtsuki 1993; Morbidelli 2018 — "ε·v_collision < v_escape → stick"). There is no
 // flat cohesion floor: macroscopic bodies don't spontaneously weld, so a pile of blocks with no mutual
 // gravity has ~zero escape velocity and NEVER clumps. Real accretion needs self-gravity — so does this.
-const ACCRETE_BIND_FRAC = 0.9; // fuse if rebound speed < this fraction of escape velocity (slight margin)
-const MIN_BIND_VESC = 0.25; // escape velocity (m/s) below which gravity is too weak to bind a pair at all
-//                             → no accretion (this is what stops a plain floor pile from balling up)
+const ACCRETE_BIND_FRAC = 0.7; // fuse only if rebound speed < this fraction of escape velocity —
+//                                lowered 0.9→0.7 to make sticking a little harder (also ≈ the critical
+//                                restitution at v=v_esc from the accretion literature)
+const MIN_BIND_VESC = 0.4; // escape velocity (m/s) below which gravity is too weak to bind a pair at all
+//                            → no accretion (raised 0.25→0.4 so weakly-bound pairs bounce instead of fuse)
 // A merged aggregate keeps its component shapes as a rubble-pile COMPOUND while it's small; once it
 // grows past this equivalent-sphere radius (or part count), gravity wins over material strength and it
 // ROUNDS into a sphere/planet — real hydrostatic equilibrium (why big bodies are round, small ones aren't).
@@ -302,6 +304,7 @@ export class Sandbox {
     joint: RAPIER.ImpulseJoint;
     prevLinDamp: number; // body damping to restore on release
     prevAngDamp: number;
+    grabOffset: THREE.Vector3; // body centre − grab point, so paused-drag keeps the grabbed spot under the cursor
   } | null = null;
   selected: Entity | null = null;
   private pointerDownAt = { x: 0, y: 0 };
@@ -2090,6 +2093,9 @@ export class Sandbox {
       // discard backlog the step cap couldn't absorb (a high time-scale on a slow frame) — the
       // leftover must stay < FIXED or the render interpolation extrapolates past the newest state
       if (this.acc > FIXED) this.acc = FIXED * 0.999;
+      // physics is frozen while paused, so the normal joint-pull grab (in stepPhysics) doesn't run —
+      // let the user still reposition a grabbed object by tracking the cursor directly
+      if (this.paused && this.grab) this.dragWhilePaused();
       const alpha = this.acc / FIXED;
       this.syncRender(alpha);
       this.controls.update();
@@ -3279,7 +3285,7 @@ export class Sandbox {
       body.setLinearDamping(4);
       body.setAngularDamping(0.9);
 
-      this.grab = { entity: hit.entity, plane, target: anchorPoint.clone(), kin, joint, prevLinDamp, prevAngDamp };
+      this.grab = { entity: hit.entity, plane, target: anchorPoint.clone(), kin, joint, prevLinDamp, prevAngDamp, grabOffset: bodyPos.clone().sub(anchorPoint) };
       body.wakeUp();
       this.controls.enabled = false; // let the drag own the mouse
     } else {
@@ -3314,6 +3320,28 @@ export class Sandbox {
     const c = e.bbCenter, h = e.bbHalf;
     const centerY = t.y + c.x * yx + c.y * yy + c.z * yz;
     return centerY - (h.x * Math.abs(yx) + h.y * Math.abs(yy) + h.z * Math.abs(yz));
+  }
+
+  /**
+   * Reposition a grabbed body while the sim is PAUSED. Physics isn't stepping, so instead of the
+   * spherical-joint pull we set the body's transform directly to keep the grabbed point under the
+   * cursor (clamped above the floor and inside the play area), zero its velocity, and move the
+   * kinematic anchor to match so unpausing resumes the physical drag seamlessly.
+   */
+  private dragWhilePaused() {
+    const g = this.grab!, e = g.entity;
+    if (e.frozen) return;
+    const tx = THREE.MathUtils.clamp(g.target.x, -495, 495);
+    const tz = THREE.MathUtils.clamp(g.target.z, -495, 495);
+    const p = this._p.set(tx, g.target.y, tz).add(g.grabOffset); // body centre keeping the grab spot on-cursor
+    const t = e.body.translation();
+    p.y = Math.max(p.y, (t.y - this.bodyBottomY(e)) + 0.02); // don't let it sink through the floor
+    e.body.setTranslation({ x: p.x, y: p.y, z: p.z }, true);
+    e.body.setLinvel({ x: 0, y: 0, z: 0 }, true);
+    e.body.setAngvel({ x: 0, y: 0, z: 0 }, true);
+    e.body.wakeUp();
+    g.kin.setTranslation({ x: p.x - g.grabOffset.x, y: p.y - g.grabOffset.y, z: p.z - g.grabOffset.z }, true);
+    e.prevPos.copy(p); e.currPos.copy(p); // frozen sim → render exactly here, no interpolation lag
   }
 
   /** Undo everything a grab set up: joint, kinematic anchor, damping, camera control. */
