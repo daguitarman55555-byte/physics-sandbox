@@ -902,6 +902,30 @@ SLICES: cratering/spall regime (a sub-shatter hit ejects a chip + dents any body
 planets); a COMPOUND sheds its individual chunks instead of shattering to generic debris; irregular
 (hull) fragment shapes with fracture-plane faces; Roche/tidal breakup; then move on to the MUTUAL
 GRAVITY and FORCES realism passes.
+SKIN "GLEAMING BLACK" FIX (2026-07-21): a heavily-accreted MIXED planet with any steel content rendered
+gleaming black. Diagnosed live: albedo/rough maps were fine (medium-toned), the metal map correctly
+~21% metallic — but the skin material's `metalness` scalar was 1.0, so steel patches were pure mirrors
+of the deliberately-dark scene environment (nothing bright to reflect → black). Fix: `SKIN_METALNESS`
+0.45 (planettex.ts) — the metalness MAP still modulates it (steel stays most metallic) but reads as
+darker metallic rock, not chrome. A rubble/accreted world isn't polished anyway. Verified: a 6-material
+planet that was half-black now shows stone/ice/wood/rubber/steel correctly.
+CRATER EROSION — BREAKAGE SLICE 2 + PLANETARY COLLISIONS (2026-07-21, researched Leinhardt & Stewart
+giant-impact regimes: accretion / graze-and-merge / hit-and-run / erosion / disruption). Rafael: "a big
+object hit by a small one should get parts BROKEN off, not overtake it — recreate 2 planets colliding."
+New `craterErode(big, E, dirWorld)` in the contact loop: when the big body SURVIVED the impactor (not
+catastrophically shattered) but the hit was energetic, it EXCAVATES a crater — spalls a few power-law
+ejecta fragments up-and-out from the impact site and SHRINKS (rebuilds its ball collider at the smaller
+radius, density preserved; skinned/lumpy meshes resync via growLumpyMesh). Excavated mass = crater
+energy scaling `clamp(CRATER_EXCAVATE_K 0.6·E / (BREAK_Q·strength), 0, CRATER_EXCAVATE_MAX 0.28·M)`;
+skips if the chunk would be < CRATER_EJECTA_MIN_R 0.18 or the body < CRATER_ERODE_MIN_R 1.0 (planets
+only — pebbles shatter). MASS + MOMENTUM conserved (ejecta carry momentum out, body recoils Δv=recoil/
+Mnew). Only ball-collider customs/spheres erode (boxes/compounds carry `support` → skip). Wired after
+the shatter loop (tracks `bigShattered`); a skinned planet still gets a scaled scar. Also craters now
+π-scale (∝√v) from slice 1. VERIFIED LIVE (mass conserved): size-3 stone planet hit by size-1.5 @45 m/s
+→ eroded to 2.35 + 65-piece debris cascade; two planets @18 m/s + gravity → graze-and-merge (accreted
+×2). The full 2-planet recipe: two big bodies + Mutual gravity + Accretion + Breakage all on → collide;
+slow=merge, fast=erode/disrupt into a debris field that re-accretes. NEXT BREAKAGE: compounds shed
+their real chunks; irregular hull-fragment shapes; Roche/tidal breakup. Then MUTUAL GRAVITY + FORCES.
 LIKELY NEXT (Rafael's plan): finish the BREAKAGE realism (slices above), then MUTUAL GRAVITY, then the
 FORCES. Also queued: affected-object glow/tint; drawpad per-axis ortho cam; Tier-2 (rewind, share URLs,
 save accreted planets/compounds). NB screenshotting a 500ms shockwave: pin `S.shocks[0].born = now-190`.
