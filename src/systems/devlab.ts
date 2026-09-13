@@ -17,6 +17,7 @@ import RAPIER from '@dimforge/rapier3d-compat';
 import { Sandbox, setContactRules, type Entity } from '../sandbox';
 import { PRESETS, type Material } from './materials';
 import { SURFACE_PRESETS } from './shapes';
+import { flowVelocity } from './fields';
 import type { FieldData } from './persistence';
 
 export const DT = 1 / 60; // the sandbox's fixed physics step
@@ -103,6 +104,14 @@ export class LabCtx {
 
   field(fd: Partial<FieldData> & { kind: string }) {
     return this.S.addField({ shape: 'sphere', pos: [0, 0, 0], quat: [0, 0, 0, 1], size: [10, 10, 10], strength: 1, hidden: false, ...fd });
+  }
+
+  /** Detonate a spherical charge right now (arcade: blast m/s · realistic: kg of TNT). */
+  blast(pos: Vec3, radius: number, strength: number) {
+    this.S.detonate({
+      id: -1, kind: 'explosion', shape: 'sphere', pos: this.V(...pos), quat: new THREE.Quaternion(),
+      size: this.V(radius, radius, radius), strength, hidden: false,
+    });
   }
 
   /** A ramp of `deg` degrees sloping DOWN toward +x. Returns the down-slope unit vector, surface normal
@@ -642,6 +651,146 @@ export const EXPERIMENTS: Experiment[] = [
       const e = c.sphere([-8, 10, 0], 0.4, c.mat({}));
       c.S.step(60);
       return { measured: e.body.linvel().x, expected: 8 * (1 - Math.exp(-5)), unit: 'm/s', detail: 'velocity-target steering v = u(1 − e^(−5t)) after 1 s — the arcade semantics' };
+    },
+  },
+  {
+    id: 'wind-gusts', group: 'Fields', name: 'Gusty wind statistics', law: 'mean ≈ set speed, gust factor 1.3–1.6', tolPct: 0,
+    run: (c) => {
+      const rec = c.field({ kind: 'wind', shape: 'box', pos: [0, 10, 0], size: [60, 20, 60], strength: 12, gust: 0.6 });
+      const u = c.V(), p = c.V();
+      // a fixed anemometer: 3-s gust (peak of 3-s means) over a 10-min record, like met stations report
+      const samples: number[] = [];
+      for (let i = 0; i < 600 * 10; i++) { flowVelocity(rec.field, p.set(5, 8, -3), 1, u, i * 0.1); samples.push(u.length()); }
+      const mean = samples.reduce((a, b) => a + b, 0) / samples.length;
+      let peak3 = 0;
+      for (let i = 30; i < samples.length; i++) { let s = 0; for (let j = i - 30; j < i; j++) s += samples[j]; peak3 = Math.max(peak3, s / 30); }
+      return { measured: peak3 / mean, expected: 1.45, absTol: 0.2, unit: '×', detail: `10-min mean ${mean.toFixed(2)} m/s (set 12) · 3-s peak ${peak3.toFixed(1)} m/s at gustiness 0.6` };
+    },
+  },
+  {
+    id: 'charge-radius', group: 'Fields', name: 'Double charge → half the circle', law: 'r = m·v / (q·B)', tolPct: 2,
+    run: (c) => {
+      c.S.setGravityY(0);
+      c.field({ kind: 'magnetic', pos: [0, 10, 0], size: [40, 40, 40], strength: 2 });
+      const e = c.sphere([1.25, 10, 0], 0.2, c.mat({}), [0, 0, 5]);
+      c.S.setEntityCharge(e, 2);
+      let sum = 0;
+      for (let i = 0; i < 94; i++) { c.S.step(); const t = e.body.translation(); sum += Math.hypot(t.x, t.z); }
+      return { measured: sum / 94, expected: 5 / (2 * 2), unit: 'm', detail: 'q/m = 2 at 5 m/s in a turn-rate-2 field — mean distance from the centre over one loop' };
+    },
+  },
+  {
+    id: 'charge-neutral', group: 'Fields', name: 'Neutral matter ignores a magnetic field (Realistic)', law: 'F = q·v×B, q = 0', tolPct: 0,
+    run: (c) => {
+      c.S.setGravityY(0);
+      c.S.fieldModel = 'realistic';
+      c.field({ kind: 'magnetic', pos: [0, 10, 0], size: [40, 40, 40], strength: 4 });
+      const e = c.sphere([0, 10, 0], 0.3, c.mat({}), [0, 0, 5]);
+      c.S.step(60);
+      return { measured: Math.abs(e.body.linvel().x), expected: 0, absTol: 1e-6, unit: 'm/s', detail: 'uncharged ball keeps a straight line through B' };
+    },
+  },
+  {
+    id: 'magnet-falloff', group: 'Fields', name: 'Magnet pull falls off steeply', law: 'F ∝ ∇(B²) → 1/r⁷ (softened dipole)', tolPct: 3,
+    run: (c) => {
+      c.S.setGravityY(0);
+      c.field({ kind: 'magnet', pos: [0, 20, 0], size: [8, 8, 8], strength: 8 });
+      const steel = preset('steel');
+      const near = c.sphere([0, 18, 0], 0.15, steel);
+      const far = c.sphere([0, 17, 4], 0.15, steel); // 3 m below the pole, offset sideways → use its axial distance
+      c.S.step(1); c.place(near, [0, 18, 0]); c.place(far, [0, 17, 0.0001]);
+      c.S.step(1);
+      // on-axis |B|² of the softened dipole: ((2r² − s²)/(r² + s²)^2.5)² — pull ∝ its slope
+      const b2 = (r: number) => ((2 * r * r - 0.25) / (r * r + 0.25) ** 2.5) ** 2;
+      const slope = (r: number) => (b2(r + 1e-4) - b2(r - 1e-4)) / 2e-4;
+      const expect = slope(2) / slope(3);
+      return { measured: near.body.linvel().y / far.body.linvel().y, expected: expect, unit: '×', detail: `pull at 2 m vs 3 m below the pole — a pure dipole far-field would give ${((3 / 2) ** 7).toFixed(1)}×` };
+    },
+  },
+  {
+    id: 'magnet-wood', group: 'Fields', name: 'Magnet ignores wood', law: 'χ_wood ≈ 0', tolPct: 0,
+    run: (c) => {
+      c.S.setGravityY(0);
+      c.field({ kind: 'magnet', pos: [0, 20, 0], size: [8, 8, 8], strength: 8 });
+      const e = c.sphere([0, 18.8, 0], 0.3, preset('wood'));
+      c.S.step(30);
+      const v = e.body.linvel();
+      return { measured: Math.hypot(v.x, v.y, v.z), expected: 0, absTol: 1e-9, unit: 'm/s', detail: 'wood ball 1.2 m under a strength-8 magnet' };
+    },
+  },
+  {
+    id: 'blast-scaling', group: 'Fields', name: 'Blast scaling (Hopkinson–Cranz)', law: 'same R/W^⅓ → impulse ∝ W^⅓', tolPct: 3,
+    run: (c) => {
+      c.S.setGravityY(0);
+      c.S.fieldModel = 'realistic';
+      const foam = preset('foam');
+      const shot = (R: number, W: number) => {
+        c.S.resetForLab(); c.S.setGravityY(0); c.S.fieldModel = 'realistic';
+        const e = c.sphere([R, 30, 0], 0.5, foam);
+        c.S.step(1); c.place(e, [R, 30, 0]);
+        c.blast([0, 30, 0], 40, W);
+        return e.body.linvel().x;
+      };
+      const v1 = shot(4, 1), v2 = shot(8, 8);
+      return { measured: v2 / v1, expected: 2, unit: '×', detail: `1 kg TNT at 4 m → ${v1.toFixed(2)} m/s; 8 kg at 8 m → ${v2.toFixed(2)} m/s (same scaled distance)` };
+    },
+  },
+  {
+    id: 'blast-mass', group: 'Fields', name: 'Blast throws foam, not steel', law: 'Δv = impulse / m', tolPct: 3,
+    run: (c) => {
+      c.S.setGravityY(0);
+      c.S.fieldModel = 'realistic';
+      const f = c.sphere([5, 30, 0], 0.5, preset('foam'));
+      const s = c.sphere([-5, 30, 0], 0.5, preset('steel'));
+      c.S.step(1); c.place(f, [5, 30, 0]); c.place(s, [-5, 30, 0]);
+      c.blast([0, 30, 0], 40, 5);
+      return { measured: f.body.linvel().x / -s.body.linvel().x, expected: 7800 / 30, unit: '×', detail: `5 kg TNT at 5 m: foam ${f.body.linvel().x.toFixed(2)} m/s, steel ${(-s.body.linvel().x).toFixed(4)} m/s` };
+    },
+  },
+  {
+    id: 'blast-shield', group: 'Fields', name: 'A wall shelters from a blast', law: 'blocked line of sight → diffracted ~15%', tolPct: 0,
+    run: (c) => {
+      c.S.setGravityY(0);
+      c.S.fieldModel = 'realistic';
+      const foam = preset('foam');
+      const open = c.sphere([5, 30, 0], 0.5, foam);
+      const hid = c.sphere([0, 30, 5], 0.5, foam);
+      c.fixedCuboid([0, 30, 2.5], [1.5, 1.5, 0.2], new THREE.Quaternion(), 0.5);
+      c.S.step(1); c.place(open, [5, 30, 0]); c.place(hid, [0, 30, 5]);
+      c.blast([0, 30, 0], 40, 5);
+      return { measured: hid.body.linvel().z / open.body.linvel().x, expected: 0.15, absTol: 0.02, unit: '×', detail: 'two foam balls 5 m from the charge — one behind a wall' };
+    },
+  },
+  {
+    id: 'carried-momentum', group: 'Conservation', name: 'Carried gravity well conserves momentum (Realistic)', law: 'action = reaction', tolPct: 0,
+    run: (c) => {
+      c.S.setGravityY(0);
+      c.S.fieldModel = 'realistic';
+      const star = c.sphere([0, 20, 0], 0.5, preset('steel'));
+      const moon = c.sphere([6, 20, 0], 0.4, c.mat({}));
+      const well = c.field({ kind: 'gravitywell', pos: [0, 20, 0], size: [30, 30, 30], strength: 8 });
+      c.S.attachField(well, star);
+      c.S.step(1); c.place(star, [0, 20, 0]); c.place(moon, [6, 20, 0]);
+      c.S.step(30); // before they meet (~0.85 s)
+      const ms = star.body.mass(), mm = moon.body.mass();
+      const vs = star.body.linvel(), vm = moon.body.linvel();
+      const P = Math.hypot(ms * vs.x + mm * vm.x, ms * vs.y + mm * vm.y, ms * vs.z + mm * vm.z);
+      const scale = mm * Math.hypot(vm.x, vm.y, vm.z) || 1;
+      return { measured: P / scale, expected: 0, absTol: 0.01, unit: '×|p_moon|', detail: `after 0.5 s the moon falls in at ${Math.hypot(vm.x, vm.y, vm.z).toFixed(2)} m/s and the star recoils — total momentum stays ~0` };
+    },
+  },
+  {
+    id: 'carried-follows', group: 'Conservation', name: 'A carried field rides its object', law: 'field pose = carrier pose', tolPct: 0,
+    run: (c) => {
+      c.S.setGravityY(0);
+      const cart = c.box([0, 10, 0], 0.5, c.mat({}), [3, 0, 0], undefined);
+      const fan = c.field({ kind: 'wind', shape: 'box', pos: [0, 10, 0], size: [4, 2, 2], strength: 5 });
+      c.S.attachField(fan, cart);
+      c.S.step(1); c.place(cart, [0, 10, 0], [3, 0, 0], undefined, [0, 1, 0]);
+      c.S.step(90);
+      const t = cart.body.translation();
+      c.S.step(1); // the field adopts the pose at the start of each step
+      return { measured: fan.field.pos.distanceTo(c.V(t.x, t.y, t.z)), expected: 0, absTol: 0.01, unit: 'm', detail: 'a wind field mounted on a moving, spinning cart after 1.5 s' };
     },
   },
   // ------------------------------------------------------------------ conservation through emergent systems

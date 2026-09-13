@@ -34,6 +34,7 @@ export interface EntityData {
   angvel: Vec3;
   frozen?: boolean;
   gravityScale?: number; // per-object gravity multiplier (omitted when the default 1)
+  charge?: number; // charge-to-mass multiplier for magnetic fields (omitted = model default)
 }
 
 /** A path field's flow curve — equations only; the sampled polyline is re-derived on load. */
@@ -58,6 +59,8 @@ export interface FieldData {
   dir?: 1 | -1;
   sole?: boolean;
   path?: PathData;
+  gust?: number; // wind gustiness 0..1
+  attach?: { index: number; local: Vec3; rel: Vec4 }; // carried by the saved entity at this index
   fluid?: FluidProps; // fluid tanks: viscosity, waves, current
 }
 

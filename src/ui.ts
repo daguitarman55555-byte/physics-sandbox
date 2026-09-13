@@ -1349,7 +1349,12 @@ function buildFieldsSection(panel: HTMLElement, sandbox: Sandbox) {
   const strRow = el('div', '', 'row');
   const sIn = numInput(1, 'This field’s own strength');
   const strWrap = labeled('strength', sIn);
-  strRow.append(strWrap);
+  // wind gustiness: 0 steady … 1 very gusty (speed ±, heading wanders, gust fronts travel downwind)
+  const gustIn = numInput(0, 'Gustiness 0–1: real wind swings ~±40% in speed and wanders in direction');
+  gustIn.min = '0'; gustIn.max = '1'; gustIn.step = '0.1';
+  const gustWrap = labeled('gusts', gustIn);
+  gustIn.oninput = () => { const r = sandbox.activeField; const v = parseFloat(gustIn.value); if (r && Number.isFinite(v)) sandbox.setFieldGust(r, v); };
+  strRow.append(strWrap, gustWrap);
 
   const hint = el('div', '', 'preview');
   const btns = el('div', '', 'row wrap');
@@ -1363,10 +1368,16 @@ function buildFieldsSection(panel: HTMLElement, sandbox: Sandbox) {
   const bSole = el('button', '☉ Sole gravity', 'mini');
   bSole.title = 'Make this well’s centre the only gravity inside its region — world gravity is fully off there, so “down” is toward the well. Other wells and attractors still add their own pull.';
   bSole.onclick = () => { const r = sandbox.activeField; if (r) sandbox.setFieldSole(r, !r.field.sole); };
+  const bAttach = el('button', '📌 Carry on object', 'mini');
+  bAttach.title = 'Mount this field on an object: click the button, then click the object. The field moves and turns with it (a magnet on a crane, a star you can throw). In Realistic mode the object also feels the pull back.';
+  bAttach.onclick = () => {
+    const r = sandbox.activeField; if (!r) return;
+    if (r.field.attach) sandbox.detachField(r); else sandbox.beginAttachPick();
+  };
   const bPlace = el('button', 'Place', 'mini');
   const bCancel = el('button', 'Cancel', 'mini');
   const bDelete = el('button', 'Delete field', 'danger');
-  btns.append(bHide, bFit, bReverse, bSole, bPlace, bCancel, bDelete);
+  btns.append(bHide, bFit, bReverse, bSole, bAttach, bPlace, bCancel, bDelete);
   editor.append(title, shapeRow, sizeRow, pathRow, pathNums, pathLift, customBox, fluidRow, fluidNums, strRow, hint, btns);
   panel.append(editor);
 
@@ -1449,7 +1460,12 @@ function buildFieldsSection(panel: HTMLElement, sandbox: Sandbox) {
     const placing = sandbox.isPlacing; // true for both — the editor always drives a draft/ghost
     const bad = !sandbox.placementValid;
     const isPath = rec.field.kind === 'path';
+    const carrier = rec.field.attach?.entity.id;
+    bAttach.textContent = sandbox.attachPicking ? '👆 click an object… (Esc)' : carrier != null ? `📌 Detach from #${carrier}` : '📌 Carry on object';
+    bAttach.classList.toggle('primary', sandbox.attachPicking);
+    bAttach.classList.toggle('hidden', rec.field.kind === 'explosion');
     title.innerHTML = `${editing ? 'Editing' : 'Placing'} <b>${FIELD_INFO[rec.field.kind].label}</b>`
+      + (carrier != null ? ` · riding <b>#${carrier}</b>` : '')
       + (rec.field.hidden ? ' · <b>hidden</b>' : '')
       + (bad ? ' · <b style="color:#dc4a4a">off-world / below floor</b>' : '');
     // path fields swap the shape/size controls for the flow-curve controls
@@ -1475,7 +1491,12 @@ function buildFieldsSection(panel: HTMLElement, sandbox: Sandbox) {
         : rec.field.kind === 'magnetic' ? 'turn rate'
           : rec.field.kind === 'drag' ? 'damping'
             : rec.field.kind === 'fluid' ? 'density'
-              : 'speed m/s';
+              : rec.field.kind === 'magnet' ? 'magnet strength'
+                : rec.field.kind === 'explosion' && sandbox.fieldModel === 'realistic' ? 'TNT kg'
+                  : rec.field.kind === 'explosion' ? 'blast m/s'
+                    : 'speed m/s';
+    gustWrap.classList.toggle('hidden', rec.field.kind !== 'wind');
+    if (document.activeElement !== gustIn) gustIn.value = String(rec.field.gust ?? 0);
     if (isPath) {
       const pf = rec.field.path!;
       for (const key of PATH_PRESET_KEYS) pathBtns[key].classList.toggle('on', pf.label === PATH_PRESETS[key].label);
@@ -1497,8 +1518,8 @@ function buildFieldsSection(panel: HTMLElement, sandbox: Sandbox) {
     bSole.classList.toggle('on', !!rec.field.sole);
     const p = rec.field.pos;
     const lock = sandbox.lockedAxis;
-    const canRotate = rec.field.kind === 'wind' || rec.field.kind === 'magnetic' || isPath || rec.field.shape !== 'sphere';
-    const aimKind = rec.field.kind === 'wind' || rec.field.kind === 'magnetic';
+    const canRotate = rec.field.kind === 'wind' || rec.field.kind === 'magnetic' || rec.field.kind === 'magnet' || isPath || rec.field.shape !== 'sphere';
+    const aimKind = rec.field.kind === 'wind' || rec.field.kind === 'magnetic' || rec.field.kind === 'magnet';
     hint.innerHTML =
       `x ${p.x.toFixed(1)} · y ${p.y.toFixed(1)} · z ${p.z.toFixed(1)}`
       + (lock ? ` · <b>${lock.toUpperCase()} locked</b>` : '')
@@ -1591,13 +1612,27 @@ function buildInspector(sandbox: Sandbox) {
     gravLabel.querySelector('b')!.textContent = v.toFixed(1);
   };
   gravRow.append(gravLabel, gravRange);
+  // electric charge (charge-to-mass multiplier) — only magnetic (Lorentz) fields care about it
+  const chargeRow = el('div', '', 'field');
+  const chargeLabel = el('label', 'Charge q/m <b>auto</b>');
+  const chargeRange = el('input');
+  chargeRange.type = 'range'; chargeRange.min = '-3'; chargeRange.max = '3'; chargeRange.step = '0.1'; chargeRange.value = '1';
+  chargeRange.title = 'How hard magnetic fields curve this object (sign flips the direction). Auto = 1 in Arcade, 0 (neutral) in Realistic. Double-click to reset to auto.';
+  chargeRange.oninput = () => {
+    if (!sandbox.selected) return;
+    const v = parseFloat(chargeRange.value);
+    sandbox.setEntityCharge(sandbox.selected, v);
+    chargeLabel.querySelector('b')!.textContent = v.toFixed(1);
+  };
+  chargeRange.ondblclick = () => { if (sandbox.selected) sandbox.setEntityCharge(sandbox.selected, undefined); };
+  chargeRow.append(chargeLabel, chargeRange);
   const actions = el('div', '', 'row');
   const bDelete = el('button', 'Delete object', 'danger');
   bDelete.onclick = () => {
     if (sandbox.selected) sandbox.deleteEntity(sandbox.selected);
   };
   actions.append(bDelete);
-  box.append(content, gravRow, actions);
+  box.append(content, gravRow, chargeRow, actions);
 
   const render = () => {
     const e = sandbox.selected;
@@ -1637,6 +1672,11 @@ function buildInspector(sandbox: Sandbox) {
       const gs = e.gravityScale ?? 1;
       gravRange.value = String(gs);
       gravLabel.querySelector('b')!.textContent = gs.toFixed(1);
+    }
+    if (document.activeElement !== chargeRange) {
+      const auto = sandbox.fieldModel === 'realistic' ? 0 : 1;
+      chargeRange.value = String(e.charge ?? auto);
+      chargeLabel.querySelector('b')!.textContent = e.charge == null ? `auto (${auto})` : e.charge.toFixed(1);
     }
   };
   setInterval(render, 100);

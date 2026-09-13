@@ -25,7 +25,7 @@ import * as THREE from 'three';
 import { parseExpression } from './expr';
 import type { FluidProps } from './media';
 
-export type FieldKind = 'attractor' | 'repeller' | 'wind' | 'vortex' | 'tornado' | 'path' | 'gravitywell' | 'turbulence' | 'magnetic' | 'drag' | 'fluid' | 'explosion';
+export type FieldKind = 'attractor' | 'repeller' | 'wind' | 'vortex' | 'tornado' | 'path' | 'gravitywell' | 'turbulence' | 'magnetic' | 'drag' | 'fluid' | 'explosion' | 'magnet';
 export type FieldShape = 'sphere' | 'box' | 'cylinder';
 
 /**
@@ -69,6 +69,16 @@ export interface Field {
   //                world gravity is FULLY suspended there (not eased by the soft edge), so "down"
   //                is wherever the well is. Other wells/attractors still add their own pull.
   fluid?: FluidProps; // fluid tanks only: viscosity, waves, current (density is `strength`)
+  gust?: number; // wind only: 0 = steady … 1 = very gusty (speed and direction wander over space and time)
+  attach?: FieldAttach; // riding on an object: the field moves and turns with it
+}
+
+/** A field carried by an object (a magnet on a crane, a star you can throw, a fan on a cart). */
+export interface FieldAttach {
+  entity: { id: number }; // the carrier (a Sandbox Entity)
+  local: THREE.Vector3; // field centre in the carrier's local frame
+  rel: THREE.Quaternion; // field orientation relative to the carrier
+  reaction: THREE.Vector3; // Realistic model: Σ of what the field did to others this step — the carrier gets −this
 }
 
 /** Per-kind defaults. Every `strength` is now a TARGET SPEED (m/s), so the scale is shared across all
@@ -101,6 +111,9 @@ export const FIELD_INFO: Record<FieldKind, { strength: number; size: number; col
   // explosion is a ONE-SHOT: position the ghost, and Place DETONATES it (radial impulse, shockwave,
   // camera shake) instead of leaving a field behind. `strength` = blast speed (m/s) at the centre.
   explosion: { strength: 14, size: 10, color: 0xff7a3d, label: 'Explosion' },
+  // magnet: a dipole electromagnet that pulls FERROMAGNETIC material (steel) and ignores the rest. The force
+  // on an induced dipole goes as ∇(B²) ∝ 1/r⁷ — negligible a few metres out, overwhelming up close.
+  magnet: { strength: 8, size: 6, color: 0xd9534f, label: 'Magnet' },
 };
 
 export const FIELD_SHAPES: FieldShape[] = ['sphere', 'box', 'cylinder'];
@@ -336,7 +349,21 @@ export function flowVelocity(field: Field, bodyPos: THREE.Vector3, gain: number,
   if (inf <= 0) return 0;
   const speed = field.strength * gain;
   if (field.kind === 'wind') {
-    out.set(1, 0, 0).applyQuaternion(field.quat).multiplyScalar(speed); // blows along the region's local +X
+    out.set(1, 0, 0).applyQuaternion(field.quat); // blows along the region's local +X
+    const g = field.gust ?? 0;
+    if (g > 0) {
+      // GUSTS: real wind is never steady — its speed swings ~±40% (gust factor 1.3–1.5) and its heading
+      // wanders. Two drifting noise channels (advected downwind, so gust fronts visibly travel) modulate
+      // the speed and swing the direction about the region's vertical.
+      const k = 0.07;
+      const n1 = turbNoise(bodyPos.x * k - out.x * speed * k * t, bodyPos.y * k * 0.5 + t * 0.35, bodyPos.z * k - out.z * speed * k * t);
+      const n2 = turbNoise(bodyPos.x * k * 0.6 + 41.3, bodyPos.y * k * 0.6 + t * 0.2, bodyPos.z * k * 0.6 - 17.9);
+      _ax.set(0, 1, 0).applyQuaternion(field.quat);
+      out.applyAxisAngle(_ax, g * 0.5 * n2); // heading wander, up to ±29° at gust 1
+      out.multiplyScalar(speed * Math.max(0, 1 + 1.1 * g * n1));
+      return inf;
+    }
+    out.multiplyScalar(speed);
     return inf;
   }
   // VORTEX — a pure whirlpool: swirl about the field's own axis (quat·+Y), NO vertical motion (that's the
@@ -362,6 +389,44 @@ export function flowVelocity(field: Field, bodyPos: THREE.Vector3, gain: number,
   return inf;
 }
 
+// Electromagnet (dipole) — the pull on a soft-ferromagnetic body of (susceptibility × volume) = χV.
+// Energy of an induced dipole U = −χV·B²/2μ₀, so F = (χV/2μ₀)·∇(B²): toward stronger field, and since a
+// dipole's B ∝ 1/r³, F ∝ 1/r⁷ — the reason a magnet ignores a paperclip 20 cm away and snatches it at 2.
+// MAGNET_K folds μ₀ and units so strength 8 lifts a 1 m steel cube from ~1.5 m below the pole.
+const MAGNET_K = 12;
+const MAGNET_SOFT = 0.5; // m — softening so the field stays finite at the magnet's centre
+const _m = new THREE.Vector3();
+
+/** |B|² of a unit dipole along `axis` at offset (x,y,z) from it (softened). */
+function dipoleB2(axis: THREE.Vector3, x: number, y: number, z: number): number {
+  const r2 = x * x + y * y + z * z + MAGNET_SOFT * MAGNET_SOFT;
+  const md = axis.x * x + axis.y * y + axis.z * z;
+  const inv = 1 / (r2 * r2 * Math.sqrt(r2)); // r⁻⁵
+  const bx = (3 * md * x - axis.x * r2) * inv, by = (3 * md * y - axis.y * r2) * inv, bz = (3 * md * z - axis.z * r2) * inv;
+  return bx * bx + by * by + bz * bz;
+}
+
+/**
+ * Force of a MAGNET field on a body with magnetic volume `chiV` (χ × m³; steel χ≈1, wood 0) at `bodyPos`,
+ * written into `out`. The dipole points along the region's local +Y (aim it with the rotate gizmo). Zero
+ * outside the region; the gradient is a central difference of the exact dipole |B|².
+ */
+export function magnetForce(field: Field, bodyPos: THREE.Vector3, chiV: number, gain: number, out: THREE.Vector3): THREE.Vector3 {
+  out.set(0, 0, 0);
+  if (chiV <= 0) return out;
+  const inf = fieldInfluence(field, bodyPos);
+  if (inf <= 0) return out;
+  _m.set(0, 1, 0).applyQuaternion(field.quat);
+  const x = bodyPos.x - field.pos.x, y = bodyPos.y - field.pos.y, z = bodyPos.z - field.pos.z;
+  const h = 0.01 * (Math.sqrt(x * x + y * y + z * z) + MAGNET_SOFT);
+  const k = (MAGNET_K * field.strength * gain * chiV * inf) / (2 * h);
+  return out.set(
+    (dipoleB2(_m, x + h, y, z) - dipoleB2(_m, x - h, y, z)) * k,
+    (dipoleB2(_m, x, y + h, z) - dipoleB2(_m, x, y - h, z)) * k,
+    (dipoleB2(_m, x, y, z + h) - dipoleB2(_m, x, y, z - h)) * k,
+  );
+}
+
 /**
  * Force this field exerts on a body of `mass` at `bodyPos` moving at `vel`, written into `out` — the ARCADE
  * model. `gain` is the Sandbox's live global strength multiplier. Zero outside the region.
@@ -379,6 +444,7 @@ export function fieldForce(
   out.set(0, 0, 0);
   if (field.kind === 'explosion') return out; // one-shot: it detonates on Place, never acts as a field
   if (field.kind === 'fluid') return out; // buoyancy/drag need the body's shape — see systems/media.ts
+  if (field.kind === 'magnet') return out; // needs the body's material — see magnetForce
   if (FLOW_KINDS.has(field.kind)) {
     const inf = flowVelocity(field, bodyPos, gain, _tv, t);
     return inf > 0 ? steer(out, _tv, vel, mass, (field.kind === 'turbulence' ? TURB_RESPONSE : RESPONSE) * inf) : out;

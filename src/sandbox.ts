@@ -25,7 +25,7 @@ import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js
 import { ConvexGeometry } from 'three/examples/jsm/geometries/ConvexGeometry.js';
 import { buildImplicit, type ImplicitSpec } from './systems/implicit';
 import { PLAIN, type Material } from './systems/materials';
-import { fieldForce, flowVelocity, fieldInfluence, pathInfluence, wellOrbitalVelocity, FIELD_INFO, FLOW_KINDS, samplePath, PATH_PRESETS, type Field, type FieldKind, type FieldShape, type CurveSpec } from './systems/fields';
+import { fieldForce, flowVelocity, magnetForce, fieldInfluence, pathInfluence, wellOrbitalVelocity, FIELD_INFO, FLOW_KINDS, samplePath, PATH_PRESETS, type Field, type FieldKind, type FieldShape, type CurveSpec } from './systems/fields';
 import { airForces, liquidForces, buildMediumShape, defaultFluid, MediaOut, C_ADDED, FLUID_PRESETS, AIR_STILL_V2, RHO_AIR, type BodyState, type MediumShape, type FluidProps } from './systems/media';
 import { FieldFlow } from './systems/fieldviz';
 import { NBody } from './systems/nbody';
@@ -78,6 +78,7 @@ export interface Entity {
   gravityScale?: number; // per-object gravity multiplier (1 = normal, 0 = weightless, <0 = floats up)
   chunks?: Chunk[]; // present for a rubble-pile COMPOUND: the component shapes it's fused from, each
   //                   kept as its own collider + geometry so a box+sphere merge looks like their union
+  charge?: number; // charge-to-mass multiplier for magnetic (Lorentz) fields — undefined = model default
   medium?: MediumShape; // cached shape it presents to liquids and air (drag faces, buoyancy cells)
   hydroPrev?: THREE.Vector3; // last step's known applied force incl. gravity — added-mass contact estimate
 }
@@ -1504,6 +1505,13 @@ export class Sandbox {
     this.onFieldChange?.();
   }
 
+  /** Wind gustiness 0 (steady) … 1 (very gusty). */
+  setFieldGust(rec: FieldRec, g: number) {
+    rec.field.gust = THREE.MathUtils.clamp(g, 0, 1);
+    for (const e of this.entities) e.body.wakeUp();
+    this.onFieldChange?.();
+  }
+
   /** Toggle a gravity well's SOLE-gravity mode: its centre becomes the only gravity in its region. */
   setFieldSole(rec: FieldRec, sole: boolean) {
     rec.field.sole = sole;
@@ -1517,33 +1525,64 @@ export class Sandbox {
   private _shakeOff = new THREE.Vector3();
 
   /**
-   * Detonate a one-shot blast: every dynamic body inside the region gets a radial impulse away from
-   * the centre (∝ mass, eased by the region influence — so a box- or cylinder-shaped charge blasts in
-   * that shape), with a small upward bias so debris arcs like movie rubble, plus a random spin kick.
-   * Juice: an expanding shockwave shell + ground ring that fade out, and a camera shake scaled by the
-   * blast — the game-feel trio (flash, wave, shake) that makes an impact read as an impact.
+   * Detonate a one-shot blast over every dynamic body inside the region (eased by the region influence —
+   * a box- or cylinder-shaped charge blasts in that shape).
+   *
+   * ARCADE: a radial velocity kick of `strength` m/s (∝ mass, so everything flies alike), an upward bias
+   * so debris arcs like movie rubble, and a random spin.
+   *
+   * REALISTIC: `strength` is the charge in kg of TNT. The blast wave's specific impulse follows
+   * Hopkinson–Cranz scaling, i ≈ 130·W^⅓·Z^−0.9 Pa·s at scaled distance Z = R/W^⅓ (a fit to the
+   * Kingery–Bulmash free-air curves, ~1 < Z < 20); a burst on the ground reflects off it (W×1.8). Each
+   * face of a body facing the charge takes the reflected impulse on its own area, at its own position —
+   * so a light, broad crate is thrown and spun while a steel ingot barely moves, and a body behind a wall
+   * (the line of sight blocked) catches only the diffracted ~15%.
+   *
+   * Either model: with Breakage on, a body whose delivered specific energy ½Δv² beats its material
+   * strength shatters (ice and wood near the centre go first).
+   * Juice: an expanding shockwave shell + ground ring, and a camera shake scaled by the blast.
    */
   detonate(field: Field) {
     this.userEpoch++; // dev ledger: a deliberate energy/momentum change, not a solver artifact
     const c = field.pos;
-    for (const e of this.entities) {
-      if (e.frozen) continue;
+    const realistic = this.fieldModel === 'realistic';
+    const W = Math.max(field.strength * this.fieldStrength, 0) * (c.y < 1.5 ? 1.8 : 1); // TNT kg (surface burst reflects)
+    const W3 = Math.cbrt(W);
+    let breaks = 0;
+    for (const e of this.entities.slice()) { // shatter adds/removes entities while we iterate
+      if (e.frozen || !e.body.isValid()) continue;
       const t = e.body.translation();
       this._p.set(t.x, t.y, t.z);
       const inf = fieldInfluence(field, this._p);
       if (inf <= 0) continue;
-      this._s.set(t.x - c.x, t.y - c.y, t.z - c.z);
-      const d = this._s.length() || 1;
-      this._s.divideScalar(d);
-      this._s.y += 0.35; // upward bias: debris that arcs reads far better than a flat radial shove
-      this._s.normalize();
       const m = e.body.mass();
-      const kick = field.strength * inf * m;
-      e.body.applyImpulse({ x: this._s.x * kick, y: this._s.y * kick, z: this._s.z * kick }, true);
-      e.body.applyTorqueImpulse({
-        x: (Math.random() - 0.5) * kick * 0.3, y: (Math.random() - 0.5) * kick * 0.3, z: (Math.random() - 0.5) * kick * 0.3,
-      }, true); // tumble — spinning debris sells the blast
+      if (!(m > 0)) continue;
+      this._s.set(t.x - c.x, t.y - c.y, t.z - c.z);
+      const d = this._s.length() || 1e-3;
+      this._s.divideScalar(d); // unit, charge → body
+      const J = this._fieldF.set(0, 0, 0); // impulse (sim kN·s)
+      const T = this._known.set(0, 0, 0); // angular impulse
+      if (realistic) {
+        if (W <= 0) continue;
+        const shield = this.blastShielded(c, this._s, d, e) ? 0.15 : 1;
+        this.blastImpulse(e, c, W3, inf * shield, J, T);
+      } else {
+        this._s.y += 0.35; // upward bias: debris that arcs reads far better than a flat radial shove
+        this._s.normalize();
+        const kick = field.strength * inf * m;
+        J.copy(this._s).multiplyScalar(kick);
+        T.set((Math.random() - 0.5) * kick * 0.3, (Math.random() - 0.5) * kick * 0.3, (Math.random() - 0.5) * kick * 0.3); // tumble
+      }
+      e.body.applyImpulse({ x: J.x, y: J.y, z: J.z }, true);
+      e.body.applyTorqueImpulse({ x: T.x, y: T.y, z: T.z }, true);
       e.body.wakeUp();
+      if (this.devTrack === e) this.devForce('blast (impulse ÷ dt)', FIELD_INFO.explosion.color, J.x / FIXED, J.y / FIXED, J.z / FIXED);
+      if (this.breakageOn && breaks < 12 && this.canBreak(e) && this.entities.length <= BREAK_SOFT_CAP) {
+        const dv = J.length() / m;
+        const Q = 0.5 * dv * dv;
+        const thr = BREAK_Q * this.strengthOf(e);
+        if (Q > thr) { this.shatter(e, Q, thr); breaks++; }
+      }
     }
     const radius = Math.max(field.size.x, field.size.y, field.size.z);
     const color = FIELD_INFO.explosion.color;
@@ -1560,7 +1599,56 @@ export class Sandbox {
     ring.rotation.x = Math.PI / 2;
     this.scene.add(mesh, ring);
     this.shocks.push({ mesh, ring, born: performance.now(), radius });
-    this.shake = Math.min(0.5 + field.strength * 0.045, 1.4); // scaled, capped — a thump, not seasickness
+    // scaled, capped — a thump, not seasickness (realistic: by the blast's size, W^⅓)
+    this.shake = Math.min(realistic ? 0.35 + 0.25 * W3 : 0.5 + field.strength * 0.045, 1.4);
+  }
+
+  /** Is the straight line from the charge to this body's centre blocked by anything but itself/the floor? */
+  private blastShielded(c: THREE.Vector3, dir: THREE.Vector3, d: number, e: Entity): boolean {
+    if (d < 0.2) return false;
+    const reach = Math.max(0, d - e.size * 0.9); // stop just short of the body's own surface
+    if (reach <= 0.05) return false;
+    const hit = this.world.castRay(new RAPIER.Ray({ x: c.x, y: c.y, z: c.z }, { x: dir.x, y: dir.y, z: dir.z }), reach, true,
+      undefined, undefined, undefined, e.body, (col) => col.handle !== this.groundHandle);
+    return !!hit;
+  }
+
+  /**
+   * Realistic blast impulse on one body (sim kN·s into J, angular impulse into T). Round bodies take the
+   * reflected impulse on their frontal disc through the centre; box-like bodies take it face by face —
+   * each face turned toward the charge gets i(Z)·(1+cos θ)·cos θ·A along its inward normal (normal
+   * reflection doubles the incident impulse, grazing faces feel nothing), applied at the face centre.
+   */
+  private blastImpulse(e: Entity, c: THREE.Vector3, W3: number, scale: number, J: THREE.Vector3, T: THREE.Vector3) {
+    const t = e.body.translation(), r = e.body.rotation();
+    const q = this._q.set(r.x, r.y, r.z, r.w);
+    const shape = this.mediumShapeOf(e);
+    const imp = (R: number) => (130 * W3 * Math.pow(Math.max(R, 0.3) / W3, -0.9) * scale) / SI_MASS; // Pa·s → sim
+    if (shape.round) {
+      const dx = t.x - c.x, dy = t.y - c.y, dz = t.z - c.z;
+      const R = Math.hypot(dx, dy, dz) || 1e-3;
+      J.set(dx / R, dy / R, dz / R).multiplyScalar(imp(R) * 1.5 * Math.PI * shape.R * shape.R); // ~1.5× over a sphere's face
+      return;
+    }
+    const h = shape.half, c0 = shape.center;
+    const axes = [new THREE.Vector3(1, 0, 0).applyQuaternion(q), new THREE.Vector3(0, 1, 0).applyQuaternion(q), new THREE.Vector3(0, 0, 1).applyQuaternion(q)];
+    const hs = [h.x, h.y, h.z];
+    const off = c0.clone().applyQuaternion(q);
+    const n = new THREE.Vector3(), rf = new THREE.Vector3(), toC = new THREE.Vector3(), Jf = new THREE.Vector3();
+    for (let a = 0; a < 3; a++) {
+      const area = 4 * hs[(a + 1) % 3] * hs[(a + 2) % 3] * shape.areaK;
+      for (const sgn of [1, -1]) {
+        n.copy(axes[a]).multiplyScalar(sgn);
+        rf.copy(n).multiplyScalar(hs[a]).add(off); // face centre relative to the centre of mass
+        toC.set(c.x - (t.x + rf.x), c.y - (t.y + rf.y), c.z - (t.z + rf.z));
+        const R = toC.length() || 1e-3;
+        const cos = n.dot(toC) / R;
+        if (cos <= 0) continue; // faces turned away from the charge are in the body's own shadow
+        Jf.copy(n).multiplyScalar(-imp(R) * (1 + cos) * cos * area);
+        J.add(Jf);
+        T.x += rf.y * Jf.z - rf.z * Jf.y; T.y += rf.z * Jf.x - rf.x * Jf.z; T.z += rf.x * Jf.y - rf.y * Jf.x;
+      }
+    }
   }
 
   /** Animate live shockwaves (expand + fade over ~0.5 s) and cull finished ones. */
@@ -1604,8 +1692,9 @@ export class Sandbox {
     const c: Field = {
       id: f.id, kind: f.kind, shape: f.shape,
       pos: f.pos.clone(), quat: f.quat.clone(), size: f.size.clone(),
-      strength: f.strength, hidden: f.hidden, lift: f.lift, dir: f.dir, sole: f.sole,
+      strength: f.strength, hidden: f.hidden, lift: f.lift, dir: f.dir, sole: f.sole, gust: f.gust,
       fluid: f.fluid ? { ...f.fluid } : undefined,
+      attach: f.attach ? { entity: f.attach.entity, local: f.attach.local.clone(), rel: f.attach.rel.clone(), reaction: new THREE.Vector3() } : undefined,
     };
     if (f.path) c.path = {
       spec: { ...f.path.spec }, label: f.path.label, scale: f.path.scale, swirl: f.path.swirl,
@@ -1619,8 +1708,9 @@ export class Sandbox {
   private copyFieldInto(src: Field, dst: Field) {
     dst.shape = src.shape;
     dst.pos.copy(src.pos); dst.quat.copy(src.quat); dst.size.copy(src.size);
-    dst.strength = src.strength; dst.hidden = src.hidden; dst.lift = src.lift; dst.dir = src.dir; dst.sole = src.sole;
+    dst.strength = src.strength; dst.hidden = src.hidden; dst.lift = src.lift; dst.dir = src.dir; dst.sole = src.sole; dst.gust = src.gust;
     dst.fluid = src.fluid ? { ...src.fluid } : undefined;
+    dst.attach = src.attach ? { entity: src.attach.entity, local: src.attach.local.clone(), rel: src.attach.rel.clone(), reaction: new THREE.Vector3() } : undefined;
     dst.path = src.path ? {
       spec: { ...src.path.spec }, label: src.path.label, scale: src.path.scale, swirl: src.path.swirl,
       pts: src.path.pts.slice(), tans: src.path.tans.slice(), closed: src.path.closed,
@@ -1814,6 +1904,14 @@ export class Sandbox {
   private syncFieldFromMarker(rec: FieldRec) {
     rec.field.pos.copy(rec.marker.position);
     rec.field.quat.copy(rec.marker.quaternion); // region axes + wind direction (= quat·+X)
+    const a = rec.field.attach;
+    if (a) {
+      // a carried field moved by the gizmo keeps that offset/turn relative to its carrier
+      const e = a.entity as Entity;
+      const inv = this._q.copy(e.currQuat).invert();
+      a.local.copy(rec.field.pos).sub(e.currPos).applyQuaternion(inv);
+      a.rel.copy(inv).multiply(rec.field.quat);
+    }
     if (this.placing === rec) this.refreshPlaceValidity();
     else for (const e of this.entities) e.body.wakeUp(); // a live field moved — re-wake its victims
     this.onFieldChange?.();
@@ -1931,6 +2029,8 @@ export class Sandbox {
         const dirLocal = field.kind === 'magnetic' ? new THREE.Vector3(0, 1, 0) : new THREE.Vector3(1, 0, 0);
         const len = Math.min(field.size.x, 3.4);
         g.add(new THREE.ArrowHelper(dirLocal, new THREE.Vector3(), Math.max(len, 1.6), info.color, 0.9, 0.6));
+      } else if (field.kind === 'magnet') {
+        this.addMagnetGlyph(g, field);
       } else if (field.kind === 'vortex') {
         const ring = new THREE.Mesh(
           new THREE.TorusGeometry(field.size.x * 0.62, 0.05, 8, 44),
@@ -1996,6 +2096,36 @@ export class Sandbox {
     surface.userData.waterSurface = true;
     surface.userData.baseY = top;
     g.add(keep(surface));
+  }
+
+  /**
+   * A magnet: a red-north / blue-south bar along the dipole axis (local +Y) and its real field lines —
+   * r = C·sin²θ in a few meridian planes, the exact shape of a dipole's lines — clipped to the region.
+   */
+  private addMagnetGlyph(g: THREE.Group, field: Field) {
+    const L = 0.55, R = 0.16;
+    const north = new THREE.Mesh(new THREE.CylinderGeometry(R, R, L, 20), new THREE.MeshBasicMaterial({ color: 0xd9534f }));
+    north.position.y = L / 2;
+    const south = new THREE.Mesh(new THREE.CylinderGeometry(R, R, L, 20), new THREE.MeshBasicMaterial({ color: 0x4f7fd9 }));
+    south.position.y = -L / 2;
+    north.userData.ownColor = 0xd9534f; south.userData.ownColor = 0x4f7fd9;
+    g.add(north, south);
+    const reach = Math.max(field.size.x, 1);
+    const mat = new THREE.LineBasicMaterial({ color: 0xd9534f, transparent: true, opacity: 0.35 });
+    for (const C of [reach * 0.25, reach * 0.5, reach * 0.85]) {
+      for (let k = 0; k < 4; k++) {
+        const phi = (k / 4) * Math.PI * 2;
+        const pts: THREE.Vector3[] = [];
+        for (let i = 1; i < 60; i++) {
+          const th = (i / 60) * Math.PI;
+          const r = C * Math.sin(th) ** 2;
+          if (r < 0.35) continue; // inside the bar
+          const s = r * Math.sin(th);
+          pts.push(new THREE.Vector3(s * Math.cos(phi), r * Math.cos(th), s * Math.sin(phi)));
+        }
+        if (pts.length > 1) g.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(pts), mat));
+      }
+    }
   }
 
   /** Animate every visible tank surface with its travelling wave (world-horizontal crest lines). */
@@ -2147,6 +2277,7 @@ export class Sandbox {
         linvel: [v.x, v.y, v.z], angvel: [w.x, w.y, w.z],
         frozen: e.frozen || undefined,
         gravityScale: e.gravityScale != null && e.gravityScale !== 1 ? e.gravityScale : undefined,
+        charge: e.charge,
       };
     });
 
@@ -2156,8 +2287,9 @@ export class Sandbox {
         kind: f.kind, shape: f.shape,
         pos: [f.pos.x, f.pos.y, f.pos.z], quat: [f.quat.x, f.quat.y, f.quat.z, f.quat.w],
         size: [f.size.x, f.size.y, f.size.z],
-        strength: f.strength, hidden: f.hidden, lift: f.lift, dir: f.dir, sole: f.sole,
+        strength: f.strength, hidden: f.hidden, lift: f.lift, dir: f.dir, sole: f.sole, gust: f.gust,
         fluid: f.fluid ? { ...f.fluid } : undefined,
+        attach: f.attach && index.has(f.attach.entity as Entity) ? { index: index.get(f.attach.entity as Entity)!, local: [f.attach.local.x, f.attach.local.y, f.attach.local.z], rel: [f.attach.rel.x, f.attach.rel.y, f.attach.rel.z, f.attach.rel.w] } : undefined,
       };
       if (f.path) d.path = {
         spec: { ...f.path.spec }, label: f.path.label, scale: f.path.scale, swirl: f.path.swirl,
@@ -2214,7 +2346,7 @@ export class Sandbox {
       // where they were welded/hinged, so lockJoint locks them exactly there)
       if (a && b) this.lockJoint(a, b, jl.kind as JointKind, this.makeConnectorLine(jl.kind as JointKind));
     }
-    for (const fd of data.fields) this.addField(fd);
+    for (const fd of data.fields) this.addField(fd, built);
 
     if (data.camera) {
       this.camera.position.set(data.camera.pos[0], data.camera.pos[1], data.camera.pos[2]);
@@ -2257,6 +2389,7 @@ export class Sandbox {
     e.prevQuat.set(q[0], q[1], q[2], q[3]); e.currQuat.copy(e.prevQuat);
     e.lastVel.set(ed.linvel[0], ed.linvel[1], ed.linvel[2]);
     if (ed.gravityScale != null && ed.gravityScale !== 1) this.setEntityGravityScale(e, ed.gravityScale);
+    if (ed.charge != null) e.charge = ed.charge;
     if (ed.frozen) this.toggleFreeze(e);
     return e;
   }
@@ -2264,14 +2397,14 @@ export class Sandbox {
   /** Rebuild one field from saved data and add it live (marker + registry) — scene loading and lab
    *  experiments (no ghost/placement flow). Path polylines are re-sampled from the stored equations /
    *  stroke rather than saved, keeping the file small. */
-  addField(fd: FieldData): FieldRec {
+  addField(fd: FieldData, entities?: Array<Entity | null>): FieldRec {
     const field: Field = {
       id: this.nextFieldId++,
       kind: fd.kind as FieldKind, shape: fd.shape as FieldShape,
       pos: new THREE.Vector3(fd.pos[0], fd.pos[1], fd.pos[2]),
       quat: new THREE.Quaternion(fd.quat[0], fd.quat[1], fd.quat[2], fd.quat[3]),
       size: new THREE.Vector3(fd.size[0], fd.size[1], fd.size[2]),
-      strength: fd.strength, hidden: fd.hidden, lift: fd.lift, dir: fd.dir, sole: fd.sole,
+      strength: fd.strength, hidden: fd.hidden, lift: fd.lift, dir: fd.dir, sole: fd.sole, gust: fd.gust,
       fluid: fd.fluid ? { ...defaultFluid(), ...fd.fluid } : fd.kind === 'fluid' ? defaultFluid() : undefined,
     };
     if (fd.path) {
@@ -2285,6 +2418,11 @@ export class Sandbox {
         const pts = s ? s.pts : new Float32Array(0), tans = s ? s.tans : new Float32Array(0);
         field.path = { spec: { ...p.spec }, label: p.label, scale: p.scale, swirl: p.swirl, pts, tans, closed: s ? s.closed : p.closed };
       }
+    }
+    const carrier = fd.attach ? entities?.[fd.attach.index] : null;
+    if (fd.attach && carrier) {
+      const a = fd.attach;
+      field.attach = { entity: carrier, local: new THREE.Vector3(...a.local), rel: new THREE.Quaternion(...a.rel), reaction: new THREE.Vector3() };
     }
     const rec: FieldRec = { field, marker: this.makeFieldMarker(field) };
     this.fieldGroup.add(rec.marker);
@@ -3437,6 +3575,7 @@ export class Sandbox {
       let flowInf = 0; // strongest realistic-flow influence at the body
 
       for (const { field } of this.fields) {
+        if (field.attach && field.attach.entity === e) continue; // a carrier never feels its own field
         if (field.kind === 'fluid') {
           if (!ready) { this.readBodyState(e, st, mass); ready = true; }
           liquidForces(field, shape, st, field.strength * gain, simT, media);
@@ -3447,7 +3586,22 @@ export class Sandbox {
           if (inf > flowInf) flowInf = inf; // acts through air drag below
           continue;
         }
-        fieldForce(field, this._p, this._fieldV, mass, gain, this._fieldF, simT);
+        if (field.kind === 'magnet') {
+          magnetForce(field, this._p, this.magneticVolume(e), gain, this._fieldF);
+          // Realistic: the carrier of a pulling field is pulled back (Newton's third law) — momentum conserved
+          if (realistic && field.attach) field.attach.reaction.sub(this._fieldF);
+        } else if (field.kind === 'magnetic') {
+          // Lorentz force scales with the body's charge-to-mass ratio. Arcade treats an uncharged body as
+          // unit charge (every mover curves); Realistic leaves neutral matter alone — give it a charge.
+          const qm = e.charge ?? (realistic ? 0 : 1);
+          if (qm === 0) continue;
+          fieldForce(field, this._p, this._fieldV, mass, gain * qm, this._fieldF, simT);
+        } else {
+          fieldForce(field, this._p, this._fieldV, mass, gain, this._fieldF, simT);
+          if (realistic && field.attach && (field.kind === 'gravitywell' || field.kind === 'attractor' || field.kind === 'repeller')) {
+            field.attach.reaction.sub(this._fieldF);
+          }
+        }
         this._s.add(this._fieldF);
         if (e === track && this._fieldF.lengthSq() > 0) this.devForce(`${FIELD_INFO[field.kind].label} #${field.id}`, FIELD_INFO[field.kind].color, this._fieldF.x, this._fieldF.y, this._fieldF.z);
         if (field.kind === 'gravitywell') {
@@ -3516,6 +3670,91 @@ export class Sandbox {
         b.applyTorqueImpulse({ x: media.torque.x * FIXED, y: media.torque.y * FIXED, z: media.torque.z * FIXED }, true);
       }
     }
+
+    // carriers take the reaction of what their fields did to everything else, at the field's centre
+    if (realistic) {
+      for (const { field } of this.fields) {
+        const a = field.attach;
+        if (!a || !(a.reaction.x || a.reaction.y || a.reaction.z)) continue;
+        const carrier = a.entity as Entity;
+        if (!carrier.body.isValid() || carrier.frozen) continue;
+        carrier.body.applyImpulseAtPoint(
+          { x: a.reaction.x * FIXED, y: a.reaction.y * FIXED, z: a.reaction.z * FIXED },
+          { x: field.pos.x, y: field.pos.y, z: field.pos.z }, true);
+        if (carrier === track) this.devForce(`reaction of ${FIELD_INFO[field.kind].label} #${field.id}`, FIELD_INFO[field.kind].color, a.reaction.x, a.reaction.y, a.reaction.z);
+      }
+    }
+  }
+
+  // ---------------------------------------------------------------- fields riding on objects
+  /** Carried fields follow their carrier's pose (called at the start of every step). */
+  private updateAttachedFields() {
+    for (const rec of this.fields) this.followCarrier(rec.field);
+    if (this.placing) this.followCarrier(this.placing.field);
+  }
+
+  private followCarrier(f: Field) {
+    const a = f.attach;
+    if (!a) return;
+    const e = a.entity as Entity;
+    if (!e.body.isValid()) { f.attach = undefined; return; } // carrier gone — the field stays where it was
+    const t = e.body.translation(), r = e.body.rotation();
+    this._q.set(r.x, r.y, r.z, r.w);
+    f.pos.copy(a.local).applyQuaternion(this._q).add(this._p.set(t.x, t.y, t.z));
+    f.quat.copy(this._q).multiply(a.rel);
+    a.reaction.set(0, 0, 0);
+  }
+
+  /** Mount a field on an object: it snaps to the object's centre, then moves and turns with it. */
+  attachField(rec: FieldRec, e: Entity) {
+    const r = e.body.rotation();
+    const q = new THREE.Quaternion(r.x, r.y, r.z, r.w);
+    rec.field.attach = { entity: e, local: new THREE.Vector3(), rel: q.clone().invert().multiply(rec.field.quat), reaction: new THREE.Vector3() };
+    this.followCarrier(rec.field);
+    rec.marker.position.copy(rec.field.pos);
+    rec.marker.quaternion.copy(rec.field.quat);
+    if (this.placing === rec) this.refreshPlaceValidity();
+    this.userEpoch++;
+    this.onFieldChange?.();
+  }
+
+  detachField(rec: FieldRec) {
+    rec.field.attach = undefined;
+    this.userEpoch++;
+    this.onFieldChange?.();
+  }
+
+  /** Arm "click an object to carry the active field" (the editor's 📌 button). */
+  attachPicking = false;
+  beginAttachPick() { this.attachPicking = !!this.activeField; this.onFieldChange?.(); }
+
+  /** Render-side: carried markers track the carrier's interpolated pose (no lag behind the object). */
+  private syncCarriedMarkers(alpha: number) {
+    const move = (rec: FieldRec) => {
+      const a = rec.field.attach;
+      if (!a) return;
+      const e = a.entity as Entity;
+      this._q.copy(e.prevQuat).slerp(e.currQuat, alpha);
+      rec.marker.position.copy(a.local).applyQuaternion(this._q).add(this._s.copy(e.prevPos).lerp(e.currPos, alpha));
+      rec.marker.quaternion.copy(this._q).multiply(a.rel);
+    };
+    for (const rec of this.fields) move(rec);
+    if (this.placing) move(this.placing);
+  }
+
+  /** χ·V — how much ferromagnetic material a body holds (steel parts of an accreted body count too). */
+  private magneticVolume(e: Entity): number {
+    if (!e.comp) return (e.mat.magnetic ?? 0) * this.volumeOf(e);
+    let s = 0;
+    for (const c of e.comp) s += (c.mat.magnetic ?? 0) * c.vol;
+    return s;
+  }
+
+  /** Per-object charge-to-mass multiplier for magnetic (Lorentz) fields; undefined = the model's default. */
+  setEntityCharge(e: Entity, qm: number | undefined) {
+    this.userEpoch++;
+    e.charge = qm;
+    e.body.wakeUp();
   }
 
   /** Read the rotation/spin half of a body's state (position/velocity are already in _p/_fieldV). */
@@ -3540,6 +3779,7 @@ export class Sandbox {
     const dev = this.devOn;
     if (dev) this.devT = performance.now();
     this.devForceN = 0;
+    this.updateAttachedFields();
     const track = this.devTrack;
     // save previous transforms for interpolation
     for (const e of this.entities) { e.prevPos.copy(e.currPos); e.prevQuat.copy(e.currQuat); }
@@ -3697,6 +3937,8 @@ export class Sandbox {
       if (pool.mesh.instanceColor) pool.mesh.instanceColor.needsUpdate = true;
     }
 
+    this.syncCarriedMarkers(alpha); // fields riding on objects follow them smoothly
+
     // redraw each joint's connector line between its two live anchor points
     for (const j of this.joints) {
       anchorWorld(j.a.body, j.localA, this._p);
@@ -3724,7 +3966,7 @@ export class Sandbox {
     this._flowList.length = 0;
     // fluid & explosion have no steady advecting force (buoyancy is handled outside fieldForce), so a
     // tracer cloud would just sink or sit dead — skip them
-    const noFlow = (f: Field) => f.kind === 'explosion' || f.kind === 'fluid';
+    const noFlow = (f: Field) => f.kind === 'explosion' || f.kind === 'fluid' || f.kind === 'magnet';
     for (const r of this.fields) if (r !== this.editingOriginal && !noFlow(r.field)) this._flowList.push(r.field);
     if (this.placing && !noFlow(this.placing.field)) this._flowList.push(this.placing.field);
     this.fieldFlow.update(this._flowList, this.fieldStrength, this.placing?.field.id ?? -1, this.simTime + alpha * FIXED);
@@ -3844,6 +4086,16 @@ export class Sandbox {
     // brush tool: hold + drag to push / pull / swirl nearby objects live (force applied each step)
     if (this.tool === 'brush') {
       if (this.updateBrushPoint()) { this.brushActive = true; this.controls.enabled = false; }
+      return;
+    }
+
+    // 📌 attach mode: the next object clicked carries the field being edited
+    if (this.attachPicking) {
+      const picked = this.pick();
+      const rec = this.activeField;
+      this.attachPicking = false;
+      if (picked && rec) this.attachField(rec, picked.entity);
+      else this.onFieldChange?.();
       return;
     }
 
@@ -4110,10 +4362,11 @@ export class Sandbox {
     } else if (k === 'Enter') {
       if (this.placing) this.commitPlace();
     } else if (k === 'Escape') {
-      if (this.placing) this.cancelPlace(); else this.selectField(null);
+      if (this.attachPicking) { this.attachPicking = false; this.onFieldChange?.(); }
+      else if (this.placing) this.cancelPlace(); else this.selectField(null);
     } else if (k === 'Delete' || k === 'Backspace') {
       this.removeActiveField();
-    } else if (lower === 'r' && (rec.field.kind === 'wind' || rec.field.kind === 'magnetic' || rec.field.kind === 'path' || rec.field.shape !== 'sphere')) {
+    } else if (lower === 'r' && (rec.field.kind === 'wind' || rec.field.kind === 'magnetic' || rec.field.kind === 'magnet' || rec.field.kind === 'path' || rec.field.shape !== 'sphere')) {
       this.transform.setMode(this.transform.mode === 'rotate' ? 'translate' : 'rotate'); // aim wind/B / turn the region or path
       this.onFieldChange?.();
     } else if (lower === 'g') {
