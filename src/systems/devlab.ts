@@ -73,6 +73,7 @@ export class LabCtx {
     e.prevPos.set(...pos); e.currPos.set(...pos);
     e.prevQuat.copy(q); e.currQuat.copy(q);
     e.lastVel.set(...vel);
+    e.accel.set(0, 0, 0); e.hydroPrev = undefined; // a placed body starts with no motion history
     return e;
   }
 
@@ -152,6 +153,32 @@ function sphereDraftFraction(frac: number): number {
     if (vf < frac) lo = h; else hi = h;
   }
   return (lo + hi) / 4; // h / (2r)
+}
+
+/** Real sphere drag coefficient vs Reynolds number — the Clift–Gauvin fit to the experimental drag curve. */
+function cdSphere(Re: number): number {
+  return (24 / Re) * (1 + 0.15 * Re ** 0.687) + 0.42 / (1 + 42500 * Re ** -1.16);
+}
+
+/** Terminal velocity of a sphere (densities kg/m³, viscosity Pa·s, radius m) on the real drag curve. */
+function terminalSphere(rhoS: number, rhoF: number, mu: number, R: number): number {
+  const V = (4 / 3) * Math.PI * R ** 3, A = Math.PI * R * R, W = (rhoS - rhoF) * G * V;
+  let lo = 0, hi = 500;
+  for (let i = 0; i < 100; i++) {
+    const v = (lo + hi) / 2;
+    const drag = 0.5 * rhoF * A * cdSphere(Math.max((rhoF * v * 2 * R) / mu, 1e-9)) * v * v;
+    if (drag < W) lo = v; else hi = v;
+  }
+  return (lo + hi) / 2;
+}
+
+/** How far a body's nearest face normal is tilted from vertical, in degrees (0 = sitting flat). */
+function tiltDeg(e: Entity): number {
+  const r = e.body.rotation();
+  const q = new THREE.Quaternion(r.x, r.y, r.z, r.w);
+  let best = 0;
+  for (const ax of [new THREE.Vector3(1, 0, 0), new THREE.Vector3(0, 1, 0), new THREE.Vector3(0, 0, 1)]) best = Math.max(best, Math.abs(ax.applyQuaternion(q).y));
+  return (Math.acos(Math.min(1, best)) * 180) / Math.PI;
 }
 
 function pendulum(c: LabCtx, seconds: number) {
@@ -388,6 +415,149 @@ export const EXPERIMENTS: Experiment[] = [
       const e = c.sphere([0, 0.5, 0], 0.5, preset('wood'));
       c.S.step(120);
       return { measured: e.body.translation().y, expected: 0.5, unit: 'm', absTol: 0.02, detail: 'wood ball resting on the floor 14 m below a water tank' };
+    },
+  },
+  {
+    id: 'rise-wood', group: 'Fluids', name: 'Wood ball released under water', law: 'a = g(ρf−ρs)/(ρs+½ρf)', tolPct: 2,
+    run: (c) => {
+      c.field({ kind: 'fluid', shape: 'box', pos: [0, 5, 0], size: [10, 5, 10], strength: 1 });
+      const wood = preset('wood');
+      const e = c.sphere([0, 4, 0], 0.5, wood);
+      c.S.step(1);
+      c.place(e, [0, 4, 0]);
+      c.S.step(1);
+      const rs = wood.density / 1000;
+      return { measured: e.body.linvel().y / DT, expected: (G * (1 - rs)) / (rs + 0.5), unit: 'm/s²', detail: 'initial upward acceleration — buoyancy fights the ball’s mass PLUS the water it must shove aside' };
+    },
+  },
+  {
+    id: 'sink-terminal', group: 'Fluids', name: 'Steel pellet terminal speed in water', law: '(ρs−ρf)gV = ½ρf·Cd(Re)·A·v²', tolPct: 4,
+    run: (c) => {
+      c.field({ kind: 'fluid', shape: 'box', pos: [0, 10, 0], size: [10, 10, 10], strength: 1 });
+      const steel = preset('steel'), R = 0.02;
+      const e = c.sphere([0, 19.5, 0], R, steel);
+      c.S.step(1); c.place(e, [0, 19.5, 0]);
+      c.S.step(90);
+      return { measured: -e.body.linvel().y, expected: terminalSphere(steel.density, 1000, 0.001, R), unit: 'm/s', detail: '4 cm steel ball after 1.5 s — vs the measured sphere drag curve' };
+    },
+  },
+  {
+    id: 'honey-settle', group: 'Fluids', name: 'Steel pellet sinking through honey', law: 'Stokes regime: v ≈ 2Δρ·g·R²/9μ (drag curve)', tolPct: 5,
+    run: (c) => {
+      c.field({ kind: 'fluid', shape: 'box', pos: [0, 5, 0], size: [10, 5, 10], strength: 1.42, fluid: { preset: 'honey', viscosity: 10, waves: 0, wavelength: 8, current: 0 } });
+      const steel = preset('steel'), R = 0.02;
+      const e = c.sphere([0, 9, 0], R, steel);
+      c.S.step(1); c.place(e, [0, 9, 0]);
+      c.S.step(60);
+      return { measured: -e.body.linvel().y, expected: terminalSphere(steel.density, 1420, 10, R), unit: 'm/s', detail: `Re ≈ ${((1420 * 0.5 * 0.04) / 10).toFixed(1)} — viscosity, not inertia, sets the speed` };
+    },
+  },
+  {
+    id: 'float-ice-flat', group: 'Fluids', name: 'Ice cube floats flat', law: 'stable upright when ρ > 0.79 ρf', tolPct: 0,
+    run: (c) => {
+      c.field({ kind: 'fluid', shape: 'box', pos: [0, 5, 0], size: [10, 5, 10], strength: 1 });
+      const q = new THREE.Quaternion().setFromAxisAngle(c.V(1, 0, 0), 10 * deg);
+      const e = c.box([0, 9.5, 0], 0.5, preset('ice'), [0, 0, 0], q);
+      c.S.step(900);
+      return { measured: tiltDeg(e), expected: 0, absTol: 3, unit: '°', detail: 'released tilted 10°; a dense floater rights itself (metacentre above centre of mass)' };
+    },
+  },
+  {
+    id: 'float-wood-tilt', group: 'Fluids', name: 'Wood cube does NOT float flat', law: 'flat is unstable for 0.21 < ρ/ρf < 0.79', tolPct: 0,
+    run: (c) => {
+      c.field({ kind: 'fluid', shape: 'box', pos: [0, 5, 0], size: [10, 5, 10], strength: 1 });
+      const q = new THREE.Quaternion().setFromAxisAngle(c.V(1, 0, 0), 4 * deg);
+      const e = c.box([0, 9.6, 0], 0.5, preset('wood'), [0, 0, 0], q);
+      c.S.step(900);
+      const tilt = tiltDeg(e);
+      return { measured: tilt, expected: 45, absTol: 25, unit: '°', detail: `released 4° off flat → settled at ${tilt.toFixed(1)}° (a ρ = 0.6 cube rolls onto an edge/corner — real metacentric instability)` };
+    },
+  },
+  {
+    id: 'wave-period', group: 'Fluids', name: 'Buoy bobbing on waves', law: 'deep water: T = √(2πλ/g)', tolPct: 3,
+    run: (c) => {
+      const lambda = 10;
+      c.field({ kind: 'fluid', shape: 'box', pos: [0, 5, 0], size: [30, 5, 30], strength: 1, fluid: { preset: 'sea', viscosity: 0.001, waves: 0.25, wavelength: lambda, current: 0 } });
+      const e = c.sphere([0, 9.9, 0], 0.3, preset('wood'));
+      c.S.step(300);
+      const ys: number[] = [];
+      let mean = 0;
+      for (let i = 0; i < 900; i++) { c.S.step(); ys.push(e.body.translation().y); }
+      for (const y of ys) mean += y / ys.length;
+      return { measured: periodOf(ys.map((y) => y - mean)), expected: Math.sqrt((2 * Math.PI * lambda) / G), unit: 's', detail: `λ = ${lambda} m, amplitude 0.25 m — the float rides the swell at the wave's own period` };
+    },
+  },
+  {
+    id: 'current-drift', group: 'Fluids', name: 'Neutral ball swept along by a current', law: '(m+½ρV)·dv/dt = ½ρ·Cd(Re)·A·(u−v)²', tolPct: 3,
+    run: (c) => {
+      const u = 1.5, R = 0.4, rho = 1000;
+      c.field({ kind: 'fluid', shape: 'box', pos: [0, 5, 0], size: [40, 5, 40], strength: 1, fluid: { preset: 'water', viscosity: 0.001, waves: 0, wavelength: 8, current: u } });
+      const e = c.sphere([-20, 5, 0], R, c.mat({ density: rho }));
+      c.S.step(1); c.place(e, [-20, 5, 0]);
+      c.S.step(600);
+      // reference: integrate the real sphere drag curve (with added mass) finely over the same 10 s
+      const V = (4 / 3) * Math.PI * R ** 3, A = Math.PI * R * R, mEff = 1.5 * rho * V;
+      let v = 0;
+      for (let i = 0; i < 10000; i++) {
+        const w = u - v;
+        v += (0.001 * 0.5 * rho * A * cdSphere(Math.max((rho * Math.abs(w) * 2 * R) / 0.001, 1e-9)) * w * Math.abs(w)) / mEff;
+      }
+      return { measured: e.body.linvel().x, expected: v, unit: 'm/s', detail: 'water-density ball after 10 s in a 1.5 m/s current — a float closes the gap to its current only hyperbolically' };
+    },
+  },
+  // ------------------------------------------------------------------ air
+  {
+    id: 'air-terminal', group: 'Air', name: 'Foam ball terminal velocity', law: 'v = √(2mg / ρ·Cd·A), Cd ≈ 0.47', tolPct: 4,
+    run: (c) => {
+      c.S.setAirResistance(true);
+      const foam = preset('foam'), R = 0.5;
+      const e = c.sphere([0, 600, 0], R, foam);
+      c.S.step(600);
+      const m = (foam.density - 1.225) * (4 / 3) * Math.PI * R ** 3; // net of the air's own buoyancy
+      return { measured: -e.body.linvel().y, expected: Math.sqrt((2 * m * G) / (1.225 * 0.47 * Math.PI * R * R)), unit: 'm/s', detail: '1 m expanded-polystyrene ball (30 kg/m³) after 10 s of fall' };
+    },
+  },
+  {
+    id: 'air-cube-drag', group: 'Air', name: 'Wind force on a cube', law: 'F = ½·ρ·1.05·A·u² (cube Cd)', tolPct: 5,
+    run: (c) => {
+      c.S.setGravityY(0);
+      c.S.fieldModel = 'realistic';
+      c.field({ kind: 'wind', shape: 'box', pos: [0, 20, 0], size: [30, 30, 30], strength: 20 });
+      const foam = preset('foam');
+      const e = c.box([0, 20, 0], 0.5, foam);
+      c.S.step(1); c.place(e, [0, 20, 0]);
+      c.S.step(1);
+      const m = (foam.density / 1000);
+      return { measured: e.body.linvel().x / DT, expected: (0.5 * 1.225e-3 * 1.05 * 1 * 400) / m, unit: 'm/s²', detail: 'realistic model: a 20 m/s wind on a face-on 1 m foam cube (initial acceleration)' };
+    },
+  },
+  {
+    id: 'air-heavy-light', group: 'Air', name: 'Gale moves foam, not steel', law: 'a = F/m — same wind, 260× the mass', tolPct: 2,
+    run: (c) => {
+      c.S.setGravityY(0);
+      c.S.fieldModel = 'realistic';
+      c.field({ kind: 'wind', shape: 'box', pos: [0, 20, 0], size: [30, 30, 30], strength: 25 });
+      const f = c.box([0, 20, -3], 0.5, preset('foam'));
+      const s = c.box([0, 20, 3], 0.5, preset('steel'));
+      c.S.step(1); c.place(f, [0, 20, -3]); c.place(s, [0, 20, 3]);
+      c.S.step(1);
+      return { measured: f.body.linvel().x / Math.max(s.body.linvel().x, 1e-12), expected: 7800 / 30, unit: '×', detail: `25 m/s gale: foam cube picks up ${(f.body.linvel().x / DT).toFixed(1)} m/s², steel ${(s.body.linvel().x / DT).toFixed(3)} m/s² — same force, acceleration ∝ 1/mass` };
+    },
+  },
+  {
+    id: 'magnus', group: 'Air', name: 'Spinning ball curves (Magnus)', law: 'F = ½·ρ·A·C_L·v², C_L ≈ Rω/v', tolPct: 10,
+    run: (c) => {
+      c.S.setGravityY(0);
+      c.S.setAirResistance(true);
+      const foam = preset('foam'), R = 0.5, v = 15, w = 6;
+      const e = c.sphere([0, 50, 0], R, foam);
+      c.S.step(1);
+      c.place(e, [0, 50, 0], [v, 0, 0], undefined, [0, w, 0]);
+      c.S.step(1);
+      const m = (foam.density / 1000) * (4 / 3) * Math.PI * R ** 3;
+      const CL = Math.min(0.35, (R * w) / v);
+      // ω = +y, v = +x → lift along ω × v = −z
+      return { measured: -e.body.linvel().z / DT, expected: (0.5 * 1.225e-3 * Math.PI * R * R * CL * v * v) / m, unit: 'm/s²', detail: 'topspin-free sidespin at 6 rad/s on a 15 m/s foam ball — sideways acceleration' };
     },
   },
   // ------------------------------------------------------------------ fields

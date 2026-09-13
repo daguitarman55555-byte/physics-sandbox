@@ -23,6 +23,7 @@
  */
 import * as THREE from 'three';
 import { parseExpression } from './expr';
+import type { FluidProps } from './media';
 
 export type FieldKind = 'attractor' | 'repeller' | 'wind' | 'vortex' | 'tornado' | 'path' | 'gravitywell' | 'turbulence' | 'magnetic' | 'drag' | 'fluid' | 'explosion';
 export type FieldShape = 'sphere' | 'box' | 'cylinder';
@@ -67,6 +68,7 @@ export interface Field {
   sole?: boolean; // gravity wells only: this well's centre is the ONLY gravity inside its region —
   //                world gravity is FULLY suspended there (not eased by the soft edge), so "down"
   //                is wherever the well is. Other wells/attractors still add their own pull.
+  fluid?: FluidProps; // fluid tanks only: viscosity, waves, current (density is `strength`)
 }
 
 /** Per-kind defaults. Every `strength` is now a TARGET SPEED (m/s), so the scale is shared across all
@@ -93,8 +95,8 @@ export const FIELD_INFO: Record<FieldKind, { strength: number; size: number; col
   // drag: a slow-mo / terminal-velocity pocket. `strength` is the damping RATE (1/s) — how fast it
   // bleeds off velocity; gravity still acts, so things fall slower and settle to a lower terminal speed.
   drag: { strength: 5, size: 10, color: 0x9aa7b4, label: 'Drag zone' },
-  // fluid: a tank of water — Archimedes buoyancy + fluid drag. `strength` is the fluid DENSITY in the
-  // sim's water-units (1 = water, so a body lighter than water floats; >1 = mercury). Region top = surface.
+  // fluid: a tank of liquid — buoyancy, pressure drag, viscosity, added mass, waves (systems/media.ts).
+  // `strength` is the liquid DENSITY in water-units (1 = water, 13.5 = mercury). Region top = surface.
   fluid: { strength: 1, size: 10, color: 0x2a7fce, label: 'Fluid' },
   // explosion is a ONE-SHOT: position the ghost, and Place DETONATES it (radial impulse, shockwave,
   // camera shake) instead of leaving a field behind. `strength` = blast speed (m/s) at the centre.
@@ -230,8 +232,6 @@ function steer(out: THREE.Vector3, target: THREE.Vector3, vel: THREE.Vector3, ma
   const k = (mass * (1 - Math.exp(-rate * FIELD_DT))) / FIELD_DT;
   return out.set((target.x - vel.x) * k, (target.y - vel.y) * k, (target.z - vel.z) * k);
 }
-const FLUID_DRAG = 3; // linear damping (1/s) a submerged body feels — water resists motion so things
-//                       settle at the surface and bob instead of ringing forever
 const SOFT_EDGE = 0.55; // full strength inside this fraction of the region; smoothstep to 0 by the edge
 const PATH_LOOKAHEAD = 4; // samples ahead the flow steers toward (follows curvature + draws onto the path)
 const SWIRL_GAIN = 0.7; // path swirl scales with radius (0 at the centreline) and this cap — keeps it gentle
@@ -313,29 +313,77 @@ export function fieldInfluence(field: Field, bodyPos: THREE.Vector3): number {
   return 1 - t * t * (3 - 2 * t); // smoothstep down to 0
 }
 
+/** Field kinds that are a moving MEDIUM — air or water flowing somewhere. In the Arcade model they steer
+ *  bodies toward the flow velocity (mass-independent); in the Realistic model they push by aerodynamic
+ *  drag on each body's actual shape, so a crate flies in a gale while a steel ball barely moves. */
+export const FLOW_KINDS: ReadonlySet<FieldKind> = new Set<FieldKind>(['wind', 'vortex', 'tornado', 'turbulence', 'path']);
+
 /**
- * Force this field exerts on a body of `mass` at `bodyPos` moving at `vel`, written into `out`.
- * `gain` is the Sandbox's live global strength multiplier. Zero outside the region.
+ * The flow velocity (m/s, world space) of a FLOW_KINDS field at `bodyPos`, written into `out`. Returns the
+ * region influence there (0 = outside, nothing written). `t` is SIMULATION time — it drives the
+ * time-varying kinds (turbulence eddies, tornado sub-vortices); it used to read the wall clock, so those
+ * patterns kept churning at full speed in slow-mo, jumped after a pause, and broke deterministic replay.
+ */
+export function flowVelocity(field: Field, bodyPos: THREE.Vector3, gain: number, out: THREE.Vector3, t = 0): number {
+  switch (field.kind) {
+    case 'path': return field.path ? pathFlow(field, bodyPos, gain, out) : 0;
+    case 'turbulence': return turbulenceFlow(field, bodyPos, gain, out, t);
+    case 'tornado': return tornadoFlow(field, bodyPos, gain, out, t);
+    case 'wind': case 'vortex': break;
+    default: return 0;
+  }
+  const inf = fieldInfluence(field, bodyPos);
+  if (inf <= 0) return 0;
+  const speed = field.strength * gain;
+  if (field.kind === 'wind') {
+    out.set(1, 0, 0).applyQuaternion(field.quat).multiplyScalar(speed); // blows along the region's local +X
+    return inf;
+  }
+  // VORTEX — a pure whirlpool: swirl about the field's own axis (quat·+Y), NO vertical motion (that's the
+  // tornado's job). Worked in region-local space so a tilted vortex spins in its tilted plane.
+  // RANKINE profile — the standard model of a real vortex: solid-body rotation in the core (tangential
+  // speed ∝ r) and a free, decaying swirl outside it (∝ 1/r) — plus a gentle inward draw. `dir` mirrors
+  // the handedness (the ⇄ Reverse button); a NEGATIVE strength still reverses swirl AND flips the draw
+  // outward (bodies fling out) — a deliberate, protected behavior.
+  _d.copy(bodyPos).sub(field.pos).applyQuaternion(_iq.copy(field.quat).invert());
+  const dir = field.dir ?? 1;
+  const rDist = Math.hypot(_d.x, _d.z);
+  const invd = 1 / (rDist || 1);
+  const prof = rankine(rDist, Math.max(field.size.x, 1e-3)); // local swirl fraction (0 at the axis)
+  const vt = prof * speed * dir; // tangential target speed
+  // the inward draw follows the LOCAL swirl strength (∝ the Rankine profile), like the pressure inflow of a
+  // real vortex — NOT a constant fraction of `speed`. A constant draw at high strength crushed everything
+  // onto the axis into a standing pillar (measured: 986 objects at median radius 1.6 under a strength-600
+  // target): the axis is calm in a real vortex, and with the draw fading in the core, strong swirl and
+  // inward draw balance at a finite radius → rings and orbits.
+  const draw = 0.3 * speed * prof;
+  out.set(-_d.z * invd * vt - _d.x * invd * draw, 0, _d.x * invd * vt - _d.z * invd * draw);
+  out.applyQuaternion(field.quat); // back into world space
+  return inf;
+}
+
+/**
+ * Force this field exerts on a body of `mass` at `bodyPos` moving at `vel`, written into `out` — the ARCADE
+ * model. `gain` is the Sandbox's live global strength multiplier. Zero outside the region.
  *
- * ONE MODEL for every kind: each builds a TARGET VELOCITY of magnitude ≈ `strength` (in m/s) and
- * steers the body toward it. That's why `strength` means the same thing everywhere — a 5 is "move
- * bodies at ~5 m/s," whether it's an attractor sucking inward, wind blowing sideways, or a vortex
- * swirling. The force is mass-scaled so heavy and light bodies reach that speed alike, and scaled by
- * `inf` so the effect fades smoothly across the region boundary.
+ * ONE MODEL for most kinds: each builds a TARGET VELOCITY of magnitude ≈ `strength` (in m/s) and steers
+ * the body toward it. That's why `strength` means the same thing everywhere — a 5 is "move bodies at
+ * ~5 m/s," whether it's an attractor sucking inward, wind blowing sideways, or a vortex swirling. The
+ * force is mass-scaled so heavy and light bodies reach that speed alike, and scaled by `inf` so the
+ * effect fades smoothly across the region boundary. (Fluid tanks and the Realistic air model live in
+ * systems/media.ts — they need the body's shape, not just its position.)
  */
 export function fieldForce(
-  field: Field, bodyPos: THREE.Vector3, vel: THREE.Vector3, mass: number, gain: number, out: THREE.Vector3,
-  t = 0, // SIMULATION time (s) — drives the time-varying kinds (turbulence eddies, tornado sub-vortices).
-  //        It used to read the wall clock, so those patterns kept churning at full speed in slow-mo,
-  //        jumped ahead after a pause, and made identical runs diverge (no deterministic replay).
+  field: Field, bodyPos: THREE.Vector3, vel: THREE.Vector3, mass: number, gain: number, out: THREE.Vector3, t = 0,
 ): THREE.Vector3 {
   out.set(0, 0, 0);
   if (field.kind === 'explosion') return out; // one-shot: it detonates on Place, never acts as a field
-  if (field.kind === 'fluid') return out; // buoyancy needs the body's volume — the Sandbox computes it
-  if (field.kind === 'path') return field.path ? pathForce(field, bodyPos, vel, mass, gain, out) : out;
+  if (field.kind === 'fluid') return out; // buoyancy/drag need the body's shape — see systems/media.ts
+  if (FLOW_KINDS.has(field.kind)) {
+    const inf = flowVelocity(field, bodyPos, gain, _tv, t);
+    return inf > 0 ? steer(out, _tv, vel, mass, (field.kind === 'turbulence' ? TURB_RESPONSE : RESPONSE) * inf) : out;
+  }
   if (field.kind === 'gravitywell') return wellForce(field, bodyPos, vel, mass, gain, out);
-  if (field.kind === 'turbulence') return turbulenceForce(field, bodyPos, vel, mass, gain, out, t);
-  if (field.kind === 'tornado') return tornadoForce(field, bodyPos, vel, mass, gain, out, t);
   const inf = fieldInfluence(field, bodyPos);
   if (inf <= 0) return out;
   const speed = field.strength * gain; // target speed (m/s) — SAME meaning for every kind
@@ -365,94 +413,11 @@ export function fieldForce(
       (vel.z * cs + _d.z * sn + _tv.z * dot * (1 - cs) - vel.z) * k,
     );
   }
-  if (field.kind === 'wind') {
-    _tv.set(1, 0, 0).applyQuaternion(field.quat).multiplyScalar(speed); // blow toward wind velocity
-  } else if (field.kind === 'vortex') {
-    // A pure whirlpool: swirl about the field's own axis (quat·+Y) — NO vertical motion (that's the
-    // tornado's job). Work in region-local space so a tilted vortex spins in its tilted plane.
-    // RANKINE profile — the standard model of a real vortex: solid-body rotation in the core
-    // (tangential speed ∝ r) and a free, decaying swirl outside it (∝ 1/r) — plus a gentle inward
-    // draw. `dir` mirrors the handedness (the ⇄ Reverse button); a NEGATIVE strength still reverses
-    // swirl AND flips the draw outward (bodies fling out) — a deliberate, protected behavior.
-    _d.copy(bodyPos).sub(field.pos).applyQuaternion(_iq.copy(field.quat).invert());
-    const dir = field.dir ?? 1;
-    const rDist = Math.hypot(_d.x, _d.z);
-    const invd = 1 / (rDist || 1);
-    const prof = rankine(rDist, Math.max(field.size.x, 1e-3)); // local swirl fraction (0 at the axis)
-    const vt = prof * speed * dir; // tangential target speed
-    // the inward draw follows the LOCAL swirl strength (∝ the Rankine profile), like the pressure
-    // inflow of a real vortex — NOT a constant fraction of `speed`. A constant draw at high strength
-    // crushed everything onto the axis into a standing pillar (measured: 986 objects at median
-    // radius 1.6 under a strength-600 target): the axis is calm in a real vortex, and with the draw
-    // fading in the core, strong swirl and inward draw balance at a finite radius → rings and orbits.
-    const draw = 0.3 * speed * prof;
-    _tv.set(
-      -_d.z * invd * vt - _d.x * invd * draw,
-      0,
-      _d.x * invd * vt - _d.z * invd * draw,
-    );
-    _tv.applyQuaternion(field.quat); // target velocity back into world space
-  } else {
-    // attractor / repeller — toward / away from the centre
-    _d.subVectors(field.pos, bodyPos);
-    const sign = field.kind === 'attractor' ? 1 : -1;
-    _tv.copy(_d).divideScalar(_d.length() || 1).multiplyScalar(sign * speed);
-  }
+  // attractor / repeller — toward / away from the centre
+  _d.subVectors(field.pos, bodyPos);
+  const sign = field.kind === 'attractor' ? 1 : -1;
+  _tv.copy(_d).divideScalar(_d.length() || 1).multiplyScalar(sign * speed);
   return steer(out, _tv, vel, mass, RESPONSE * inf);
-}
-
-/**
- * Buoyancy + fluid drag for a body inside a 'fluid' region (a tank of water). The region's TOP is the
- * water surface (world-horizontal — water finds its level, so any region tilt is ignored for it).
- * Archimedes: an upward force = fluidDensity·g·submergedVolume, so a body lighter than the fluid floats
- * and a denser one sinks (both use the sim's density/1000 units, so `strength` 1 = water). Plus a linear
- * drag ∝ the submerged fraction, so bodies settle at the surface and bob rather than oscillating forever.
- * Written into `out` as a FORCE (the Sandbox multiplies by dt). Zero outside the region's footprint.
- */
-export function fluidForce(
-  field: Field, bodyPos: THREE.Vector3, vel: THREE.Vector3, mass: number, volume: number, radius: number,
-  gravityY: number, gain: number, out: THREE.Vector3,
-): THREE.Vector3 {
-  out.set(0, 0, 0);
-  const sub = fluidSubmerged(field, bodyPos, radius);
-  if (sub <= 0) return out;
-  const fluidDensity = field.strength * gain; // water-units (1 = water); >1 = a denser fluid (mercury)
-  out.y = fluidDensity * -gravityY * volume * sub; // Archimedes' upward force ∝ displaced volume
-  const c = FLUID_DRAG * mass * sub; // fluid drag: mass-scaled so deceleration is mass-independent
-  out.x -= vel.x * c; out.y -= vel.y * c; out.z -= vel.z * c;
-  return out;
-}
-
-/**
- * Fraction (0…1) of a body's vertical extent [y−r, y+r] that lies inside a fluid region's WATER column
- * [bottom, surface]. The column is bounded on BOTH ends: a body under a raised tank is outside it (this
- * used to check only the surface, so anything anywhere below an elevated tank felt full buoyancy and got
- * sucked up into it). The footprint is tested in the region's own horizontal axes, so a yawed tank's
- * outline is honoured. A spherical "drop" of fluid has a surface at its top and a bottom that follows
- * the sphere at the body's horizontal offset.
- */
-export function fluidSubmerged(field: Field, bodyPos: THREE.Vector3, radius: number): number {
-  const sz = field.size;
-  _d.copy(bodyPos).sub(field.pos);
-  let surfaceY: number, bottomY: number;
-  if (field.shape === 'sphere') {
-    const rh = Math.hypot(_d.x, _d.z);
-    if (rh >= sz.x + radius) return 0;
-    const inner = Math.min(rh, sz.x);
-    surfaceY = field.pos.y + sz.x;
-    bottomY = field.pos.y - Math.sqrt(Math.max(0, sz.x * sz.x - inner * inner));
-  } else {
-    _d.applyQuaternion(_iq.copy(field.quat).invert()); // footprint in the tank's own axes
-    const inside = field.shape === 'box'
-      ? Math.abs(_d.x) < sz.x + radius && Math.abs(_d.z) < sz.z + radius
-      : Math.hypot(_d.x, _d.z) < sz.x + radius;
-    if (!inside) return 0;
-    surfaceY = field.pos.y + sz.y; // water finds its level: the surface is world-horizontal
-    bottomY = field.pos.y - sz.y;
-  }
-  const r = Math.max(radius, 1e-3);
-  const overlap = Math.min(bodyPos.y + r, surfaceY) - Math.max(bodyPos.y - r, bottomY);
-  return overlap <= 0 ? 0 : Math.min(1, overlap / (2 * r));
 }
 
 /**
@@ -507,11 +472,9 @@ const TORNADO_SUBV_RATE = 2.4; // rad/s — how fast they orbit the main axis
  * back in — a recirculating fountain in the SHAPE of the funnel, not a one-way launcher off the top.
  * `dir` mirrors the swirl handedness; negative strength reverses swirl and blows debris outward.
  */
-function tornadoForce(
-  field: Field, bodyPos: THREE.Vector3, vel: THREE.Vector3, mass: number, gain: number, out: THREE.Vector3, tSec: number,
-): THREE.Vector3 {
+function tornadoFlow(field: Field, bodyPos: THREE.Vector3, gain: number, out: THREE.Vector3, tSec: number): number {
   const inf = fieldInfluence(field, bodyPos);
-  if (inf <= 0) return out;
+  if (inf <= 0) return 0;
   const speed = field.strength * gain;
   const dir = field.dir ?? 1;
   _d.copy(bodyPos).sub(field.pos).applyQuaternion(_iq.copy(field.quat).invert()); // region-local
@@ -561,13 +524,13 @@ function tornadoForce(
     * Math.max(0, 1 - Math.abs(rf - coneR) / TORNADO_WALL_W)
     * (1 - hf);
 
-  _tv.set(
+  out.set(
     -_d.z * invd * vt + _d.x * invd * vRad,
     lift,
     _d.x * invd * vt + _d.z * invd * vRad,
   );
-  _tv.applyQuaternion(field.quat);
-  return steer(out, _tv, vel, mass, RESPONSE * inf);
+  out.applyQuaternion(field.quat);
+  return inf;
 }
 
 /**
@@ -673,15 +636,12 @@ function curlNoise(x: number, y: number, z: number, t: number, out: THREE.Vector
  * than being pushed one way. Same target-velocity model as the other fields, so `strength` is the
  * drift speed and it's mass-independent; confined + eased by the region influence like everything else.
  */
-function turbulenceForce(
-  field: Field, bodyPos: THREE.Vector3, vel: THREE.Vector3, mass: number, gain: number, out: THREE.Vector3, tSec: number,
-): THREE.Vector3 {
+function turbulenceFlow(field: Field, bodyPos: THREE.Vector3, gain: number, out: THREE.Vector3, tSec: number): number {
   const inf = fieldInfluence(field, bodyPos);
-  if (inf <= 0) return out;
-  const t = tSec * TURB_TIMESCALE;
-  curlNoise(bodyPos.x * TURB_FREQ, bodyPos.y * TURB_FREQ, bodyPos.z * TURB_FREQ, t, _tv);
-  _tv.multiplyScalar(field.strength * gain);
-  return steer(out, _tv, vel, mass, TURB_RESPONSE * inf);
+  if (inf <= 0) return 0;
+  curlNoise(bodyPos.x * TURB_FREQ, bodyPos.y * TURB_FREQ, bodyPos.z * TURB_FREQ, tSec * TURB_TIMESCALE, out);
+  out.multiplyScalar(field.strength * gain);
+  return inf;
 }
 
 /**
@@ -690,13 +650,11 @@ function turbulenceForce(
  * path) + offset·pull (settle onto it) + optional swirl around the curve axis; then a velocity
  * correction toward that target (the vortex's trick, so bodies join the flow smoothly).
  */
-function pathForce(
-  field: Field, bodyPos: THREE.Vector3, vel: THREE.Vector3, mass: number, gain: number, out: THREE.Vector3,
-): THREE.Vector3 {
+function pathFlow(field: Field, bodyPos: THREE.Vector3, gain: number, out: THREE.Vector3): number {
   const path = field.path!;
   const pts = path.pts, tans = path.tans;
   _pl.copy(bodyPos).sub(field.pos).applyQuaternion(_iq.copy(field.quat).invert()); // into the curve's frame
-  if (outsidePathBound(pts, _pl, Math.max(field.size.x, 0.5))) return out;
+  if (outsidePathBound(pts, _pl, Math.max(field.size.x, 0.5))) return 0;
   // nearest sample on the polyline
   let bi = 0, bd2 = Infinity;
   for (let i = 0; i < pts.length; i += 3) {
@@ -706,7 +664,7 @@ function pathForce(
   }
   const dist = Math.sqrt(bd2);
   const R = Math.max(field.size.x, 0.5);
-  if (dist >= R) return out; // outside the tube
+  if (dist >= R) return 0; // outside the tube
   const n = dist / R;
   const inf = n <= SOFT_EDGE ? 1 : 1 - smoothstep01((n - SOFT_EDGE) / (1 - SOFT_EDGE));
 
@@ -749,6 +707,6 @@ function pathForce(
     _tv.y += (tz * rx - tx * rz) * mag;
     _tv.z += (tx * ry - ty * rx) * mag;
   }
-  _tv.applyQuaternion(field.quat); // target velocity back into world space
-  return steer(out, _tv, vel, mass, RESPONSE * inf);
+  out.copy(_tv).applyQuaternion(field.quat); // flow velocity back into world space
+  return inf;
 }

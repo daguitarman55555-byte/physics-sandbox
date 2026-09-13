@@ -44,6 +44,9 @@ export const PRESETS: Material[] = [
   { id: 'ice', name: 'Ice', density: 900, friction: 0.05, restitution: 0.1, color: '#bfe3ff', maps: maps('ice'), strength: 0.4 },
   { id: 'wood', name: 'Wood', density: 600, friction: 0.5, restitution: 0.4, color: '#b98a52', maps: maps('wood'), strength: 0.7 },
   { id: 'stone', name: 'Stone', density: 2600, friction: 0.7, restitution: 0.15, color: '#8d8f96', maps: maps('stone'), strength: 1.2 },
+  // expanded polystyrene: 30 kg/m³ — light enough that air resistance and wind visibly matter (a 1 m foam
+  // ball falls at ~26 m/s terminal velocity; a stone one would need ~180 m/s)
+  { id: 'foam', name: 'Foam', density: 30, friction: 0.6, restitution: 0.3, color: '#ece6d6', strength: 0.25 },
 ];
 
 export const TODO = 'Phase 3 remainder (texture upload, element/alloy composer) — see src/systems/README.md';

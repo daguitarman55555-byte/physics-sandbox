@@ -25,7 +25,8 @@ import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js
 import { ConvexGeometry } from 'three/examples/jsm/geometries/ConvexGeometry.js';
 import { buildImplicit, type ImplicitSpec } from './systems/implicit';
 import { PLAIN, type Material } from './systems/materials';
-import { fieldForce, fieldInfluence, pathInfluence, fluidForce, wellOrbitalVelocity, FIELD_INFO, samplePath, PATH_PRESETS, type Field, type FieldKind, type FieldShape, type CurveSpec } from './systems/fields';
+import { fieldForce, flowVelocity, fieldInfluence, pathInfluence, wellOrbitalVelocity, FIELD_INFO, FLOW_KINDS, samplePath, PATH_PRESETS, type Field, type FieldKind, type FieldShape, type CurveSpec } from './systems/fields';
+import { airForces, liquidForces, buildMediumShape, defaultFluid, MediaOut, C_ADDED, FLUID_PRESETS, AIR_STILL_V2, RHO_AIR, type BodyState, type MediumShape, type FluidProps } from './systems/media';
 import { FieldFlow } from './systems/fieldviz';
 import { NBody } from './systems/nbody';
 import { mergeComp, PlanetSkin, setSkinDetail as setSkinDetailFlag, skinDetailHigh, type CompEntry } from './systems/planettex';
@@ -77,6 +78,8 @@ export interface Entity {
   gravityScale?: number; // per-object gravity multiplier (1 = normal, 0 = weightless, <0 = floats up)
   chunks?: Chunk[]; // present for a rubble-pile COMPOUND: the component shapes it's fused from, each
   //                   kept as its own collider + geometry so a box+sphere merge looks like their union
+  medium?: MediumShape; // cached shape it presents to liquids and air (drag faces, buoyancy cells)
+  hydroPrev?: THREE.Vector3; // last step's known applied force incl. gravity — added-mass contact estimate
 }
 
 /**
@@ -397,6 +400,24 @@ export class Sandbox {
   private devSteps = 0;
   private devT = 0;
 
+  // media: air resistance on everything, and how fields push (Arcade steering vs Realistic air flow)
+  private airOn = true;
+  fieldModel: 'arcade' | 'realistic' = 'arcade';
+  private _st: BodyState = { pos: new THREE.Vector3(), quat: new THREE.Quaternion(), vel: new THREE.Vector3(), angvel: new THREE.Vector3(), mass: 0, gravityY: 0 };
+  private _media = new MediaOut();
+  private _known = new THREE.Vector3();
+  private _simT = 0;
+  private _flowTmp = new THREE.Vector3();
+  /** The combined realistic air-flow velocity at a point (every flow field, weighted by its influence). */
+  private _flowAt = (p: THREE.Vector3, out: THREE.Vector3) => {
+    out.set(0, 0, 0);
+    for (const { field } of this.fields) {
+      if (!FLOW_KINDS.has(field.kind)) continue;
+      const inf = flowVelocity(field, p, this.fieldStrength, this._flowTmp, this._simT);
+      if (inf > 0) out.addScaledVector(this._flowTmp, inf);
+    }
+  };
+
   // scratch
   private _m = new THREE.Matrix4();
   private _p = new THREE.Vector3();
@@ -704,7 +725,8 @@ export class Sandbox {
       col.setFriction(mat.friction).setRestitution(mat.restitution).setDensity(mat.density / 1000), body);
 
     this.getPool(kind as 'box' | 'sphere', mat); // ensure the render pool exists
-    const color = new THREE.Color(PALETTE[this.nextId % PALETTE.length]);
+    // untextured presets (Foam) wear their own colour; Plain keeps the per-object palette
+    const color = new THREE.Color(!mat.maps && mat.color ? mat.color : PALETTE[this.nextId % PALETTE.length]);
     const e: Entity = {
       id: this.nextId++, kind, body, size: s, mat, color,
       texRepeat: kind === 'sphere' ? [2, 1] : [1, 1], // must match the pool's tiling above
@@ -922,7 +944,7 @@ export class Sandbox {
     boundingRadius: number, volume: number, label: string,
     mat: Material = PLAIN, repeat: [number, number] = [1, 1],
   ): Entity {
-    const color = new THREE.Color(PALETTE[this.nextId % PALETTE.length]);
+    const color = new THREE.Color(!mat.maps && mat.color ? mat.color : PALETTE[this.nextId % PALETTE.length]);
     const meshMat = mat.maps
       ? this.pbrMaterial(mat, repeat)
       : new THREE.MeshStandardMaterial({ color, metalness: 0.1, roughness: 0.6 });
@@ -1358,6 +1380,7 @@ export class Sandbox {
       field.shape = 'box';
       field.size.set(10, 5, 10);
       field.pos.y = 5;
+      field.fluid = defaultFluid();
     }
     const rec: FieldRec = { field, marker: this.makeFieldMarker(field) };
     this.fieldGroup.add(rec.marker);
@@ -1582,6 +1605,7 @@ export class Sandbox {
       id: f.id, kind: f.kind, shape: f.shape,
       pos: f.pos.clone(), quat: f.quat.clone(), size: f.size.clone(),
       strength: f.strength, hidden: f.hidden, lift: f.lift, dir: f.dir, sole: f.sole,
+      fluid: f.fluid ? { ...f.fluid } : undefined,
     };
     if (f.path) c.path = {
       spec: { ...f.path.spec }, label: f.path.label, scale: f.path.scale, swirl: f.path.swirl,
@@ -1596,6 +1620,7 @@ export class Sandbox {
     dst.shape = src.shape;
     dst.pos.copy(src.pos); dst.quat.copy(src.quat); dst.size.copy(src.size);
     dst.strength = src.strength; dst.hidden = src.hidden; dst.lift = src.lift; dst.dir = src.dir; dst.sole = src.sole;
+    dst.fluid = src.fluid ? { ...src.fluid } : undefined;
     dst.path = src.path ? {
       spec: { ...src.path.spec }, label: src.path.label, scale: src.path.scale, swirl: src.path.swirl,
       pts: src.path.pts.slice(), tans: src.path.tans.slice(), closed: src.path.closed,
@@ -1805,6 +1830,13 @@ export class Sandbox {
 
   private tintMarker(marker: THREE.Object3D, hex: number) {
     marker.traverse((o) => {
+      // a liquid keeps its own colour — unless the ghost is flagged invalid, which tints everything red
+      const own = o.userData.ownColor as number | undefined;
+      if (own != null) {
+        const mat = (o as THREE.Mesh).material as unknown as { color?: THREE.Color } | undefined;
+        mat?.color?.setHex(hex === 0xdc4a4a ? hex : own);
+        return;
+      }
       const mat = (o as THREE.Mesh).material as THREE.Material | undefined;
       const col = (mat as unknown as { color?: THREE.Color } | undefined)?.color;
       if (col) col.setHex(hex);
@@ -1879,6 +1911,8 @@ export class Sandbox {
 
     if (field.kind === 'path' && field.path) {
       this.addPathMarker(g, field, info.color);
+    } else if (field.kind === 'fluid') {
+      this.addFluidMarker(g, field);
     } else {
       // the region hull — translucent so you see the confined space and its boundary
       const hull = new THREE.Mesh(
@@ -1934,6 +1968,72 @@ export class Sandbox {
     core.userData.fieldCore = true;
     g.add(core);
     return g;
+  }
+
+  /**
+   * A liquid tank: the translucent body of liquid tinted by what it is (water, honey, mercury…), its
+   * outline, and a glossy SURFACE sheet at the top — displaced every frame by the same travelling wave
+   * the buoyancy uses, so what floats visibly rides what you see.
+   */
+  private addFluidMarker(g: THREE.Group, field: Field) {
+    const fl = field.fluid ?? defaultFluid();
+    const color = FLUID_PRESETS[fl.preset]?.color ?? FIELD_INFO.fluid.color;
+    const keep = (m: THREE.Object3D) => { m.userData.ownColor = color; return m; };
+    const hull = new THREE.Mesh(this.shapeGeometry(field),
+      new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.16, depthWrite: false, side: THREE.DoubleSide }));
+    g.add(keep(hull));
+    g.add(keep(new THREE.LineSegments(new THREE.EdgesGeometry(hull.geometry),
+      new THREE.LineBasicMaterial({ color, transparent: true, opacity: 0.45 }))));
+    const s = field.size;
+    const top = field.shape === 'sphere' ? s.x : s.y;
+    const geo = field.shape === 'box' ? new THREE.PlaneGeometry(s.x * 2, s.z * 2, 64, 64) : new THREE.CircleGeometry(s.x, 64, 0, Math.PI * 2);
+    geo.rotateX(-Math.PI / 2);
+    geo.translate(0, top, 0);
+    const surface = new THREE.Mesh(geo, new THREE.MeshStandardMaterial({
+      color, transparent: true, opacity: fl.preset === 'mercury' ? 0.92 : 0.62, roughness: fl.preset === 'honey' ? 0.35 : 0.08,
+      metalness: fl.preset === 'mercury' ? 0.9 : 0.05, side: THREE.DoubleSide, depthWrite: false,
+    }));
+    surface.userData.waterSurface = true;
+    surface.userData.baseY = top;
+    g.add(keep(surface));
+  }
+
+  /** Animate every visible tank surface with its travelling wave (world-horizontal crest lines). */
+  private animateFluidSurfaces(t: number) {
+    const tanks = this._flowList2;
+    tanks.length = 0;
+    for (const r of this.fields) if (r.field.kind === 'fluid' && r.field.fluid && r.field.fluid.waves > 0) tanks.push(r);
+    if (this.placing?.field.kind === 'fluid') tanks.push(this.placing);
+    for (const rec of tanks) {
+      const fl = rec.field.fluid;
+      rec.marker.traverse((o) => {
+        if (!o.userData.waterSurface) return;
+        const geo = (o as THREE.Mesh).geometry;
+        const pos = geo.getAttribute('position') as THREE.BufferAttribute;
+        const base = o.userData.baseY as number;
+        const A = fl?.waves ?? 0;
+        if (A <= 0 && !o.userData.wavy) return;
+        const k = (2 * Math.PI) / Math.max(fl?.wavelength ?? 8, 0.5), w = Math.sqrt(9.81 * k);
+        for (let i = 0; i < pos.count; i++) pos.setY(i, base + A * Math.cos(k * pos.getX(i) - w * t));
+        pos.needsUpdate = true;
+        geo.computeVertexNormals();
+        o.userData.wavy = A > 0; // one last flatten pass when waves are switched off
+      });
+    }
+  }
+  private _flowList2: FieldRec[] = [];
+
+  /** Change a tank's liquid (preset → density + viscosity + look) or its waves/current, live. */
+  setFluidProps(rec: FieldRec, props: Partial<FluidProps>) {
+    const f = rec.field;
+    if (f.kind !== 'fluid') return;
+    f.fluid = { ...(f.fluid ?? defaultFluid()), ...props };
+    const p = props.preset ? FLUID_PRESETS[props.preset] : undefined;
+    if (p) { f.strength = p.density; f.fluid.viscosity = p.viscosity; }
+    this.rebuildMarker(rec);
+    for (const e of this.entities) e.body.wakeUp();
+    this.userEpoch++;
+    this.onFieldChange?.();
   }
 
   /** Draw a path field: the flow curve (bright), its capture tube (translucent), and flow arrows. */
@@ -2057,6 +2157,7 @@ export class Sandbox {
         pos: [f.pos.x, f.pos.y, f.pos.z], quat: [f.quat.x, f.quat.y, f.quat.z, f.quat.w],
         size: [f.size.x, f.size.y, f.size.z],
         strength: f.strength, hidden: f.hidden, lift: f.lift, dir: f.dir, sole: f.sole,
+        fluid: f.fluid ? { ...f.fluid } : undefined,
       };
       if (f.path) d.path = {
         spec: { ...f.path.spec }, label: f.path.label, scale: f.path.scale, swirl: f.path.swirl,
@@ -2075,6 +2176,7 @@ export class Sandbox {
         gravityY: this.gravityY, timeScale: this.timeScale, paused: this.paused,
         selfGravity: this.selfGravityOn, selfG: this.selfG,
         accretion: this.accretionOn, breakage: this.breakageOn, fieldStrength: this.fieldStrength,
+        air: this.airOn, fieldModel: this.fieldModel,
       },
       entities, fields, joints,
       camera: {
@@ -2101,6 +2203,8 @@ export class Sandbox {
     this.setAccretion(w.accretion);
     this.setBreakage(w.breakage);
     this.setFieldStrength(w.fieldStrength ?? 1);
+    this.setAirResistance(w.air ?? true);
+    this.fieldModel = w.fieldModel === 'realistic' ? 'realistic' : 'arcade';
 
     // entities first, so joints can reference them by their saved array index
     const built = data.entities.map((ed) => this.spawnFromData(ed));
@@ -2168,6 +2272,7 @@ export class Sandbox {
       quat: new THREE.Quaternion(fd.quat[0], fd.quat[1], fd.quat[2], fd.quat[3]),
       size: new THREE.Vector3(fd.size[0], fd.size[1], fd.size[2]),
       strength: fd.strength, hidden: fd.hidden, lift: fd.lift, dir: fd.dir, sole: fd.sole,
+      fluid: fd.fluid ? { ...defaultFluid(), ...fd.fluid } : fd.kind === 'fluid' ? defaultFluid() : undefined,
     };
     if (fd.path) {
       const p = fd.path;
@@ -2198,6 +2303,7 @@ export class Sandbox {
     this.selfGravityOn = false; this.selfG = 1;
     this.accretionOn = false; this.breakageOn = false;
     this.fieldStrength = 1; this.timeScale = 1; this.paused = false;
+    this.airOn = false; this.fieldModel = 'arcade'; // experiments opt in to air / the realistic model
     this.tick = 0; this.accreteTick = 0; this.rocheTick = 0;
   }
 
@@ -2225,6 +2331,13 @@ export class Sandbox {
   setBreakage(on: boolean) { this.breakageOn = on; }
   get skinDetail() { return skinDetailHigh(); }
   setSkinDetail(hi: boolean) { setSkinDetailFlag(hi); }
+  /** Air resistance on every body (drag, Magnus lift on spinning balls, the air's own buoyancy). */
+  get airResistance() { return this.airOn; }
+  setAirResistance(on: boolean) { this.userEpoch++; this.airOn = on; for (const e of this.entities) e.body.wakeUp(); }
+  /** Arcade: fields steer bodies to a target speed (mass-independent, tuned for fun). Realistic: flow
+   *  fields are moving air that pushes by drag on each body's shape; charges & TNT-scaled blasts. */
+  setFieldModel(m: 'arcade' | 'realistic') { this.userEpoch++; this.fieldModel = m; for (const e of this.entities) e.body.wakeUp(); this.onFieldChange?.(); }
+
   /** Simulation clock (s): fixed steps taken × dt. Pauses with the sim and scales with slow-mo. */
   get simTime(): number { return this.tick * FIXED; }
   get isPaused() { return this.paused; }
@@ -3280,6 +3393,148 @@ export class Sandbox {
     }
   }
 
+  /**
+   * Every non-contact force on every body for one step, summed into ONE impulse and ONE torque impulse:
+   *  - field forces — the Arcade model's steering, or, in the Realistic model, the AIR FLOW that wind /
+   *    vortex / tornado / turbulence / path fields create (it then pushes by aerodynamic drag on the
+   *    body's real shape, so light & broad things fly and dense compact ones don't);
+   *  - liquid tanks — multi-point buoyancy (righting torque), drag, viscosity, waves, currents, added mass;
+   *  - air resistance (World toggle) — drag, Magnus lift on spinning balls, the air's own buoyancy.
+   */
+  private applyForces(track: Entity | null) {
+    const simT = this.simTime;
+    const gain = this.fieldStrength;
+    const realistic = this.fieldModel === 'realistic';
+    const st = this._st, media = this._media;
+    this._simT = simT;
+    let anyFluid = false;
+    for (const r of this.fields) if (r.field.kind === 'fluid') { anyFluid = true; break; }
+
+    const noFields = this.fields.length === 0;
+    const gAbs = Math.abs(this.gravityY) || 9.81;
+    for (const e of this.entities) {
+      if (e.frozen) continue;
+      const b = e.body;
+      if (noFields && b.isSleeping()) continue; // still air can't move a resting body
+      const v = b.linvel();
+      this._fieldV.set(v.x, v.y, v.z);
+      const v2 = this._fieldV.lengthSq();
+      if (noFields && v2 <= AIR_STILL_V2) continue; // barely moving through still air: nothing measurable
+      const mass = b.mass();
+      if (!(mass > 0)) continue; // created this tick — Rapier finalizes its mass on the next step
+      const shape = this.mediumShapeOf(e);
+      // still air whose drag is under 0.05% of the body's weight (a stone crate at 10 m/s) is physically
+      // invisible — skip it, and don't keep the body awake with a femto-impulse every step (that stopped
+      // piles from ever sleeping: +40% world.step at 1000 bodies)
+      const airMatters = v2 > AIR_STILL_V2 && 0.5 * RHO_AIR * 1.1 * Math.cbrt(shape.volume) ** 2 * v2 > 5e-4 * mass * gAbs;
+      if (noFields && !airMatters) continue;
+      const t = b.translation();
+      this._p.set(t.x, t.y, t.z);
+      this._s.set(0, 0, 0);
+      media.reset();
+      let ready = false; // rotation/spin are only read when a medium needs them
+      let liftInf = 0; // strongest gravity-suspension influence (a well's region, or a lift-flow tube)
+      let flowInf = 0; // strongest realistic-flow influence at the body
+
+      for (const { field } of this.fields) {
+        if (field.kind === 'fluid') {
+          if (!ready) { this.readBodyState(e, st, mass); ready = true; }
+          liquidForces(field, shape, st, field.strength * gain, simT, media);
+          continue;
+        }
+        if (realistic && FLOW_KINDS.has(field.kind)) {
+          const inf = flowVelocity(field, this._p, gain, this._fieldF, simT);
+          if (inf > flowInf) flowInf = inf; // acts through air drag below
+          continue;
+        }
+        fieldForce(field, this._p, this._fieldV, mass, gain, this._fieldF, simT);
+        this._s.add(this._fieldF);
+        if (e === track && this._fieldF.lengthSq() > 0) this.devForce(`${FIELD_INFO[field.kind].label} #${field.id}`, FIELD_INFO[field.kind].color, this._fieldF.x, this._fieldF.y, this._fieldF.z);
+        if (field.kind === 'gravitywell') {
+          const fi = fieldInfluence(field, this._p);
+          // a SOLE-gravity well suspends world gravity FULLY anywhere inside its region (binary,
+          // not eased by the soft edge): its centre is the only "down" — planetary gravity mode
+          liftInf = Math.max(liftInf, field.sole && fi > 0 ? 1 : fi);
+        } else if (field.kind === 'path' && field.lift) liftInf = Math.max(liftInf, pathInfluence(field, this._p));
+      }
+
+      // air: global air resistance (when it matters, see above), and/or the realistic flow fields
+      if ((this.airOn && (ready || airMatters)) || flowInf > 0) {
+        if (!ready) { this.readBodyState(e, st, mass); ready = true; }
+        const dry = Math.max(0, 1 - media.vSub / shape.volume); // the part not under water
+        airForces(shape, st, this.airOn ? dry : dry * flowInf, media, flowInf > 0 ? this._flowAt : null, this.airOn);
+      }
+
+      // Suspend world gravity (∝ influence, so it fades at the boundary) inside a gravity well OR a
+      // lift-enabled flow tube: the field's own force becomes the only thing acting, so bodies lift
+      // off the floor and follow it — orbiting a well's centre, or riding a 3D flow curve up into the
+      // air instead of falling out the bottom of the tube and stalling on floor friction.
+      // Scaled by the GLOBAL strength slider (clamped ≤1 — above 1 would be anti-gravity): at
+      // strength 0 a field must do NOTHING. This used to leak — wells at global 0 still cancelled
+      // gravity while pulling with zero force, so hundreds of objects coasted forever in perfect
+      // zero-g, "orbiting around nothing" (Rafael's report; measured vy≈0 at 57 m/s, y≈52).
+      const gs = e.gravityScale ?? 1;
+      const suspend = liftInf * Math.min(Math.max(gain, 0), 1);
+      // cancel the body's ACTUAL felt gravity (world gravity × its per-object scale), so a
+      // weightless/floating object isn't wrongly shoved when it enters a well or lift tube
+      if (suspend > 0) {
+        const up = -this.gravityY * mass * suspend * gs;
+        this._s.y += up;
+        if (e === track) this.devForce('gravity suspension', 0x8a93a6, 0, up, 0);
+      }
+
+      if (ready) {
+        this._s.add(media.force);
+        if (e === track) {
+          if (media.buoyancy.lengthSq() > 0) this.devForce('buoyancy', 0x2a7fce, media.buoyancy.x, media.buoyancy.y, media.buoyancy.z);
+          if (media.drag.lengthSq() > 0) this.devForce(media.vSub > 0 ? 'liquid + air drag' : 'air drag', 0x9aa7b4, media.drag.x, media.drag.y, media.drag.z);
+        }
+      }
+      if (anyFluid) {
+        // ADDED MASS: a body accelerating through liquid must also accelerate the liquid it pushes aside,
+        // so it responds as if heavier by C·ρ·V_sub (why a steel ball sinks at 8.0, not 8.6 m/s²). Exact
+        // for the forces we know (gravity + fields + media); the contact force is estimated from last
+        // step's measured acceleration so a body resting on the tank floor isn't made "lighter".
+        const known = this._known.set(this._s.x, this._s.y + mass * this.gravityY * gs, this._s.z);
+        if (media.rhoSub > 0) {
+          const ma = C_ADDED * media.rhoSub;
+          const prev = e.hydroPrev;
+          const cx = prev ? mass * e.accel.x - prev.x : 0, cy = prev ? mass * e.accel.y - prev.y : 0, cz = prev ? mass * e.accel.z - prev.z : 0;
+          const k = -ma / (mass + ma);
+          const ax = (known.x + cx) * k, ay = (known.y + cy) * k, az = (known.z + cz) * k;
+          this._s.x += ax; this._s.y += ay; this._s.z += az;
+          known.x += ax; known.y += ay; known.z += az;
+          if (e === track) this.devForce('added mass', 0x6c8fb0, ax, ay, az);
+        }
+        (e.hydroPrev ??= new THREE.Vector3()).copy(known);
+      }
+
+      if (this._s.x || this._s.y || this._s.z) {
+        b.applyImpulse({ x: this._s.x * FIXED, y: this._s.y * FIXED, z: this._s.z * FIXED }, true);
+      }
+      if (ready && (media.torque.x || media.torque.y || media.torque.z)) {
+        b.applyTorqueImpulse({ x: media.torque.x * FIXED, y: media.torque.y * FIXED, z: media.torque.z * FIXED }, true);
+      }
+    }
+  }
+
+  /** Read the rotation/spin half of a body's state (position/velocity are already in _p/_fieldV). */
+  private readBodyState(e: Entity, st: BodyState, mass: number) {
+    const r = e.body.rotation(), w = e.body.angvel();
+    st.pos.copy(this._p); st.vel.copy(this._fieldV);
+    st.quat.set(r.x, r.y, r.z, r.w); st.angvel.set(w.x, w.y, w.z);
+    st.mass = mass; st.gravityY = this.gravityY;
+  }
+
+  /** How a body presents itself to liquids and air — rebuilt when accretion/erosion resizes it. */
+  private mediumShapeOf(e: Entity): MediumShape {
+    if (!e.medium || e.medium.sizeKey !== e.size) {
+      const round = e.kind === 'sphere' || (e.kind === 'custom' && !e.support && !e.chunks);
+      e.medium = buildMediumShape(round, e.size, e.bbCenter, e.bbHalf, this.volumeOf(e));
+    }
+    return e.medium;
+  }
+
   private stepPhysics() {
     this.tick++;
     const dev = this.devOn;
@@ -3339,57 +3594,8 @@ export class Sandbox {
     }
     if (dev) this.devLap(2);
 
-    // force fields: sum each field's force on every awake dynamic body, apply as impulse = F·dt
-    if (this.fields.length) {
-      const simT = this.simTime; // fields vary with SIMULATION time — pause/slow-mo/replay stay exact
-      for (const e of this.entities) {
-        if (e.frozen) continue;
-        const t = e.body.translation();
-        this._p.set(t.x, t.y, t.z);
-        const v = e.body.linvel();
-        this._fieldV.set(v.x, v.y, v.z);
-        const mass = e.body.mass();
-        this._s.set(0, 0, 0);
-        let liftInf = 0; // strongest gravity-suspension influence (a well's region, or a lift-flow tube)
-        for (const { field } of this.fields) {
-          if (field.kind === 'fluid') {
-            // buoyancy needs the body's volume + radius + world gravity, which fieldForce doesn't take
-            fluidForce(field, this._p, this._fieldV, mass, this.volumeOf(e), e.size, this.gravityY, this.fieldStrength, this._fieldF);
-            this._s.add(this._fieldF);
-            if (e === track && this._fieldF.lengthSq() > 0) this.devForce(`${FIELD_INFO[field.kind].label} #${field.id}`, FIELD_INFO[field.kind].color, this._fieldF.x, this._fieldF.y, this._fieldF.z);
-            continue;
-          }
-          fieldForce(field, this._p, this._fieldV, mass, this.fieldStrength, this._fieldF, simT);
-          this._s.add(this._fieldF);
-          if (e === track && this._fieldF.lengthSq() > 0) this.devForce(`${FIELD_INFO[field.kind].label} #${field.id}`, FIELD_INFO[field.kind].color, this._fieldF.x, this._fieldF.y, this._fieldF.z);
-          if (field.kind === 'gravitywell') {
-            const fi = fieldInfluence(field, this._p);
-            // a SOLE-gravity well suspends world gravity FULLY anywhere inside its region (binary,
-            // not eased by the soft edge): its centre is the only "down" — planetary gravity mode
-            liftInf = Math.max(liftInf, field.sole && fi > 0 ? 1 : fi);
-          } else if (field.kind === 'path' && field.lift) liftInf = Math.max(liftInf, pathInfluence(field, this._p));
-        }
-        // Suspend world gravity (∝ influence, so it fades at the boundary) inside a gravity well OR a
-        // lift-enabled flow tube: the field's own force becomes the only thing acting, so bodies lift
-        // off the floor and follow it — orbiting a well's centre, or riding a 3D flow curve up into the
-        // air instead of falling out the bottom of the tube and stalling on floor friction.
-        // Scaled by the GLOBAL strength slider (clamped ≤1 — above 1 would be anti-gravity): at
-        // strength 0 a field must do NOTHING. This used to leak — wells at global 0 still cancelled
-        // gravity while pulling with zero force, so hundreds of objects coasted forever in perfect
-        // zero-g, "orbiting around nothing" (Rafael's report; measured vy≈0 at 57 m/s, y≈52).
-        const suspend = liftInf * Math.min(Math.max(this.fieldStrength, 0), 1);
-        // cancel the body's ACTUAL felt gravity (world gravity × its per-object scale), so a
-        // weightless/floating object isn't wrongly shoved when it enters a well or lift tube
-        if (suspend > 0) {
-          const up = -this.gravityY * mass * suspend * (e.gravityScale ?? 1);
-          this._s.y += up;
-          if (e === track) this.devForce('gravity suspension', 0x8a93a6, 0, up, 0);
-        }
-        if (this._s.x || this._s.y || this._s.z) {
-          e.body.applyImpulse({ x: this._s.x * FIXED, y: this._s.y * FIXED, z: this._s.z * FIXED }, true);
-        }
-      }
-    }
+    // force fields + media (liquid tanks, air): per body, one impulse + one torque impulse
+    if (this.fields.length || this.airOn) this.applyForces(track);
     if (dev) this.devLap(3);
 
     this.world.step(this.events);
@@ -3522,6 +3728,7 @@ export class Sandbox {
     for (const r of this.fields) if (r !== this.editingOriginal && !noFlow(r.field)) this._flowList.push(r.field);
     if (this.placing && !noFlow(this.placing.field)) this._flowList.push(this.placing.field);
     this.fieldFlow.update(this._flowList, this.fieldStrength, this.placing?.field.id ?? -1, this.simTime + alpha * FIXED);
+    this.animateFluidSurfaces(this.simTime + alpha * FIXED);
 
     this.updateTrail(selSeen ? this._selPos : null);
   }

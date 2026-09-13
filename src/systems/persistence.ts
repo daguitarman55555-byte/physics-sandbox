@@ -12,6 +12,7 @@
  * is honest, and joints touching a skipped body are dropped too.
  */
 import { PLAIN, PRESETS, type Material } from './materials';
+import type { FluidProps } from './media';
 
 export const SCENE_VERSION = 1;
 export const QUICKSAVE_KEY = 'physics-sandbox:quicksave:v1';
@@ -57,6 +58,7 @@ export interface FieldData {
   dir?: 1 | -1;
   sole?: boolean;
   path?: PathData;
+  fluid?: FluidProps; // fluid tanks: viscosity, waves, current
 }
 
 /** A joint, by index into the saved `entities` array (both endpoints must survive to be restored). */
@@ -75,6 +77,8 @@ export interface WorldData {
   accretion: boolean;
   breakage: boolean;
   fieldStrength: number;
+  air?: boolean; // air resistance (absent in older saves → on)
+  fieldModel?: 'arcade' | 'realistic';
 }
 
 export interface SceneData {

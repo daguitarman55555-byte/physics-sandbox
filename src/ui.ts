@@ -21,6 +21,7 @@ import {
 import { exprToLatex } from './systems/expr';
 import { PLAIN, PRESETS as MATERIALS, type Material } from './systems/materials';
 import { FIELD_INFO, FIELD_SHAPES, PATH_PRESETS, PATH_PRESET_KEYS, type FieldKind, type FieldShape } from './systems/fields';
+import { FLUID_PRESETS } from './systems/media';
 import { JOINT_INFO, type JointKind } from './systems/joints';
 import { downloadScene, pickSceneFile, isSceneData, QUICKSAVE_KEY } from './systems/persistence';
 import type { Tool, BrushMode } from './sandbox';
@@ -540,7 +541,11 @@ function buildPanel(sandbox: Sandbox) {
   const bBreak = el('button', '💥 Breakage', 'mini');
   bBreak.title = 'Violent impacts shatter bodies into debris that inherits their materials';
   bBreak.onclick = () => { const on = !sandbox.breakage; sandbox.setBreakage(on); bBreak.classList.toggle('primary', on); };
-  simRow.append(bSelf, bAccrete, bBreak);
+  // air resistance: drag on every moving body, Magnus curve on spinning balls, the air's own buoyancy
+  const bAir = el('button', '🌬 Air resistance', `mini${sandbox.airResistance ? ' primary' : ''}`);
+  bAir.title = 'Real air (1.225 kg/m³): drag ∝ shape × speed², so foam floats down and spinning balls curve; heavy objects barely notice';
+  bAir.onclick = () => { const on = !sandbox.airResistance; sandbox.setAirResistance(on); bAir.classList.toggle('primary', on); };
+  simRow.append(bSelf, bAccrete, bBreak, bAir);
   const sgField = el('div', '', 'field');
   const sgLabel = el('label', `Pull strength G <b>${sandbox.selfGravityG.toFixed(1)}</b>`);
   const sgRange = el('input');
@@ -599,6 +604,7 @@ function buildPanel(sandbox: Sandbox) {
     bSelf.classList.toggle('primary', sandbox.selfGravity);
     bAccrete.classList.toggle('primary', sandbox.accretion);
     bBreak.classList.toggle('primary', sandbox.breakage);
+    bAir.classList.toggle('primary', sandbox.airResistance);
     const paused = sandbox.isPaused;
     bPause.textContent = paused ? '▶ Resume' : '⏸ Pause';
     bPause.classList.toggle('primary', paused);
@@ -1131,6 +1137,26 @@ function buildToolsSection(panel: HTMLElement, sandbox: Sandbox) {
  * (invisible but still acting). The field list lets you re-select any field — even a hidden one.
  */
 function buildFieldsSection(panel: HTMLElement, sandbox: Sandbox) {
+  // --- force model: Arcade (tuned target-speed steering) vs Realistic (moving air + real drag) ---
+  const modelRow = el('div', '', 'row');
+  const bArcade = el('button', '🎮 Arcade', 'mini chip');
+  const bReal = el('button', '🔬 Realistic', 'mini chip');
+  bArcade.title = 'Fields push everything to their speed alike — predictable and tuned for play';
+  bReal.title = 'Wind/vortex/tornado/turbulence/flow fields are moving AIR: they push by drag on each object’s real shape, so foam flies and steel barely moves. Needs real wind speeds (a gale is 20–30 m/s, a strong tornado 70+).';
+  const modelHint = el('div', '', 'preview');
+  const syncModel = () => {
+    const real = sandbox.fieldModel === 'realistic';
+    bArcade.classList.toggle('on', !real); bReal.classList.toggle('on', real);
+    modelHint.innerHTML = real
+      ? 'Flows are <b>moving air</b> — force = ½ρ·Cd·A·v² on each shape. Try Foam, and gale-force speeds.'
+      : 'Fields steer objects to their <b>speed</b>, whatever they weigh.';
+  };
+  bArcade.onclick = () => { sandbox.setFieldModel('arcade'); syncModel(); };
+  bReal.onclick = () => { sandbox.setFieldModel('realistic'); syncModel(); };
+  modelRow.append(bArcade, bReal);
+  panel.append(modelRow, modelHint);
+  syncModel();
+
   const addRow = el('div', '', 'row wrap');
   for (const k of Object.keys(FIELD_INFO) as FieldKind[]) {
     const b = el('button', FIELD_INFO[k].label, 'mini');
@@ -1296,6 +1322,30 @@ function buildFieldsSection(panel: HTMLElement, sandbox: Sandbox) {
   makeFloating(lib, 'header');
   bMore.onclick = () => lib.classList.remove('hidden');
 
+  // liquid tanks: what the liquid is (density + viscosity + look), and its waves / current
+  const fluidRow = el('div', '', 'row wrap');
+  const fluidBtns: Record<string, HTMLButtonElement> = {};
+  for (const [key, p] of Object.entries(FLUID_PRESETS)) {
+    const b = el('button', `<i class="dot" style="background:#${p.color.toString(16).padStart(6, '0')}"></i>${p.label}`, 'mini chip');
+    b.title = `${p.label}: ${Math.round(p.density * 1000)} kg/m³, viscosity ${p.viscosity} Pa·s`;
+    b.onclick = () => { const r = sandbox.activeField; if (r) sandbox.setFluidProps(r, { preset: key }); };
+    fluidBtns[key] = b;
+    fluidRow.append(b);
+  }
+  const fluidNums = el('div', '', 'row nums');
+  const waveIn = numInput(0, 'Wave height (amplitude, m) — floats bob and drift with the swell');
+  const lambdaIn = numInput(8, 'Wavelength (m) — longer waves travel faster and bob slower: T = √(2πλ/g)');
+  const currentIn = numInput(0, 'Current (m/s) along the tank’s local X — aim it with R');
+  const viscIn = numInput(0.001, 'Viscosity (Pa·s): water 0.001, oil ~0.1, honey ~10');
+  fluidNums.append(labeled('waves m', waveIn), labeled('λ m', lambdaIn), labeled('current', currentIn), labeled('visc Pa·s', viscIn));
+  const fluidNum = (key: 'waves' | 'wavelength' | 'current' | 'viscosity', input: HTMLInputElement) => {
+    input.oninput = () => {
+      const r = sandbox.activeField; const v = parseFloat(input.value);
+      if (r && Number.isFinite(v)) sandbox.setFluidProps(r, { [key]: key === 'wavelength' ? Math.max(v, 0.5) : Math.max(v, 0) });
+    };
+  };
+  fluidNum('waves', waveIn); fluidNum('wavelength', lambdaIn); fluidNum('current', currentIn); fluidNum('viscosity', viscIn);
+
   const strRow = el('div', '', 'row');
   const sIn = numInput(1, 'This field’s own strength');
   const strWrap = labeled('strength', sIn);
@@ -1317,7 +1367,7 @@ function buildFieldsSection(panel: HTMLElement, sandbox: Sandbox) {
   const bCancel = el('button', 'Cancel', 'mini');
   const bDelete = el('button', 'Delete field', 'danger');
   btns.append(bHide, bFit, bReverse, bSole, bPlace, bCancel, bDelete);
-  editor.append(title, shapeRow, sizeRow, pathRow, pathNums, pathLift, customBox, strRow, hint, btns);
+  editor.append(title, shapeRow, sizeRow, pathRow, pathNums, pathLift, customBox, fluidRow, fluidNums, strRow, hint, btns);
   panel.append(editor);
 
   const info = el('div', '', 'preview');
@@ -1410,6 +1460,16 @@ function buildFieldsSection(panel: HTMLElement, sandbox: Sandbox) {
     pathLift.classList.toggle('hidden', !isPath);
     liftBtn.classList.toggle('primary', !!rec.field.lift);
     if (!isPath) customBox.classList.add('hidden'); // never leave the equation editor up on a non-path
+    const isFluid = rec.field.kind === 'fluid';
+    fluidRow.classList.toggle('hidden', !isFluid);
+    fluidNums.classList.toggle('hidden', !isFluid);
+    if (isFluid) {
+      const fl = rec.field.fluid;
+      for (const key of Object.keys(fluidBtns)) fluidBtns[key].classList.toggle('on', fl?.preset === key);
+      const sync = (input: HTMLInputElement, v: number | undefined) => { if (document.activeElement !== input) input.value = String(+(v ?? 0).toFixed(4)); };
+      sync(waveIn, fl?.waves); sync(lambdaIn, fl?.wavelength); sync(currentIn, fl?.current); sync(viscIn, fl?.viscosity);
+    }
+    syncModel();
     (strWrap.firstChild as Text).textContent = isPath ? 'flow m/s'
       : rec.field.kind === 'gravitywell' ? 'mass'
         : rec.field.kind === 'magnetic' ? 'turn rate'
