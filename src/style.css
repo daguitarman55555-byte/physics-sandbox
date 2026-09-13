@@ -273,6 +273,52 @@ button.more { color: var(--accent-ink); }
   font-variant-numeric: tabular-nums; white-space: nowrap; }
 #forces .dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; margin-right: 6px; }
 
+/* dev mode window — analysis readouts + the real-world lab */
+#devpanel {
+  position: fixed; top: 14px; left: 50%; transform: translateX(-50%); width: 400px; height: min(720px, 86vh);
+  background: var(--panel); border: 1px solid var(--border); border-radius: 12px;
+  box-shadow: 0 12px 34px rgba(0,0,0,.5); z-index: 50; display: flex; flex-direction: column;
+  resize: both; overflow: hidden; min-width: 300px; min-height: 240px; font-size: 12px;
+}
+#devpanel[style*="left"] { transform: none; }
+#devpanel header {
+  display: flex; justify-content: space-between; align-items: center; padding: 8px 8px 6px 12px;
+  user-select: none; touch-action: none; cursor: grab; font-family: var(--mono); font-size: 10.5px;
+  letter-spacing: .12em; text-transform: uppercase; color: var(--text-2); font-weight: 600; flex: 0 0 auto;
+}
+#devpanel header button { flex: 0 0 auto; padding: 0 8px; font-size: 15px; line-height: 20px; border-radius: 6px; }
+#devpanel .dv-tabs { display: flex; gap: 6px; padding: 0 12px 8px; flex: 0 0 auto; }
+#devpanel .dv-body { overflow-y: auto; padding: 0 12px 12px; flex: 1 1 auto; }
+#devpanel .dv-body::-webkit-scrollbar { width: 8px; }
+#devpanel .dv-body::-webkit-scrollbar-thumb { background: var(--border); border-radius: 8px; }
+#devpanel .dv-page { display: flex; flex-direction: column; gap: 6px; }
+#devpanel .dv-h { font-family: var(--mono); font-size: 9.5px; letter-spacing: .1em; text-transform: uppercase;
+  color: var(--muted); font-weight: 600; margin-top: 8px; padding-top: 6px; border-top: 1px solid var(--border); }
+#devpanel .dv-kv > div, #devpanel .dv-forces > div { display: flex; justify-content: space-between; gap: 10px; padding: 1.5px 0; color: var(--text-2); }
+#devpanel .dv-kv b, #devpanel .dv-forces b { color: var(--text); font-family: var(--mono); font-size: 11px; font-variant-numeric: tabular-nums; text-align: right; }
+#devpanel .dv-forces span { display: flex; align-items: center; }
+#devpanel .dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; margin-right: 6px; flex: 0 0 auto; }
+#devpanel .dv-note { font-size: 11.5px; color: var(--text-2); line-height: 1.45; }
+#devpanel .dv-spark { width: 100%; height: 44px; background: #0d0f16; border: 1px solid var(--border); border-radius: 6px; }
+#devpanel .dv-bar { display: grid; grid-template-columns: 112px 1fr 52px; align-items: center; gap: 8px; color: var(--text-2); font-size: 11px; }
+#devpanel .dv-bar i { display: block; height: 7px; background: var(--accent); border-radius: 4px; min-width: 1px; }
+#devpanel .dv-bar.tot i { background: #c9bb3a; }
+#devpanel .dv-bar b { font-family: var(--mono); font-size: 11px; color: var(--text); text-align: right; }
+#devpanel .dv-exp { border: 1px solid var(--border); border-radius: 8px; padding: 6px 8px; background: var(--panel-2); }
+#devpanel .dv-exp-head { display: flex; align-items: center; gap: 8px; }
+#devpanel .dv-exp-head b { flex: 1; color: var(--text); font-weight: 600; }
+#devpanel button.dv-run { flex: 0 0 auto; padding: 2px 9px; }
+#devpanel .dv-law { font-family: var(--mono); font-size: 10.5px; color: var(--muted); margin-top: 2px; }
+#devpanel .dv-res { font-size: 11px; color: var(--text-2); margin-top: 3px; line-height: 1.45; }
+#devpanel .dv-res b { font-family: var(--mono); color: var(--text); }
+#devpanel .dv-res span { color: var(--muted); }
+#devpanel .dv-badge { font-family: var(--mono); font-size: 9.5px; font-weight: 700; padding: 1px 6px; border-radius: 4px;
+  border: 1px solid var(--border); color: var(--muted); min-width: 40px; text-align: center; }
+#devpanel .dv-badge.st-pass { color: #06101f; background: #4fb89a; border-color: #4fb89a; }
+#devpanel .dv-badge.st-warn { color: #06101f; background: #e0b24f; border-color: #e0b24f; }
+#devpanel .dv-badge.st-fail { color: #fff; background: #c8473a; border-color: #c8473a; }
+#devpanel b.st-pass { color: #4fb89a !important; } #devpanel b.st-warn { color: #e0b24f !important; } #devpanel b.st-fail { color: #e2795a !important; }
+
 #hint {
   position: fixed; bottom: 14px; left: 50%; transform: translateX(-50%); font-size: 12px;
   color: var(--muted); background: rgba(18,20,28,.7); border: 1px solid var(--border);

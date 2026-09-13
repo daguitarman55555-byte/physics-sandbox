@@ -9,8 +9,9 @@ import katex from 'katex';
 import 'katex/dist/katex.min.css';
 import { MathfieldElement } from 'mathlive';
 import 'mathlive/fonts.css';
-import type { Entity, Sandbox, FieldRec } from './sandbox';
+import { SI_MASS, type Entity, type Sandbox, type FieldRec } from './sandbox';
 import { DrawPad } from './drawpad';
+import { buildDevMode } from './devmode';
 import { buildRevolution, buildParamCurve, buildParamSurface, REV_PRESETS, CURVE_PRESETS, SURFACE_PRESETS } from './systems/shapes';
 import { buildImplicit, IMPLICIT_PRESETS } from './systems/implicit';
 import {
@@ -564,7 +565,13 @@ function buildPanel(sandbox: Sandbox) {
   const bTrails = el('button', '✦ Trails', 'mini primary');
   bTrails.title = 'Draw a fading motion trail behind the selected object';
   bTrails.onclick = () => { const on = !sandbox.trailsEnabled; sandbox.setTrailsEnabled(on); bTrails.classList.toggle('primary', on); };
-  dispRow.append(bHD, bTrails);
+  // dev mode: real-unit readouts, step profiling, conservation ledger, overlays and the real-world lab
+  const bDev = el('button', '🧪 Dev mode', 'mini');
+  bDev.title = 'Analyze the simulation: SI readouts, force breakdown, energy/momentum ledger, overlays, and real-world experiments (key: `)';
+  const dev = buildDevMode(sandbox);
+  dev.onChange = (on) => bDev.classList.toggle('primary', on);
+  bDev.onclick = () => dev.setOn(!dev.on);
+  dispRow.append(bHD, bTrails, bDev);
   worldBody.append(dispRow);
 
   // === scene actions ===
@@ -1541,7 +1548,7 @@ function buildInspector(sandbox: Sandbox) {
     const speed = Math.hypot(v.x, v.y, v.z);
     const spin = Math.hypot(w.x, w.y, w.z);
     const t = e.body.translation();
-    const mass = e.body.mass();
+    const mass = e.body.mass() * SI_MASS; // sim mass is tonnes (density in water-units) → show real kg
     const ke = 0.5 * mass * speed * speed;
     const sizeOrShape = e.kind === 'custom'
       ? prop('volume', `${(e.volume ?? 0).toFixed(2)} m³`)
@@ -1560,10 +1567,10 @@ function buildInspector(sandbox: Sandbox) {
       prop('position', `${t.x.toFixed(1)}, ${t.y.toFixed(1)}, ${t.z.toFixed(1)}`) +
       prop('speed', `${speed.toFixed(2)} m/s`) +
       prop('angular vel', `${spin.toFixed(2)} rad/s`) +
-      prop('mass', `${mass.toFixed(2)} kg`) +
+      prop('mass', mass < 1e4 ? `${mass.toFixed(1)} kg` : `${(mass / 1000).toFixed(2)} t`) +
       prop('material', e.mat.name) +
       sizeOrShape +
-      prop('kinetic E', `${ke.toFixed(1)} J`) +
+      prop('kinetic E', ke < 1e4 ? `${ke.toFixed(1)} J` : `${(ke / 1000).toFixed(2)} kJ`) +
       prop('state', e.body.isSleeping() ? 'asleep' : 'awake');
     // sync the gravity slider to this object (unless the user is mid-drag on it)
     if (document.activeElement !== gravRange) {
@@ -1752,7 +1759,8 @@ function buildForcesView(sandbox: Sandbox) {
     head.textContent = list.length > 1
       ? `forces · #${e.id} · ${list.length}-body system`
       : `forces · #${e.id} ${e.kind}`;
-    const vals = [`${wMag.toFixed(1)} N`, `${fMag.toFixed(1)} N`, `${cMag.toFixed(1)} N`, `${speed.toFixed(2)} m/s`];
+    const N = (simForce: number) => { const n = simForce * SI_MASS; return n < 1e4 ? `${n.toFixed(0)} N` : `${(n / 1000).toFixed(1)} kN`; }; // sim force = kN
+    const vals = [N(wMag), N(fMag), N(cMag), `${speed.toFixed(2)} m/s`];
     legend.innerHTML =
       ARROW_DEFS.map((d, i) => fleg(d.color, d.label, vals[i])).join('') +
       `<div class="frow"><span>contacts</span><b>${countContacts(e)}${e.body.isSleeping() ? ' · asleep' : ''}</b></div>`;

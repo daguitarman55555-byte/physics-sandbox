@@ -129,6 +129,16 @@ interface DockRec {
 /** A force field + its scene marker. `core` is the solid dot: click handle, gizmo anchor, ghost pulse. */
 export interface FieldRec { field: Field; marker: THREE.Object3D; core?: THREE.Object3D }
 
+/** One non-gravity force applied to the dev-tracked body during the last step (sim force units). */
+export interface ForceRec { label: string; color: number; f: THREE.Vector3 }
+
+/** Sections of a physics step that dev mode times (ms, averaged per step). */
+export const DEV_SECTIONS = ['interaction', 'mutual gravity', 'accretion/roche', 'fields & forces', 'world.step', 'impacts', 'bookkeeping'] as const;
+
+/** Sim mass unit = 1000 kg (density is stored in water-units, kg/m³ ÷ 1000), so sim forces are kN and
+ *  sim energies kJ. Multiply by this to show real SI values. */
+export const SI_MASS = 1000;
+
 const FIXED = 1 / 60; // physics timestep — never varies
 const MAX_INSTANCES = 4000;
 const MAX_CATCHUP = 4; // cap steps per frame → smooth slight-slow-motion under load, never a freeze
@@ -246,7 +256,7 @@ const PALETTE = ['#5b8def', '#4fb89a', '#c9bb3a', '#e89948', '#dc4a4a', '#a978e0
 const tiles = (len: number) => Math.max(1, Math.round(len / 2));
 
 export class Sandbox {
-  readonly renderer: THREE.WebGLRenderer;
+  readonly renderer!: THREE.WebGLRenderer; // absent in a headless lab world
   readonly scene: THREE.Scene;
   readonly camera: THREE.PerspectiveCamera;
   readonly controls: OrbitControls;
@@ -314,6 +324,7 @@ export class Sandbox {
   private placeValid = true;
   private axisLock: 'x' | 'y' | 'z' | null = null;
   onFieldChange?: () => void; // UI re-renders the field panel off this
+  onFrame?: (alpha: number) => void; // called every rendered frame after the scene syncs (dev overlays)
   onSceneLoad?: () => void; // UI re-syncs the World sliders/toggles after a scene loads
   private joints: JointRec[] = [];
   private docks: DockRec[] = []; // weld/hinge pairs currently being drawn together (pre-lock)
@@ -358,6 +369,17 @@ export class Sandbox {
   private fpsN = 0;
   gravityY = -9.81;
 
+  // dev mode instrumentation — cheap enough to leave wired; timing only runs while devOn
+  readonly headless: boolean; // a render-less lab world (dev experiments): no renderer, input, or loop
+  devOn = false;
+  userEpoch = 0; // bumped by deliberate one-shot changes (push, blow, gravity, fields…) — the ledger restarts
+  devTrack: Entity | null = null; // body whose per-source force breakdown is recorded each step
+  devForces: ForceRec[] = []; // that breakdown for the LAST step (non-gravity forces we applied)
+  private devForceN = 0;
+  private devTimes = new Float64Array(DEV_SECTIONS.length);
+  private devSteps = 0;
+  private devT = 0;
+
   // scratch
   private _m = new THREE.Matrix4();
   private _p = new THREE.Vector3();
@@ -366,17 +388,25 @@ export class Sandbox {
   private _fieldF = new THREE.Vector3(); // one field's force, summed into _s each step
   private _fieldV = new THREE.Vector3(); // body velocity handed to fields (the vortex needs it)
 
-  constructor(canvas: HTMLCanvasElement) {
+  /**
+   * `headless` builds a LAB sandbox: the same physics, fields, joints and every step system, but no
+   * renderer, no input listeners, no default scene and no loop — dev-mode experiments drive it with
+   * step() so what they measure is exactly the code path the real scene runs.
+   */
+  constructor(canvas: HTMLCanvasElement, opts: { headless?: boolean } = {}) {
+    this.headless = !!opts.headless;
     // --- renderer / scene / camera ---
-    this.renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
-    this.renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
-    this.renderer.setSize(innerWidth, innerHeight);
-    this.renderer.shadowMap.enabled = true;
-    this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
-    // filmic tone mapping: soft highlight roll-off instead of clipping — the single biggest
-    // "looks like a real renderer" switch; exposure re-lifts the mids it compresses
-    this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
-    this.renderer.toneMappingExposure = 1.2;
+    if (!this.headless) {
+      this.renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+      this.renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+      this.renderer.setSize(innerWidth, innerHeight);
+      this.renderer.shadowMap.enabled = true;
+      this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+      // filmic tone mapping: soft highlight roll-off instead of clipping — the single biggest
+      // "looks like a real renderer" switch; exposure re-lifts the mids it compresses
+      this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
+      this.renderer.toneMappingExposure = 1.2;
+    }
 
     this.scene = new THREE.Scene();
     this.scene.background = new THREE.Color('#0a0a0f');
@@ -391,8 +421,10 @@ export class Sandbox {
     this.controls.target.set(0, 2, 0);
     this.controls.maxPolarAngle = Math.PI * 0.495; // don't go under the floor
 
-    this.addLights();
-    this.addGround();
+    if (!this.headless) {
+      this.addLights();
+      this.addGround();
+    }
 
     // --- physics world ---
     this.world = new RAPIER.World({ x: 0, y: this.gravityY, z: 0 });
@@ -429,6 +461,8 @@ export class Sandbox {
     });
     this.scene.add(this.transform.getHelper()); // r169+: the helper is the scene-graph object
 
+    if (this.headless) return; // a lab world starts empty and takes no input
+
     this.buildDefaultScene();
 
     // --- events ---
@@ -438,6 +472,51 @@ export class Sandbox {
     addEventListener('pointerup', this.onPointerUp);
     addEventListener('keydown', this.onKeyDown);
   }
+
+  /** Advance the simulation `n` fixed steps right now (lab experiments; the live scene uses start()). */
+  step(n = 1) {
+    for (let i = 0; i < n; i++) this.stepPhysics();
+  }
+
+  /** Free a headless lab world's WASM memory (the live sandbox lives for the page's lifetime). */
+  dispose() {
+    this.clear();
+    this.clearFields();
+    this.controls.dispose();
+    this.transform.dispose();
+    this.fieldFlow.dispose();
+    this.events.free();
+    this.world.free();
+  }
+
+  /** Per-section step cost (ms, averaged over the steps since the last call), then reset. */
+  consumeDevTiming(): { steps: number; ms: number[] } {
+    const n = this.devSteps;
+    const ms = Array.from(this.devTimes, (t) => (n ? t / n : 0));
+    this.devTimes.fill(0);
+    this.devSteps = 0;
+    return { steps: n, ms };
+  }
+
+  /** Close the running timing section `i` (dev mode only) and start the next. */
+  private devLap(i: number) {
+    const now = performance.now();
+    this.devTimes[i] += now - this.devT;
+    this.devT = now;
+  }
+
+  /** Record a force applied to the dev-tracked body this step. */
+  private devForce(label: string, color: number, x: number, y: number, z: number) {
+    let r = this.devForces[this.devForceN];
+    if (!r) { r = { label, color, f: new THREE.Vector3() }; this.devForces[this.devForceN] = r; }
+    r.label = label; r.color = color; r.f.set(x, y, z);
+    this.devForceN++;
+  }
+
+  /** Physics body count incl. non-entity bodies — handy for lab cleanup assertions. */
+  get bodyCount(): number { return this.world.bodies.len(); }
+  /** Is something the user is doing right now pumping energy into the scene? (dev energy ledger) */
+  get userInputActive(): boolean { return !!this.grab || this.brushActive || this.docks.length > 0 || this.hingeMotor !== 0; }
 
   // ---------------------------------------------------------------- scene setup
   private addLights() {
@@ -889,6 +968,7 @@ export class Sandbox {
    *  (a balloon). Rapier scales world gravity per body; stored on the entity so the well/lift gravity-
    *  suspension math stays correct for it too. */
   setEntityGravityScale(e: Entity, scale: number) {
+    this.userEpoch++; // dev ledger: a deliberate energy/momentum change, not a solver artifact
     e.gravityScale = scale;
     e.body.setGravityScale(scale, true);
     e.body.wakeUp();
@@ -896,6 +976,7 @@ export class Sandbox {
 
   /** Freeze pins a body in place (switches it to a fixed body); calling again thaws it. */
   toggleFreeze(e: Entity) {
+    this.userEpoch++; // dev ledger: a deliberate energy/momentum change, not a solver artifact
     e.frozen = !e.frozen;
     e.body.setBodyType(e.frozen ? RAPIER.RigidBodyType.Fixed : RAPIER.RigidBodyType.Dynamic, true);
     if (!e.frozen) e.body.wakeUp();
@@ -903,6 +984,7 @@ export class Sandbox {
 
   /** Shove a body away from the camera (a quick impulse), scaled by mass for a uniform kick speed. */
   pushEntity(e: Entity) {
+    this.userEpoch++; // dev ledger: a deliberate energy/momentum change, not a solver artifact
     if (e.frozen) return;
     const dir = this.camera.getWorldDirection(this._p).clone();
     dir.y += 0.15; // a touch upward so things pop up rather than plow straight into the floor
@@ -919,6 +1001,7 @@ export class Sandbox {
    * the Brush (a held, continuous drag), this is an instantaneous area burst at the clicked spot.
    */
   private blowAt(point: THREE.Vector3) {
+    this.userEpoch++; // dev ledger: a deliberate energy/momentum change, not a solver artifact
     for (const e of this.entities) {
       if (e.frozen) continue;
       const t = e.body.translation();
@@ -1290,6 +1373,7 @@ export class Sandbox {
   /** Commit the ghost. New field → goes live. Editing → the draft's settings are written back to the
    *  original (the one place the running sim changes). Either way the editor then closes. */
   commitPlace() {
+    this.userEpoch++; // dev ledger: a deliberate energy/momentum change, not a solver artifact
     const rec = this.placing;
     if (!rec || !this.placeValid) return;
     if (this.editingOriginal) {
@@ -1398,6 +1482,7 @@ export class Sandbox {
    * blast — the game-feel trio (flash, wave, shake) that makes an impact read as an impact.
    */
   detonate(field: Field) {
+    this.userEpoch++; // dev ledger: a deliberate energy/momentum change, not a solver artifact
     const c = field.pos;
     for (const e of this.entities) {
       if (e.frozen) continue;
@@ -1509,6 +1594,7 @@ export class Sandbox {
 
   /** Delete one field (the gap that used to force a Clear-all just to fix one mistake). */
   removeField(rec: FieldRec) {
+    this.userEpoch++; // dev ledger: a deliberate energy/momentum change, not a solver artifact
     const i = this.fields.indexOf(rec);
     if (i < 0) return;
     if (this.transform.object === rec.marker) this.transform.detach();
@@ -1522,6 +1608,7 @@ export class Sandbox {
 
   /** This field's own strength (independent of the global multiplier). */
   setFieldStrengthOf(rec: FieldRec, strength: number) {
+    this.userEpoch++; // dev ledger: a deliberate energy/momentum change, not a solver artifact
     rec.field.strength = strength;
     for (const e of this.entities) e.body.wakeUp();
     this.onFieldChange?.();
@@ -1747,6 +1834,7 @@ export class Sandbox {
   }
 
   setFieldStrength(v: number) {
+    this.userEpoch++; // dev ledger: a deliberate energy/momentum change, not a solver artifact
     this.fieldStrength = v;
     for (const e of this.entities) e.body.wakeUp();
   }
@@ -2003,7 +2091,7 @@ export class Sandbox {
       // where they were welded/hinged, so lockJoint locks them exactly there)
       if (a && b) this.lockJoint(a, b, jl.kind as JointKind, this.makeConnectorLine(jl.kind as JointKind));
     }
-    for (const fd of data.fields) this.addFieldFromData(fd);
+    for (const fd of data.fields) this.addField(fd);
 
     if (data.camera) {
       this.camera.position.set(data.camera.pos[0], data.camera.pos[1], data.camera.pos[2]);
@@ -2050,9 +2138,10 @@ export class Sandbox {
     return e;
   }
 
-  /** Rebuild one field from saved data and add it live (marker + registry). Path polylines are
-   *  re-sampled from the stored equations / stroke rather than saved, keeping the file small. */
-  private addFieldFromData(fd: FieldData) {
+  /** Rebuild one field from saved data and add it live (marker + registry) — scene loading and lab
+   *  experiments (no ghost/placement flow). Path polylines are re-sampled from the stored equations /
+   *  stroke rather than saved, keeping the file small. */
+  addField(fd: FieldData): FieldRec {
     const field: Field = {
       id: this.nextFieldId++,
       kind: fd.kind as FieldKind, shape: fd.shape as FieldShape,
@@ -2078,9 +2167,23 @@ export class Sandbox {
     this.tagMarker(rec);
     rec.marker.visible = !field.hidden;
     this.fields.push(rec);
+    return rec;
+  }
+
+  /** Wipe to a pristine, deterministic lab state: empty world, default settings, clock at zero. */
+  resetForLab() {
+    this.clear();
+    this.clearFields();
+    this.events.clear();
+    this.setGravityY(-9.81);
+    this.selfGravityOn = false; this.selfG = 1;
+    this.accretionOn = false; this.breakageOn = false;
+    this.fieldStrength = 1; this.timeScale = 1; this.paused = false;
+    this.tick = 0; this.accreteTick = 0; this.rocheTick = 0;
   }
 
   setGravityY(v: number) {
+    this.userEpoch++; // dev ledger: a deliberate energy/momentum change, not a solver artifact
     this.gravityY = v;
     this.world.gravity = { x: 0, y: v, z: 0 };
     for (const e of this.entities) e.body.wakeUp();
@@ -2134,6 +2237,7 @@ export class Sandbox {
       if (this.paused && this.grab) this.dragWhilePaused();
       const alpha = this.acc / FIXED;
       this.syncRender(alpha);
+      this.onFrame?.(alpha); // render-side add-ons (dev overlays) — after sync, before the draw
       this.controls.update();
       if (this.shocks.length) this.stepShocks(now);
       // camera shake: a decaying random offset applied only for the render, then removed — the
@@ -2181,6 +2285,7 @@ export class Sandbox {
       const a2 = ax[i] * ax[i] + ay[i] * ay[i] + az[i] * az[i];
       if (a2 < 1e-8) continue; // don't wake a distant sleeper over a femto-pull
       e.body.applyImpulse({ x: ax[i] * mass * FIXED, y: ay[i] * mass * FIXED, z: az[i] * mass * FIXED }, true);
+      if (e === this.devTrack) this.devForce('mutual gravity', 0xe0a04f, ax[i] * mass, ay[i] * mass, az[i] * mass);
     }
   }
 
@@ -3158,6 +3263,10 @@ export class Sandbox {
 
   private stepPhysics() {
     this.tick++;
+    const dev = this.devOn;
+    if (dev) this.devT = performance.now();
+    this.devForceN = 0;
+    const track = this.devTrack;
     // save previous transforms for interpolation
     for (const e of this.entities) { e.prevPos.copy(e.currPos); e.prevQuat.copy(e.currQuat); }
     const lost: Entity[] = []; // entities that fell off the world this step — removed after the loop
@@ -3191,9 +3300,11 @@ export class Sandbox {
 
     // force brush: while the user holds + drags the brush, shove nearby bodies each step
     if (this.brushActive) this.applyBrush();
+    if (dev) this.devLap(0);
 
     // mutual gravity: every body pulls every other (Barnes-Hut) — rubble clumps into planets
     if (this.selfGravityOn && this.entities.length > 1) this.stepSelfGravity();
+    if (dev) this.devLap(1);
 
     // accretion: slow-touching bodies fuse into one bigger sphere (checked at 6 Hz, a few per
     // check). Independent of mutual gravity — a resting pile under plain world gravity fuses too.
@@ -3207,6 +3318,7 @@ export class Sandbox {
       this.rocheTick = 0;
       this.stepRoche();
     }
+    if (dev) this.devLap(2);
 
     // force fields: sum each field's force on every awake dynamic body, apply as impulse = F·dt
     if (this.fields.length) {
@@ -3225,10 +3337,12 @@ export class Sandbox {
             // buoyancy needs the body's volume + radius + world gravity, which fieldForce doesn't take
             fluidForce(field, this._p, this._fieldV, mass, this.volumeOf(e), e.size, this.gravityY, this.fieldStrength, this._fieldF);
             this._s.add(this._fieldF);
+            if (e === track && this._fieldF.lengthSq() > 0) this.devForce(`${FIELD_INFO[field.kind].label} #${field.id}`, FIELD_INFO[field.kind].color, this._fieldF.x, this._fieldF.y, this._fieldF.z);
             continue;
           }
           fieldForce(field, this._p, this._fieldV, mass, this.fieldStrength, this._fieldF, simT);
           this._s.add(this._fieldF);
+          if (e === track && this._fieldF.lengthSq() > 0) this.devForce(`${FIELD_INFO[field.kind].label} #${field.id}`, FIELD_INFO[field.kind].color, this._fieldF.x, this._fieldF.y, this._fieldF.z);
           if (field.kind === 'gravitywell') {
             const fi = fieldInfluence(field, this._p);
             // a SOLE-gravity well suspends world gravity FULLY anywhere inside its region (binary,
@@ -3247,19 +3361,26 @@ export class Sandbox {
         const suspend = liftInf * Math.min(Math.max(this.fieldStrength, 0), 1);
         // cancel the body's ACTUAL felt gravity (world gravity × its per-object scale), so a
         // weightless/floating object isn't wrongly shoved when it enters a well or lift tube
-        if (suspend > 0) this._s.y += -this.gravityY * mass * suspend * (e.gravityScale ?? 1);
+        if (suspend > 0) {
+          const up = -this.gravityY * mass * suspend * (e.gravityScale ?? 1);
+          this._s.y += up;
+          if (e === track) this.devForce('gravity suspension', 0x8a93a6, 0, up, 0);
+        }
         if (this._s.x || this._s.y || this._s.z) {
           e.body.applyImpulse({ x: this._s.x * FIXED, y: this._s.y * FIXED, z: this._s.z * FIXED }, true);
         }
       }
     }
+    if (dev) this.devLap(3);
 
     this.world.step(this.events);
+    if (dev) this.devLap(4);
 
     // impact resolution (capture / shatter / crater) the step contacts happen — in zero-G a
     // thrown body bounces off within a step or two, far between the 6 Hz scans
     if (this.accretionOn || this.breakageOn) this.drainContactEvents();
     else this.events.clear();
+    if (dev) this.devLap(5);
 
     for (const e of this.entities) {
       // hard speed cap: a stray deep-overlap contact can otherwise inject unbounded energy into a
@@ -3300,6 +3421,8 @@ export class Sandbox {
       e.lastVel.set(vx, vy, vz);
     }
     for (const e of lost) this.deleteEntity(e);
+    this.devForces.length = this.devForceN; // drop last step's stale records
+    if (dev) { this.devLap(6); this.devSteps++; }
   }
 
   private syncRender(alpha: number) {
@@ -3620,6 +3743,7 @@ export class Sandbox {
 
   /** Undo everything a grab set up: joint, kinematic anchor, damping, camera control. */
   private releaseGrab() {
+    this.userEpoch++; // dev ledger: a deliberate energy/momentum change, not a solver artifact
     if (!this.grab) return;
     this.world.removeImpulseJoint(this.grab.joint, true);
     this.world.removeRigidBody(this.grab.kin);
@@ -3679,6 +3803,7 @@ export class Sandbox {
       const v = e.body.linvel();
       const k = e.body.mass() * BRUSH_RESPONSE * falloff * FIXED;
       e.body.applyImpulse({ x: (tx - v.x) * k, y: (ty - v.y) * k, z: (tz - v.z) * k }, true);
+      if (e === this.devTrack) this.devForce('force brush', 0xc9bb3a, (tx - v.x) * k / FIXED, (ty - v.y) * k / FIXED, (tz - v.z) * k / FIXED);
       e.body.wakeUp();
     }
   }
