@@ -56,6 +56,7 @@ export class FieldFlow {
   private viz = new Map<number, Viz>();
   private dot = softDot();
   private last = performance.now();
+  private simTime = 0; // the sim clock, so time-varying fields (turbulence, tornado) show their real pattern
 
   private _p = new THREE.Vector3();
   private _v = new THREE.Vector3();
@@ -69,7 +70,8 @@ export class FieldFlow {
   /** Advance every field's tracer cloud one frame. Pass the live fields plus (optionally) the ghost —
    *  identify the ghost via `ghostId` and its cloud renders dimmed, so a mere preview never reads as a
    *  force that's already live. */
-  update(fields: Field[], gain: number, ghostId = -1) {
+  update(fields: Field[], gain: number, ghostId = -1, simTime = 0) {
+    this.simTime = simTime;
     const now = performance.now();
     const dt = Math.min((now - this.last) / 1000, 0.05); // clamp so a hitch doesn't fling tracers
     this.last = now;
@@ -134,7 +136,7 @@ export class FieldFlow {
       const j = i * 3;
       this._p.set(pos[j], pos[j + 1], pos[j + 2]);
       this._v.set(vel[j], vel[j + 1], vel[j + 2]);
-      fieldForce(field, this._p, this._v, 1, gain, this._f); // force on a unit-mass tracer (truthful)
+      fieldForce(field, this._p, this._v, 1, gain, this._f, this.simTime); // force on a unit-mass tracer (truthful)
       this._v.addScaledVector(this._f, dt); // integrate (mass 1 → force is acceleration)
       this._v.multiplyScalar(DAMP); // gentle drag: keeps orbits tidy, stops escapees coasting forever
       const sp = this._v.length();

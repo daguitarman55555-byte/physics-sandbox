@@ -236,6 +236,26 @@ const _tv = new THREE.Vector3(); // target velocity being assembled
 
 const smoothstep01 = (t: number) => t * t * (3 - 2 * t);
 
+// Bounding radius of a sampled flow curve (max |point| in its local frame), cached per polyline array —
+// every re-sample/re-scale makes a NEW array, so the cache can never go stale.
+const _pathBound = new WeakMap<Float32Array, number>();
+function pathBound(pts: Float32Array): number {
+  let b = _pathBound.get(pts);
+  if (b === undefined) {
+    b = 0;
+    for (let i = 0; i < pts.length; i += 3) b = Math.max(b, Math.hypot(pts[i], pts[i + 1], pts[i + 2]));
+    _pathBound.set(pts, b);
+  }
+  return b;
+}
+/** Cheap reject before the per-sample nearest-point scan: a body farther from the curve's centre than its
+ *  bounding radius + the tube radius can't be inside the tube. Without it, every body in the scene (even
+ *  one 400 m away) paid a full 128-sample scan per path field per step — twice with Lift on. */
+const outsidePathBound = (pts: Float32Array, localPos: THREE.Vector3, R: number) => {
+  const b = pathBound(pts) + R;
+  return localPos.lengthSq() > b * b;
+};
+
 /**
  * How strongly a PATH field's tube acts at `bodyPos`: 1 near the centreline, easing to 0 at the tube
  * wall (same smoothstep shell as the point fields), 0 outside. Mirrors the `inf` that `pathForce`
@@ -246,6 +266,7 @@ export function pathInfluence(field: Field, bodyPos: THREE.Vector3): number {
   if (!path) return 0;
   const pts = path.pts;
   _pl.copy(bodyPos).sub(field.pos).applyQuaternion(_iq.copy(field.quat).invert());
+  if (outsidePathBound(pts, _pl, Math.max(field.size.x, 0.5))) return 0;
   let bd2 = Infinity;
   for (let i = 0; i < pts.length; i += 3) {
     const dx = _pl.x - pts[i], dy = _pl.y - pts[i + 1], dz = _pl.z - pts[i + 2];
@@ -293,14 +314,17 @@ export function fieldInfluence(field: Field, bodyPos: THREE.Vector3): number {
  */
 export function fieldForce(
   field: Field, bodyPos: THREE.Vector3, vel: THREE.Vector3, mass: number, gain: number, out: THREE.Vector3,
+  t = 0, // SIMULATION time (s) — drives the time-varying kinds (turbulence eddies, tornado sub-vortices).
+  //        It used to read the wall clock, so those patterns kept churning at full speed in slow-mo,
+  //        jumped ahead after a pause, and made identical runs diverge (no deterministic replay).
 ): THREE.Vector3 {
   out.set(0, 0, 0);
   if (field.kind === 'explosion') return out; // one-shot: it detonates on Place, never acts as a field
   if (field.kind === 'fluid') return out; // buoyancy needs the body's volume — the Sandbox computes it
   if (field.kind === 'path') return field.path ? pathForce(field, bodyPos, vel, mass, gain, out) : out;
   if (field.kind === 'gravitywell') return wellForce(field, bodyPos, vel, mass, gain, out);
-  if (field.kind === 'turbulence') return turbulenceForce(field, bodyPos, vel, mass, gain, out);
-  if (field.kind === 'tornado') return tornadoForce(field, bodyPos, vel, mass, gain, out);
+  if (field.kind === 'turbulence') return turbulenceForce(field, bodyPos, vel, mass, gain, out, t);
+  if (field.kind === 'tornado') return tornadoForce(field, bodyPos, vel, mass, gain, out, t);
   const inf = fieldInfluence(field, bodyPos);
   if (inf <= 0) return out;
   const speed = field.strength * gain; // target speed (m/s) — SAME meaning for every kind
@@ -369,20 +393,45 @@ export function fluidForce(
   gravityY: number, gain: number, out: THREE.Vector3,
 ): THREE.Vector3 {
   out.set(0, 0, 0);
-  const sz = field.size;
-  const dx = bodyPos.x - field.pos.x, dz = bodyPos.z - field.pos.z;
-  const inFootprint = field.shape === 'box'
-    ? Math.abs(dx) < sz.x + radius && Math.abs(dz) < sz.z + radius
-    : Math.hypot(dx, dz) < sz.x + radius; // sphere / cylinder footprint
-  if (!inFootprint) return out;
-  const surfaceY = field.pos.y + (field.shape === 'sphere' ? sz.x : sz.y); // region top = water surface
-  const sub = Math.max(0, Math.min(1, (surfaceY - (bodyPos.y - radius)) / (2 * radius))); // submerged fraction
+  const sub = fluidSubmerged(field, bodyPos, radius);
   if (sub <= 0) return out;
   const fluidDensity = field.strength * gain; // water-units (1 = water); >1 = a denser fluid (mercury)
   out.y = fluidDensity * -gravityY * volume * sub; // Archimedes' upward force ∝ displaced volume
   const c = FLUID_DRAG * mass * sub; // fluid drag: mass-scaled so deceleration is mass-independent
   out.x -= vel.x * c; out.y -= vel.y * c; out.z -= vel.z * c;
   return out;
+}
+
+/**
+ * Fraction (0…1) of a body's vertical extent [y−r, y+r] that lies inside a fluid region's WATER column
+ * [bottom, surface]. The column is bounded on BOTH ends: a body under a raised tank is outside it (this
+ * used to check only the surface, so anything anywhere below an elevated tank felt full buoyancy and got
+ * sucked up into it). The footprint is tested in the region's own horizontal axes, so a yawed tank's
+ * outline is honoured. A spherical "drop" of fluid has a surface at its top and a bottom that follows
+ * the sphere at the body's horizontal offset.
+ */
+export function fluidSubmerged(field: Field, bodyPos: THREE.Vector3, radius: number): number {
+  const sz = field.size;
+  _d.copy(bodyPos).sub(field.pos);
+  let surfaceY: number, bottomY: number;
+  if (field.shape === 'sphere') {
+    const rh = Math.hypot(_d.x, _d.z);
+    if (rh >= sz.x + radius) return 0;
+    const inner = Math.min(rh, sz.x);
+    surfaceY = field.pos.y + sz.x;
+    bottomY = field.pos.y - Math.sqrt(Math.max(0, sz.x * sz.x - inner * inner));
+  } else {
+    _d.applyQuaternion(_iq.copy(field.quat).invert()); // footprint in the tank's own axes
+    const inside = field.shape === 'box'
+      ? Math.abs(_d.x) < sz.x + radius && Math.abs(_d.z) < sz.z + radius
+      : Math.hypot(_d.x, _d.z) < sz.x + radius;
+    if (!inside) return 0;
+    surfaceY = field.pos.y + sz.y; // water finds its level: the surface is world-horizontal
+    bottomY = field.pos.y - sz.y;
+  }
+  const r = Math.max(radius, 1e-3);
+  const overlap = Math.min(bodyPos.y + r, surfaceY) - Math.max(bodyPos.y - r, bottomY);
+  return overlap <= 0 ? 0 : Math.min(1, overlap / (2 * r));
 }
 
 /**
@@ -438,7 +487,7 @@ const TORNADO_SUBV_RATE = 2.4; // rad/s — how fast they orbit the main axis
  * `dir` mirrors the swirl handedness; negative strength reverses swirl and blows debris outward.
  */
 function tornadoForce(
-  field: Field, bodyPos: THREE.Vector3, vel: THREE.Vector3, mass: number, gain: number, out: THREE.Vector3,
+  field: Field, bodyPos: THREE.Vector3, vel: THREE.Vector3, mass: number, gain: number, out: THREE.Vector3, tSec: number,
 ): THREE.Vector3 {
   const inf = fieldInfluence(field, bodyPos);
   if (inf <= 0) return out;
@@ -464,7 +513,6 @@ function tornadoForce(
   // into one rotating chain. The snap gain is soft (1.5, was 3) for the same reason — a hard pin
   // onto the exact cone radius put every body on the same rail.
   const theta = Math.atan2(_d.z, _d.x);
-  const tSec = typeof performance !== 'undefined' ? performance.now() * 0.001 : 0;
   // TWO incommensurate, counter-traveling waves. A single traveling wave has equilibrium azimuths
   // that co-rotate with it, and bodies PHASE-LOCK onto them — they surf the wave, which re-formed
   // the rotating line/arms it was supposed to break up (reported twice). With two waves at different
@@ -605,11 +653,11 @@ function curlNoise(x: number, y: number, z: number, t: number, out: THREE.Vector
  * drift speed and it's mass-independent; confined + eased by the region influence like everything else.
  */
 function turbulenceForce(
-  field: Field, bodyPos: THREE.Vector3, vel: THREE.Vector3, mass: number, gain: number, out: THREE.Vector3,
+  field: Field, bodyPos: THREE.Vector3, vel: THREE.Vector3, mass: number, gain: number, out: THREE.Vector3, tSec: number,
 ): THREE.Vector3 {
   const inf = fieldInfluence(field, bodyPos);
   if (inf <= 0) return out;
-  const t = (typeof performance !== 'undefined' ? performance.now() * 0.001 : 0) * TURB_TIMESCALE;
+  const t = tSec * TURB_TIMESCALE;
   curlNoise(bodyPos.x * TURB_FREQ, bodyPos.y * TURB_FREQ, bodyPos.z * TURB_FREQ, t, _tv);
   _tv.multiplyScalar(field.strength * gain);
   return out.set(_tv.x - vel.x, _tv.y - vel.y, _tv.z - vel.z).multiplyScalar(mass * TURB_RESPONSE * inf);
@@ -627,6 +675,7 @@ function pathForce(
   const path = field.path!;
   const pts = path.pts, tans = path.tans;
   _pl.copy(bodyPos).sub(field.pos).applyQuaternion(_iq.copy(field.quat).invert()); // into the curve's frame
+  if (outsidePathBound(pts, _pl, Math.max(field.size.x, 0.5))) return out;
   // nearest sample on the polyline
   let bi = 0, bd2 = Infinity;
   for (let i = 0; i < pts.length; i += 3) {

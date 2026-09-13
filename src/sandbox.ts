@@ -2103,6 +2103,8 @@ export class Sandbox {
   setBreakage(on: boolean) { this.breakageOn = on; }
   get skinDetail() { return skinDetailHigh(); }
   setSkinDetail(hi: boolean) { setSkinDetailFlag(hi); }
+  /** Simulation clock (s): fixed steps taken × dt. Pauses with the sim and scales with slow-mo. */
+  get simTime(): number { return this.tick * FIXED; }
   get isPaused() { return this.paused; }
   setPaused(p: boolean) { this.paused = p; }
   get timeScaleValue() { return this.timeScale; }
@@ -3208,6 +3210,7 @@ export class Sandbox {
 
     // force fields: sum each field's force on every awake dynamic body, apply as impulse = F·dt
     if (this.fields.length) {
+      const simT = this.simTime; // fields vary with SIMULATION time — pause/slow-mo/replay stay exact
       for (const e of this.entities) {
         if (e.frozen) continue;
         const t = e.body.translation();
@@ -3224,7 +3227,7 @@ export class Sandbox {
             this._s.add(this._fieldF);
             continue;
           }
-          fieldForce(field, this._p, this._fieldV, mass, this.fieldStrength, this._fieldF);
+          fieldForce(field, this._p, this._fieldV, mass, this.fieldStrength, this._fieldF, simT);
           this._s.add(this._fieldF);
           if (field.kind === 'gravitywell') {
             const fi = fieldInfluence(field, this._p);
@@ -3376,7 +3379,7 @@ export class Sandbox {
     const noFlow = (f: Field) => f.kind === 'explosion' || f.kind === 'fluid';
     for (const r of this.fields) if (r !== this.editingOriginal && !noFlow(r.field)) this._flowList.push(r.field);
     if (this.placing && !noFlow(this.placing.field)) this._flowList.push(this.placing.field);
-    this.fieldFlow.update(this._flowList, this.fieldStrength, this.placing?.field.id ?? -1);
+    this.fieldFlow.update(this._flowList, this.fieldStrength, this.placing?.field.id ?? -1, this.simTime + alpha * FIXED);
 
     this.updateTrail(selSeen ? this._selPos : null);
   }
