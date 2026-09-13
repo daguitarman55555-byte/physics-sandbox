@@ -14,7 +14,7 @@
  */
 import * as THREE from 'three';
 import RAPIER from '@dimforge/rapier3d-compat';
-import { Sandbox, type Entity } from '../sandbox';
+import { Sandbox, setContactRules, type Entity } from '../sandbox';
 import { PRESETS, type Material } from './materials';
 import { SURFACE_PRESETS } from './shapes';
 import type { FieldData } from './persistence';
@@ -88,7 +88,7 @@ export class LabCtx {
   fixedCuboid(pos: Vec3, half: Vec3, quat: THREE.Quaternion, friction: number, restitution = 0) {
     const b = this.S.world.createRigidBody(RAPIER.RigidBodyDesc.fixed()
       .setTranslation(...pos).setRotation({ x: quat.x, y: quat.y, z: quat.z, w: quat.w }));
-    this.S.world.createCollider(RAPIER.ColliderDesc.cuboid(...half).setFriction(friction).setRestitution(restitution), b);
+    setContactRules(this.S.world.createCollider(RAPIER.ColliderDesc.cuboid(...half).setFriction(friction).setRestitution(restitution), b));
     this.extra.push(b);
     return b;
   }
@@ -246,7 +246,7 @@ export const EXPERIMENTS: Experiment[] = [
     },
   },
   {
-    id: 'ice-slide', group: 'Contacts', name: 'Ice sliding on the floor', law: 'a = μ_ice·g (μ = 0.05)', tolPct: 10,
+    id: 'ice-slide', group: 'Contacts', name: 'Ice sliding on the floor', law: 'a = μ·g, ice on concrete μ ≈ 0.1–0.2', tolPct: 10,
     run: (c) => {
       const ice = preset('ice');
       const e = c.box([0, 0.5, 0], 0.5, ice);
@@ -255,7 +255,8 @@ export const EXPERIMENTS: Experiment[] = [
       const n = 18;
       c.S.step(n);
       const a = (5 - e.body.linvel().x) / (n * DT);
-      return { measured: a, expected: ice.friction * G, unit: 'm/s²', detail: 'deceleration of an ice block pushed at 5 m/s (pair friction = the slippery surface)' };
+      const mu = Math.sqrt(ice.friction * 0.7); // ice 0.05 on the 0.7 floor → 0.19
+      return { measured: a, expected: mu * G, unit: 'm/s²', detail: `deceleration of an ice block pushed at 5 m/s — pair μ √(0.05·0.7) = ${mu.toFixed(3)}` };
     },
   },
   {
@@ -470,7 +471,7 @@ export const EXPERIMENTS: Experiment[] = [
       c.field({ kind: 'wind', shape: 'box', pos: [0, 10, 0], size: [20, 20, 20], strength: 8 });
       const e = c.sphere([-8, 10, 0], 0.4, c.mat({}));
       c.S.step(60);
-      return { measured: e.body.linvel().x, expected: 8 * (1 - (1 - 5 * DT) ** 60), unit: 'm/s', detail: 'velocity-target steering (response 5/s) after 1 s — the arcade semantics' };
+      return { measured: e.body.linvel().x, expected: 8 * (1 - Math.exp(-5)), unit: 'm/s', detail: 'velocity-target steering v = u(1 − e^(−5t)) after 1 s — the arcade semantics' };
     },
   },
   // ------------------------------------------------------------------ conservation through emergent systems

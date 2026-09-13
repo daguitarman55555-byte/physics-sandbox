@@ -218,7 +218,18 @@ function planeNormal(pts: Float32Array, n: number, out: THREE.Vector3): boolean 
 }
 
 const RESPONSE = 5; // how hard any field steers a body toward its target velocity (1/s) — uniform
-const DRAG_MAX = 50; // cap on a drag zone's damping rate (1/s) so rate·dt stays < 1 (no overshoot)
+const DRAG_MAX = 1000; // sanity cap on a drag zone's damping rate (1/s); the exact decay can't overshoot
+/** The physics step the field forces are integrated over (the Sandbox's FIXED). Velocity-relaxation and
+ *  rotation forces are built so one step lands EXACTLY on the continuous solution — the dev lab caught
+ *  the explicit forms drifting: a drag zone decayed 3.4% too fast per second, and a magnetic field
+ *  pumped 37% extra speed into a body over three circles (explicit v×B spirals outward). */
+export const FIELD_DT = 1 / 60;
+
+/** Force that relaxes `vel` toward `target` by the exact exponential step v ← t + (v−t)·e^(−rate·dt). */
+function steer(out: THREE.Vector3, target: THREE.Vector3, vel: THREE.Vector3, mass: number, rate: number): THREE.Vector3 {
+  const k = (mass * (1 - Math.exp(-rate * FIELD_DT))) / FIELD_DT;
+  return out.set((target.x - vel.x) * k, (target.y - vel.y) * k, (target.z - vel.z) * k);
+}
 const FLUID_DRAG = 3; // linear damping (1/s) a submerged body feels — water resists motion so things
 //                       settle at the surface and bob instead of ringing forever
 const SOFT_EDGE = 0.55; // full strength inside this fraction of the region; smoothstep to 0 by the edge
@@ -331,18 +342,28 @@ export function fieldForce(
 
   if (field.kind === 'drag') {
     // damp velocity toward zero (a slow-mo / terminal-velocity pocket). `strength` is the damping rate
-    // (1/s); the resulting Δv per step is rate·dt — capped below 1 so it can never overshoot into
-    // reverse. Mass cancels in the deceleration, so every body slows at the same rate.
+    // k (1/s): v(t) = v₀·e^(−kt), applied as the exact per-step decay, so it can never overshoot into
+    // reverse at any rate. Mass cancels in the deceleration, so every body slows at the same rate.
     const c = Math.min(field.strength * gain, DRAG_MAX) * inf;
-    return out.set(-vel.x * mass * c, -vel.y * mass * c, -vel.z * mass * c);
+    _tv.set(0, 0, 0);
+    return steer(out, _tv, vel, mass, c);
   }
   if (field.kind === 'magnetic') {
     // F = q·v×B, with q/m folded into `strength`. The force is ⊥ to velocity, so it does no work — a
-    // body curves into a circle/helix at a mass-independent turn rate but keeps its speed. B points
-    // along the region's local +Y (aim it with the rotate gizmo). A resting body (v=0) feels nothing.
-    _tv.set(0, 1, 0).applyQuaternion(field.quat); // B direction
-    _d.crossVectors(vel, _tv); // v × B
-    return out.copy(_d).multiplyScalar(mass * speed * inf);
+    // body curves into a circle/helix at a mass-independent turn rate ω = (q/m)·B but keeps its speed.
+    // B points along the region's local +Y (aim it with the rotate gizmo). A resting body feels nothing.
+    // Integrated EXACTLY: rotate v about B̂ by φ = −ω·dt (Rodrigues), so |v| is preserved to round-off
+    // (the explicit v×B kick grew |v| by √(1+(ω·dt)²) every step — a slow outward spiral).
+    _tv.set(0, 1, 0).applyQuaternion(field.quat); // B̂
+    const phi = -speed * inf * FIELD_DT;
+    const cs = Math.cos(phi), sn = Math.sin(phi), dot = vel.dot(_tv);
+    _d.crossVectors(_tv, vel); // B̂ × v
+    const k = mass / FIELD_DT;
+    return out.set(
+      (vel.x * cs + _d.x * sn + _tv.x * dot * (1 - cs) - vel.x) * k,
+      (vel.y * cs + _d.y * sn + _tv.y * dot * (1 - cs) - vel.y) * k,
+      (vel.z * cs + _d.z * sn + _tv.z * dot * (1 - cs) - vel.z) * k,
+    );
   }
   if (field.kind === 'wind') {
     _tv.set(1, 0, 0).applyQuaternion(field.quat).multiplyScalar(speed); // blow toward wind velocity
@@ -377,7 +398,7 @@ export function fieldForce(
     const sign = field.kind === 'attractor' ? 1 : -1;
     _tv.copy(_d).divideScalar(_d.length() || 1).multiplyScalar(sign * speed);
   }
-  return out.set(_tv.x - vel.x, _tv.y - vel.y, _tv.z - vel.z).multiplyScalar(mass * RESPONSE * inf);
+  return steer(out, _tv, vel, mass, RESPONSE * inf);
 }
 
 /**
@@ -546,7 +567,7 @@ function tornadoForce(
     _d.x * invd * vt + _d.z * invd * vRad,
   );
   _tv.applyQuaternion(field.quat);
-  return out.set(_tv.x - vel.x, _tv.y - vel.y, _tv.z - vel.z).multiplyScalar(mass * RESPONSE * inf);
+  return steer(out, _tv, vel, mass, RESPONSE * inf);
 }
 
 /**
@@ -660,7 +681,7 @@ function turbulenceForce(
   const t = tSec * TURB_TIMESCALE;
   curlNoise(bodyPos.x * TURB_FREQ, bodyPos.y * TURB_FREQ, bodyPos.z * TURB_FREQ, t, _tv);
   _tv.multiplyScalar(field.strength * gain);
-  return out.set(_tv.x - vel.x, _tv.y - vel.y, _tv.z - vel.z).multiplyScalar(mass * TURB_RESPONSE * inf);
+  return steer(out, _tv, vel, mass, TURB_RESPONSE * inf);
 }
 
 /**
@@ -729,5 +750,5 @@ function pathForce(
     _tv.z += (tx * ry - ty * rx) * mag;
   }
   _tv.applyQuaternion(field.quat); // target velocity back into world space
-  return out.set(_tv.x - vel.x, _tv.y - vel.y, _tv.z - vel.z).multiplyScalar(mass * RESPONSE * inf);
+  return steer(out, _tv, vel, mass, RESPONSE * inf);
 }

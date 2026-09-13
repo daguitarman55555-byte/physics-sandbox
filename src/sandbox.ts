@@ -252,6 +252,23 @@ const CCD_SPEED = Infinity; // CCD is fully DISABLED. Always-on CCD was THE 1000
 
 const PALETTE = ['#5b8def', '#4fb89a', '#c9bb3a', '#e89948', '#dc4a4a', '#a978e0'];
 
+/**
+ * How two surfaces' coefficients combine at a contact (the dev lab caught Rapier's default AVERAGE
+ * getting both badly wrong against real life):
+ *  - FRICTION → geometric mean √(μ₁·μ₂) (Box2D's rule): ice (0.05) on the concrete-like floor (0.7)
+ *    grips at 0.19 — real ice-on-concrete range — where averaging gave 0.375 and ice braked 7.5× too
+ *    hard. Rapier has no geometric-mean rule, but storing √μ on every collider and combining by
+ *    MULTIPLY is exactly √μ₁·√μ₂. (Multiply outranks Average/Min, so every collider must store √μ.)
+ *  - RESTITUTION → the bouncier surface wins (MAX): a rubber ball (e 0.8) bounces like rubber on a
+ *    hard floor (e 0.1) instead of a dead 0.45.
+ * Applied once to each freshly created collider — calling it twice would take the root twice.
+ */
+export function setContactRules(c: RAPIER.Collider) {
+  c.setFriction(Math.sqrt(Math.max(0, c.friction())));
+  c.setFrictionCombineRule(RAPIER.CoefficientCombineRule.Multiply);
+  c.setRestitutionCombineRule(RAPIER.CoefficientCombineRule.Max);
+}
+
 /** Whole texture tiles per `len` world units (~2 m per tile, matching a 1 m box at one tile). */
 const tiles = (len: number) => Math.max(1, Math.round(len / 2));
 
@@ -563,6 +580,7 @@ export class Sandbox {
     const ground = this.world.createRigidBody(RAPIER.RigidBodyDesc.fixed().setTranslation(0, -0.5, 0));
     const col = this.world.createCollider(
       RAPIER.ColliderDesc.cuboid(500, 0.5, 500).setFriction(0.7).setRestitution(0.1), ground);
+    setContactRules(col); // the floor mixes with bodies by the same pair rules (concrete-like μ 0.7)
     // collision events fire when either collider has the flag; entities have it, so floor-vs-entity
     // contacts already appear in the drain — this handle lets us recognize them (floor slam breakage)
     this.groundHandle = col.handle;
@@ -888,6 +906,7 @@ export class Sandbox {
   private registerColliders(e: Entity) {
     for (let k = 0; k < e.body.numColliders(); k++) {
       const c = e.body.collider(k);
+      if (this.colliderToEntity.get(c.handle) !== e) setContactRules(c); // once per fresh collider
       c.setActiveEvents(RAPIER.ActiveEvents.COLLISION_EVENTS);
       this.colliderToEntity.set(c.handle, e);
     }
