@@ -576,7 +576,10 @@ function buildPanel(sandbox: Sandbox) {
   const dev = buildDevMode(sandbox);
   dev.onChange = (on) => bDev.classList.toggle('primary', on);
   bDev.onclick = () => dev.setOn(!dev.on);
-  dispRow.append(bHD, bTrails, bDev);
+  const bTint = el('button', '🎨 Field tint', 'mini primary');
+  bTint.title = 'Objects a field is acting on glow in that field’s colour';
+  bTint.onclick = () => { sandbox.fieldTintOn = !sandbox.fieldTintOn; bTint.classList.toggle('primary', sandbox.fieldTintOn); };
+  dispRow.append(bHD, bTrails, bTint, bDev);
   worldBody.append(dispRow);
 
   // === scene actions ===

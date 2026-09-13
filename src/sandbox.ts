@@ -78,6 +78,7 @@ export interface Entity {
   gravityScale?: number; // per-object gravity multiplier (1 = normal, 0 = weightless, <0 = floats up)
   chunks?: Chunk[]; // present for a rubble-pile COMPOUND: the component shapes it's fused from, each
   //                   kept as its own collider + geometry so a box+sphere merge looks like their union
+  fieldTint?: number; // colour of the field acting on it this step (0 = none) — the readability tint
   charge?: number; // charge-to-mass multiplier for magnetic (Lorentz) fields — undefined = model default
   medium?: MediumShape; // cached shape it presents to liquids and air (drag faces, buoyancy cells)
   hydroPrev?: THREE.Vector3; // last step's known applied force incl. gravity — added-mass contact estimate
@@ -3573,17 +3574,20 @@ export class Sandbox {
       let ready = false; // rotation/spin are only read when a medium needs them
       let liftInf = 0; // strongest gravity-suspension influence (a well's region, or a lift-flow tube)
       let flowInf = 0; // strongest realistic-flow influence at the body
+      let tintA2 = 0; e.fieldTint = 0; // colour of the field acting hardest on this body (readability tint)
 
       for (const { field } of this.fields) {
         if (field.attach && field.attach.entity === e) continue; // a carrier never feels its own field
         if (field.kind === 'fluid') {
           if (!ready) { this.readBodyState(e, st, mass); ready = true; }
+          const vBefore = media.vSub;
           liquidForces(field, shape, st, field.strength * gain, simT, media);
+          if (media.vSub > vBefore) { e.fieldTint = FLUID_PRESETS[field.fluid?.preset ?? 'water']?.color ?? FIELD_INFO.fluid.color; tintA2 = Infinity; }
           continue;
         }
         if (realistic && FLOW_KINDS.has(field.kind)) {
           const inf = flowVelocity(field, this._p, gain, this._fieldF, simT);
-          if (inf > flowInf) flowInf = inf; // acts through air drag below
+          if (inf > flowInf) { flowInf = inf; if (tintA2 < Infinity) e.fieldTint = FIELD_INFO[field.kind].color; }
           continue;
         }
         if (field.kind === 'magnet') {
@@ -3603,6 +3607,8 @@ export class Sandbox {
           }
         }
         this._s.add(this._fieldF);
+        const fa2 = this._fieldF.lengthSq();
+        if (fa2 > tintA2 && fa2 > 1e-12 * mass * mass) { tintA2 = fa2; e.fieldTint = FIELD_INFO[field.kind].color; }
         if (e === track && this._fieldF.lengthSq() > 0) this.devForce(`${FIELD_INFO[field.kind].label} #${field.id}`, FIELD_INFO[field.kind].color, this._fieldF.x, this._fieldF.y, this._fieldF.z);
         if (field.kind === 'gravitywell') {
           const fi = fieldInfluence(field, this._p);
@@ -3894,6 +3900,7 @@ export class Sandbox {
     const now = performance.now(); // one clock read per frame, reused by every skin flush + the ghost pulse
     for (const pool of this.pools.values()) pool.slots.length = 0;
     let selSeen = false; // did we render the selected entity this frame? (drives its motion trail)
+    const tintOn = this.fieldTintOn && this.fields.length > 0;
     for (const e of this.entities) {
       this._p.copy(e.prevPos).lerp(e.currPos, alpha);
       this._q.copy(e.prevQuat).slerp(e.currQuat, alpha);
@@ -3905,10 +3912,12 @@ export class Sandbox {
         mesh.quaternion.copy(this._q);
         // frozen reads as an icy glow; selection as a warm-grey lift; else no emissive. A compound
         // carries a material ARRAY (one per chunk), so tint every one.
+        const tinted = tintOn && !e.frozen && e !== this.selected && !!e.fieldTint;
         const hex = e.frozen ? 0x1c4a7a : e === this.selected ? 0x3a4152 : 0x000000;
+        if (tinted) this._tint.setHex(e.fieldTint!).multiplyScalar(0.3); else this._tint.setHex(hex);
         const mm = mesh.material;
-        if (Array.isArray(mm)) for (const m of mm) (m as THREE.MeshStandardMaterial).emissive?.setHex(hex);
-        else (mm as THREE.MeshStandardMaterial).emissive.setHex(hex);
+        if (Array.isArray(mm)) for (const m of mm) (m as THREE.MeshStandardMaterial).emissive?.copy(this._tint);
+        else (mm as THREE.MeshStandardMaterial).emissive.copy(this._tint);
         // throttled GPU upload of any paint the planet took this frame (the accretion lag lever)
         if (e.skin) e.skin.flushIfDue(now);
         continue;
@@ -3918,11 +3927,13 @@ export class Sandbox {
       this._m.compose(this._p, this._q, this._s);
       // frozen → icy tint (takes priority so you can see what's held); else selected → highlight;
       // else the base look. Textured pools tint via instanceColor (multiplies the map).
-      const col = e.frozen
+      let col = e.frozen
         ? (e.mat.maps ? FROZEN_TINT : FROZEN_COLOR)
         : e.mat.maps
           ? (e === this.selected ? SELECT_TINT : WHITE)
           : (e === this.selected ? SELECT_COLOR : e.color);
+      // inside a field: blend toward that field's colour, so you can see WHO is being acted on
+      if (tintOn && e.fieldTint && !e.frozen && e !== this.selected) col = this._tint.copy(col).lerp(this._tint2.setHex(e.fieldTint), 0.5);
       // pool ref is cached on the entity: a box/sphere's (kind × material) never changes, so we
       // resolve it once instead of rebuilding a string key + Map.get for every body every frame
       const pool = (e.pool ??= this.getPool(e.kind as 'box' | 'sphere', e.mat));
@@ -4012,6 +4023,11 @@ export class Sandbox {
   /** Toggle the glowing flow tracers on/off (they're a visual read-out, never affect the physics). */
   setFlowViz(on: boolean) { this.fieldFlow.setEnabled(on); }
   get flowViz(): boolean { return this.fieldFlow.isEnabled; }
+
+  /** Tint objects that a field is acting on in that field's colour (a pure visual read-out). */
+  fieldTintOn = true;
+  private _tint = new THREE.Color();
+  private _tint2 = new THREE.Color();
 
   /** Toggle the selected-object motion trail (a pure visual read-out). */
   get trailsEnabled(): boolean { return this.trailsOn; }

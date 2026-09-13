@@ -21,6 +21,7 @@ const MAX_LIFE = 1.9; // seconds a tracer lives before it respawns (keeps the fl
 const DOT_SIZE = 0.55; // world-space size of a tracer dot
 const SPEED_CAP = 16; // clamp tracer speed so a strong field streaks stay watchable, not teleporting
 const DAMP = 0.985; // gentle drag so a tracer that coasts out of the region slows instead of flying off
+const STREAK_S = 0.09; // a streak trails each tracer by its velocity × this (s) — flow DIRECTION readable in a still frame
 
 /** A soft radial dot so tracers read as glowing motes rather than hard squares. (Shared with the
  *  draw pad, which uses the same texture to make sketch strokes glow.) */
@@ -48,6 +49,9 @@ interface Viz {
   colAttr: THREE.BufferAttribute;
   color: THREE.Color; // the field's kind color (tracers are tinted by it, dimmed by fade)
   bound: number; // respawn a tracer once it drifts past this distance from the field centre
+  streaks: THREE.LineSegments; // a short fading tail behind each mote
+  streakPos: Float32Array; // 6·N (tail xyz, head xyz)
+  streakCol: Float32Array;
 }
 
 export class FieldFlow {
@@ -84,23 +88,28 @@ export class FieldFlow {
       let v = this.viz.get(field.id);
       if (!v) { v = this.make(field); this.viz.set(field.id, v); }
       (v.points.material as THREE.PointsMaterial).opacity = field.id === ghostId ? 0.35 : 1;
+      (v.streaks.material as THREE.LineBasicMaterial).opacity = field.id === ghostId ? 0.3 : 0.85;
       this.advect(field, v, gain, dt);
     }
     // drop clouds whose field is gone (deleted / committed-away / hidden)
     for (const [id, v] of this.viz) {
       if (seen.has(id)) continue;
-      this.group.remove(v.points);
+      this.group.remove(v.points, v.streaks);
       v.points.geometry.dispose();
       (v.points.material as THREE.Material).dispose();
+      v.streaks.geometry.dispose();
+      (v.streaks.material as THREE.Material).dispose();
       this.viz.delete(id);
     }
   }
 
   dispose() {
     for (const v of this.viz.values()) {
-      this.group.remove(v.points);
+      this.group.remove(v.points, v.streaks);
       v.points.geometry.dispose();
       (v.points.material as THREE.Material).dispose();
+      v.streaks.geometry.dispose();
+      (v.streaks.material as THREE.Material).dispose();
     }
     this.viz.clear();
     this.dot.dispose();
@@ -123,8 +132,14 @@ export class FieldFlow {
     });
     const points = new THREE.Points(geo, mat);
     points.frustumCulled = false;
-    this.group.add(points);
-    return { points, pos, vel, life, posAttr, colAttr, color: new THREE.Color(FIELD_INFO[field.kind].color), bound };
+    const streakPos = new Float32Array(n * 6), streakCol = new Float32Array(n * 6);
+    const sg = new THREE.BufferGeometry();
+    sg.setAttribute('position', new THREE.BufferAttribute(streakPos, 3).setUsage(THREE.DynamicDrawUsage));
+    sg.setAttribute('color', new THREE.BufferAttribute(streakCol, 3).setUsage(THREE.DynamicDrawUsage));
+    const streaks = new THREE.LineSegments(sg, new THREE.LineBasicMaterial({ vertexColors: true, transparent: true, blending: THREE.AdditiveBlending, depthWrite: false }));
+    streaks.frustumCulled = false;
+    this.group.add(points, streaks);
+    return { points, pos, vel, life, posAttr, colAttr, color: new THREE.Color(FIELD_INFO[field.kind].color), bound, streaks, streakPos, streakCol };
   }
 
   private advect(field: Field, v: Viz, gain: number, dt: number) {
@@ -154,9 +169,18 @@ export class FieldFlow {
       // fade in from birth, out toward death (sin over the life fraction) → soft, breathing motes
       const fade = Math.sin(Math.PI * Math.max(0, Math.min(1, life[i] / MAX_LIFE)));
       col[j] = color.r * fade; col[j + 1] = color.g * fade; col[j + 2] = color.b * fade;
+      // streak: tail at pos − vel·STREAK_S (dark, fades into the background) → head at the mote (bright)
+      const k = i * 6;
+      const stp = v.streakPos, sc = v.streakCol;
+      stp[k + 3] = pos[j]; stp[k + 4] = pos[j + 1]; stp[k + 5] = pos[j + 2];
+      stp[k] = pos[j] - vel[j] * STREAK_S; stp[k + 1] = pos[j + 1] - vel[j + 1] * STREAK_S; stp[k + 2] = pos[j + 2] - vel[j + 2] * STREAK_S;
+      sc[k] = 0; sc[k + 1] = 0; sc[k + 2] = 0;
+      sc[k + 3] = col[j] * 0.8; sc[k + 4] = col[j + 1] * 0.8; sc[k + 5] = col[j + 2] * 0.8;
     }
     v.posAttr.needsUpdate = true;
     v.colAttr.needsUpdate = true;
+    (v.streaks.geometry.getAttribute('position') as THREE.BufferAttribute).needsUpdate = true;
+    (v.streaks.geometry.getAttribute('color') as THREE.BufferAttribute).needsUpdate = true;
   }
 
   /** Drop tracer `i` back into the field's region with a fresh (staggered) life and zero velocity. */

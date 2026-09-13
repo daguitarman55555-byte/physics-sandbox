@@ -654,6 +654,16 @@ export const EXPERIMENTS: Experiment[] = [
     },
   },
   {
+    id: 'floor-region', group: 'Fields', name: 'A region standing on the floor acts at the floor', law: 'no soft-edge fade at the ground face', tolPct: 2,
+    run: (c) => {
+      c.S.setGravityY(0);
+      c.field({ kind: 'wind', shape: 'box', pos: [0, 5, 0], size: [20, 5, 20], strength: 8 });
+      const e = c.sphere([-5, 0.6, 0], 0.4, c.mat({}));
+      c.S.step(30);
+      return { measured: e.body.linvel().x, expected: 8 * (1 - Math.exp(-2.5)), unit: 'm/s', detail: 'ball 0.6 m above the floor inside a wind box whose bottom face IS the floor, after 0.5 s (it used to feel ~5%)' };
+    },
+  },
+  {
     id: 'wind-gusts', group: 'Fields', name: 'Gusty wind statistics', law: 'mean ≈ set speed, gust factor 1.3–1.6', tolPct: 0,
     run: (c) => {
       const rec = c.field({ kind: 'wind', shape: 'box', pos: [0, 10, 0], size: [60, 20, 60], strength: 12, gust: 0.6 });

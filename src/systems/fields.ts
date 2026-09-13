@@ -246,6 +246,8 @@ function steer(out: THREE.Vector3, target: THREE.Vector3, vel: THREE.Vector3, ma
   return out.set((target.x - vel.x) * k, (target.y - vel.y) * k, (target.z - vel.z) * k);
 }
 const SOFT_EDGE = 0.55; // full strength inside this fraction of the region; smoothstep to 0 by the edge
+const _gy = new THREE.Vector3(); // scratch: a region's local up in world space
+const GROUND_EPS = 0.05; // a region whose bottom is within this of the floor (or below it) counts as standing on it
 const PATH_LOOKAHEAD = 4; // samples ahead the flow steers toward (follows curvature + draws onto the path)
 const SWIRL_GAIN = 0.7; // path swirl scales with radius (0 at the centreline) and this cap — keeps it gentle
 // Gravity well: GM = strength·gain·WELL_GM sets how hard the 1/r² pull is; WELL_SOFT (metres) is a
@@ -313,12 +315,18 @@ export function fieldInfluence(field: Field, bodyPos: THREE.Vector3): number {
   if (field.shape !== 'sphere') _d.applyQuaternion(_iq.copy(field.quat).invert()); // into region-local axes
   const sz = field.size;
   let n: number; // normalized reach: 0 at centre, 1 at the boundary
+  // A box/cylinder region STANDING ON the floor doesn't fade toward its bottom face: the ground is the
+  // edge there, and fading made a floor-resting region exert ~2% of its force on the objects lying in it
+  // (why regions used to have to be sunk into the floor). The tornado keeps its tuned sunk profile.
+  let ay = Math.abs(_d.y) / Math.max(sz.y, 1e-3);
+  if (field.shape !== 'sphere' && _d.y < 0 && field.kind !== 'tornado' && field.pos.y - sz.y <= GROUND_EPS
+    && Math.abs(_gy.set(0, 1, 0).applyQuaternion(field.quat).y) > 0.999) ay = 0;
   if (field.shape === 'sphere') {
     n = _d.length() / Math.max(sz.x, 1e-3);
   } else if (field.shape === 'box') {
-    n = Math.max(Math.abs(_d.x) / Math.max(sz.x, 1e-3), Math.abs(_d.y) / Math.max(sz.y, 1e-3), Math.abs(_d.z) / Math.max(sz.z, 1e-3));
+    n = Math.max(Math.abs(_d.x) / Math.max(sz.x, 1e-3), ay, Math.abs(_d.z) / Math.max(sz.z, 1e-3));
   } else {
-    n = Math.max(Math.hypot(_d.x, _d.z) / Math.max(sz.x, 1e-3), Math.abs(_d.y) / Math.max(sz.y, 1e-3));
+    n = Math.max(Math.hypot(_d.x, _d.z) / Math.max(sz.x, 1e-3), ay);
   }
   if (n >= 1) return 0; // outside the region
   if (n <= SOFT_EDGE) return 1; // solid interior
