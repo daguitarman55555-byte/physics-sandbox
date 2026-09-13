@@ -25,8 +25,8 @@ Status legend: ✅ already built · 🔜 proposed · 🧪 experimental/uncertain
 
 | Idea | What it does | Fit / notes | Effort |
 |---|---|---|---|
-| 🔜 **Magnetic field** | F = q·v×B — force ⊥ velocity, so movers curve into circles/helices. Distinct from vortex (position-driven): a magnetic zone only affects *moving* bodies, and faster ones curve harder. Give each body a "charge" (± by material or per-object toggle) so red/blue objects split apart in the same field — the classic mass-spectrometer demo, and a genuinely new *interaction* (charge as a new object property). | `fieldForce` already receives `vel`; add per-entity `charge`. The old Coriolis-well bug is actually the correct physics HERE (cyclotron circles are what magnets do). | M |
-| 🔜 **Drag zone / slow-mo bubble** | Damps velocity toward zero inside the region — terminal-velocity pockets, "bullet-time" bubbles you can throw things through. Fun inverse of every other field: it *removes* energy. Also the missing piece for orbits: a thin drag shell makes captured debris settle into clean rings (how accretion discs actually form). | Trivial in the model: target velocity = 0, response = strength. | S |
+| ✅ **Magnetic field** (+ per-object charge; plus a separate steel-pulling **Magnet** kind) | F = q·v×B — force ⊥ velocity, so movers curve into circles/helices. Distinct from vortex (position-driven): a magnetic zone only affects *moving* bodies, and faster ones curve harder. Give each body a "charge" (± by material or per-object toggle) so red/blue objects split apart in the same field — the classic mass-spectrometer demo, and a genuinely new *interaction* (charge as a new object property). | `fieldForce` already receives `vel`; add per-entity `charge`. The old Coriolis-well bug is actually the correct physics HERE (cyclotron circles are what magnets do). | M |
+| ✅ **Drag zone / slow-mo bubble** | Damps velocity toward zero inside the region — terminal-velocity pockets, "bullet-time" bubbles you can throw things through. Fun inverse of every other field: it *removes* energy. Also the missing piece for orbits: a thin drag shell makes captured debris settle into clean rings (how accretion discs actually form). | Trivial in the model: target velocity = 0, response = strength. | S |
 | 🔜 **Harmonic trap (spring well)** | F = −k·x toward the centre — bodies oscillate forever through the middle (all periods equal, regardless of amplitude: the isochronism demo). Reads as "bouncy magnet". | One line in `fieldForce`; conservative like the well, so no damping term. | S |
 | 🧪 **Time-dilation zone** | Scale each body's *effective dt* inside the region (slow-motion field). Real crowd-pleaser in sandbox videos. Rapier can't step bodies at different rates, but a good fake: inside the region, scale velocity down on entry and up on exit (store a per-entity factor). Honest limitation: contacts across the boundary look odd. | M/L, needs per-entity state + careful enter/exit bookkeeping. | L |
 | 🧪 **Repulsor floor / force platform** | A flat box field pushing +Y with strength ≈ g — a hover zone; objects float and bob on it. Trivially a wind pointed up, but a dedicated preset with tuned strength = g reads as a new toy. | Quick-scene preset, zero new code. | S |
@@ -41,17 +41,17 @@ attached to objects). The pattern: **attach forces to OBJECTS, not just regions.
 |---|---|---|---|
 | 🔜 **Thruster (per-object)** | Click an object → attach a small rocket (constant body-local force + flame sprite). Suddenly every object is a vehicle; combined with joints you build steerable contraptions. The single most-requested "tool gun" feature. | New per-entity list applied in `stepPhysics`; marker = cone + flame sprite. | M |
 | 🔜 **Grab upgrades** | Scroll while grabbing = reel the object closer/farther; R while grabbing = rotate it. Straight from the physics gun. | Extend existing grab (kinematic anchor already exists). | S |
-| 🔜 **Motor joint** | The joints system already docks hinges — add `configureMotorVelocity` on the revolute so hinges SPIN (fans, wheels, windmills). Rapier supports it natively. | S — `joint.configureMotorVelocity(v, factor)`. | S |
+| ✅ **Motor joint** | The joints system already docks hinges — add `configureMotorVelocity` on the revolute so hinges SPIN (fans, wheels, windmills). Rapier supports it natively. | S — `joint.configureMotorVelocity(v, factor)`. | S |
 | 🔜 **Slingshot / launcher tool** | Drag an object back like a slingshot (shows predicted trajectory arc), release to fire. The aim-arc preview is the juice. | Ballistic arc = pure math over gravity; reuse drag infra. | M |
 
 ## 3. Field UX & visualization
 
 | Idea | What it does | Fit / notes | Effort |
 |---|---|---|---|
-| 🔜 **Motion streaks for tracers** | Replace/augment tracer dots with short line segments along their velocity (prev→curr). Flow *direction* becomes readable in a still frame and screenshots. | `fieldviz` already stores positions each frame; LineSegments buffer. | S |
-| 🔜 **Affected-object tint** | Objects currently inside any field get a faint emissive tint in the field's color — you instantly see *who* is being acted on. | `syncRender` already does per-instance color (frozen tint exists). | S |
+| ✅ **Motion streaks for tracers** | Replace/augment tracer dots with short line segments along their velocity (prev→curr). Flow *direction* becomes readable in a still frame and screenshots. | `fieldviz` already stores positions each frame; LineSegments buffer. | S |
+| ✅ **Affected-object tint** | Objects currently inside any field get a faint emissive tint in the field's color — you instantly see *who* is being acted on. | `syncRender` already does per-instance color (frozen tint exists). | S |
 | 🔜 **Field strength heat-shell** | Optional translucent shells at 25/50/75% influence radii (like the magnetic-field line interactives) so the soft edge is *visible*. | Marker add-on; three more wireframe hulls. | S |
-| 🔜 **Per-object trails** | Toggleable ribbon trails on objects (orbit paths! tornado helixes!). The Universe-Sandbox signature look; makes the well's ellipses undeniable. | Ring buffer per entity + one Line per tracked object; cap to selection or ~20 nearest. | M |
+| ✅ (selected object) **Per-object trails** | Toggleable ribbon trails on objects (orbit paths! tornado helixes!). The Universe-Sandbox signature look; makes the well's ellipses undeniable. | Ring buffer per entity + one Line per tracked object; cap to selection or ~20 nearest. | M |
 
 ## 4. Drawing (the drawpad's next steps)
 
@@ -71,6 +71,13 @@ attached to objects). The pattern: **attach forces to OBJECTS, not just regions.
   players report this is how they discover mechanics.
 - 🧪 **Save/share a field setup** as JSON (precursor to Phase 7 save/load — fields serialize
   trivially except `path.pts`, which re-samples from `spec`).
+
+## 5b. Shipped 2026-09-13 beyond this list
+
+Realistic force model (flows = moving air with shape drag), wind gusts, realistic liquid tanks (multi-point
+buoyancy, added mass, waves, currents, viscosity), air resistance + Magnus, TNT-scaled blasts with
+shielding + blast breakage, fields carried by objects, grounded regions without floor fade, and the dev-mode
+Lab that checks all of it against real-world values. See docs/FEATURES.md.
 
 ## 6. Prioritized shortlist (if Rafael asks "what next")
 

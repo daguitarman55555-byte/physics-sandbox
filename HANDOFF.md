@@ -976,6 +976,58 @@ LIKELY NEXT (Rafael's plan): BREAKAGE realism is DONE — next is the MUTUAL GRA
 the FORCES. Also queued: affected-object glow/tint; drawpad per-axis ortho cam; Tier-2 (rewind, share
 URLs, save accreted planets/compounds). NB screenshotting a 500ms shockwave: pin `S.shocks[0].born =
 now-190`. Research dossier: docs/FORCES_RESEARCH.md.
+DEV MODE + REALISM PASS (2026-09-13, one session, 7 commits c11f2f9…) — Rafael asked for a dev mode "to
+analytically see what's going on and compare to real life", the field bugs fixed, and every proposed field
+upgrade. What shipped, and what to know:
+ • DEV MODE (`src/devmode.ts`, `systems/devlab.ts`, `systems/devviz.ts`; World › Display 🧪 or the ` key).
+   Live tab = per-section step profiler (`Sandbox.consumeDevTiming`, laps in stepPhysics, Chrome clamps
+   performance.now to 0.1 ms so read averages) + whole-scene conservation ledger with graphs and a
+   closed-system check (history restarts on `userEpoch` bumps: push/blow/detonate/gravity/field edits/grab
+   release). Object tab = SI properties, force-by-source breakdown (`devTrack` body records every force we
+   apply via `devForce`; residual m·a − Σ = contacts/joints). Overlays = Rapier debugRender colliders,
+   velocity lines, force arrows, free-flight path (hooked by `Sandbox.onFrame`).
+ • THE LAB — 48 experiments vs real-world values, each in a HEADLESS lab Sandbox: `new Sandbox(canvas,
+   { headless: true })` builds no renderer/input/loop/default scene; experiments use `resetForLab()`,
+   `step(n)`, public `addField(FieldData)`, `LabCtx.place()` (spawn adds random spin — always place),
+   `detonate(field)`. `dev.runAll()` from the console. RUN IT AFTER ANY PHYSICS CHANGE — it caught 5 real
+   bugs on its first run. Add an experiment for every new physical feature.
+ • UNITS: sim mass = tonnes (density in water-units), so forces are kN, energies kJ. `SI_MASS` = 1000. The
+   inspector used to print tonnes as "kg" — fixed.
+ • ACCURACY FIXES (lab-found): contact pairs now friction √(μ₁μ₂) (stored as √μ + Multiply rule — every
+   collider MUST go through `setContactRules` exactly once; `registerColliders` does it for entities, the
+   floor and lab ramps call it directly) and restitution Max; exact exponential steering (`steer` in
+   fields.ts, FIELD_DT = 1/60) for all target-velocity fields and the drag zone; exact Rodrigues rotation
+   for magnetic fields; turbulence/tornado use SIM time (fieldForce/flowVelocity take `t`).
+ • MEDIA (`systems/media.ts`) — all non-contact forces now go through `Sandbox.applyForces` (one impulse +
+   one torque impulse per body): arcade `fieldForce`, realistic `flowVelocity` → air drag, `liquidForces`
+   (3×3×3 buoyancy cells / exact sphere cap, Clift–Gauvin sphere drag, 6-face flat-plate drag Cp 0.8/0.25
+   Cf 0.005, viscosity, radiation damping ζ 0.2, waves ω²=gk, current), `airForces` (+Magnus, air
+   buoyancy), ADDED MASS (C 0.5, exact for known forces; contact estimated from last step via
+   `Entity.hydroPrev` so a body resting on the tank floor isn't lightened). `Entity.medium` caches the shape
+   (rebuilt when size changes). Air is skipped for near-still bodies and when drag < 0.05% of weight —
+   without that, a femto-impulse every step kept piles awake (+40% world.step at 1000 bodies).
+   Measured: ~1 ms/step air cost for 1000 settled bodies, ~2.2 ms while all 1000 fall.
+ • FIELD MODEL: `Sandbox.fieldModel` 'arcade' (default — the tuned tornado etc. untouched) | 'realistic'.
+   In realistic, strengths are real wind speeds (a gale is 20–30 m/s; a strength-10 tornado moves foam
+   only), explosions are kg TNT, magnetic fields ignore uncharged bodies. Air resistance defaults ON.
+ • NEW KINDS/PROPS: 'magnet' (dipole, ∇B², steel via `Material.magnetic`), `Field.gust`, `Field.fluid`
+   (FLUID_PRESETS), `Field.attach` (carried by an entity: follow in `updateAttachedFields` at step start,
+   interpolated marker in `syncCarriedMarkers`, carrier skipped, realistic reaction via
+   applyImpulseAtPoint; saved by entity index), `Entity.charge`, `Entity.fieldTint`, Foam material.
+   `fieldInfluence` no longer fades toward the bottom face of an upright box/cylinder region standing on
+   the floor (tornado excluded — keeps its sunk tuning).
+ • VERIFIED: lab 48/48; tornado regression + save/load round trip of every new property (see git log);
+   screenshots of dev panel tabs, wavy tank with floating mixes, magnet on a frozen crane, tinted vortex.
+ • TESTING WITHOUT THE CLAUDE PREVIEW TOOL (it wasn't available this session): headless Chrome on
+   --remote-debugging-port + a tiny Node CDP script (Node 24 has global WebSocket) — navigate with an
+   injected console-error hook, Runtime.evaluate test scripts (`await dev.runAll()`), and
+   Page.captureScreenshot as JPEG (PNG capture hung under SwiftShader). Screenshots take ~60 s there.
+ • GOTCHA: some src files are CRLF on disk (git autocrlf) and new ones LF — scripted multi-line
+   replacements must normalize line endings or the markers silently don't match.
+ • NOT DONE / NEXT: particle fluids (SPH/PBF — the tank is still a region, not water you can pour), cloth,
+   soft bodies, sand; thruster tool; harmonic-trap field; realistic reaction for fans (flow fields don't
+   push their carrier); rotational added mass; energy ledger excludes field potentials (wells) by design.
+
 STANDING RULE (Rafael, 2026-07-16): git commit AND push after EVERY build — don't wait to be asked.
 
 Stability hardening (2026-07-13): dynamic bodies now spawn with CCD enabled and reject deeply-

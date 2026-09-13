@@ -234,6 +234,33 @@ A checklist so nothing is lost. `[x]` = in Phase 1 today · `[ ]` = planned (wit
 - [x] **Buoyancy — Fluid field** (2026-07-21) — a tank of water: region top = surface, Archimedes
       upward force ∝ displaced volume + fluid drag; strength = fluid density (1 = water), so a body
       lighter than the fluid floats and a denser one sinks (verified wood 9.91 / steel 0.5).
+- [x] **Realistic liquids** (2026-09-13, `systems/media.ts`) — the tank became a real liquid:
+      **multi-point buoyancy** (3×3×3 cells → righting torque: ice floats flat, a wood cube rolls onto
+      its edge at 45°, the textbook metacentric results), exact spherical-cap volume for balls,
+      **added mass** (steel sinks at 8.04 m/s², not 8.55), the **real sphere drag curve** (Clift–Gauvin,
+      Stokes → Cd≈0.42) and a six-face flat-plate model for boxes, **viscosity** (honey!), wave-radiation
+      damping so floats settle, **deep-water waves** (ω² = g·k, Airy orbital velocities — floats bob at
+      √(2πλ/g)) and **currents**. Liquid presets: water, sea water, oil, honey, mercury. Tanks draw a
+      tinted body + an animated wave surface. The raised-tank bug (things under a tank floated up) is fixed.
+- [x] **Air resistance** (World toggle, on) — drag on every moving body with the same shape models,
+      **Magnus lift** on spinning balls, the air's own buoyancy; skipped when under 0.05% of a body's
+      weight so piles still sleep. New **Foam** material (30 kg/m³) where air visibly matters.
+- [x] **Arcade ↔ Realistic force model** (Fields panel) — Arcade keeps the tuned target-speed steering;
+      Realistic turns wind/vortex/tornado/turbulence/path fields into moving **air** that pushes by drag
+      on each body's real shape (a gale throws foam, steel barely moves), makes magnetic fields act only
+      on charged bodies, and sizes explosions in **kg of TNT**.
+- [x] **Wind gusts** — gustiness 0–1: speed and heading wander with noise advected downwind
+      (gust factor 1.43 at 0.6, real winds 1.3–1.6).
+- [x] **Per-object charge** (inspector q/m slider) — magnetic (Lorentz) fields scale with it.
+- [x] **Magnet** field — a dipole electromagnet that pulls only ferromagnetic material (steel, and the
+      steel inside accreted bodies) with F ∝ ∇(B²) → 1/r⁷; bar-magnet glyph with true dipole field lines.
+- [x] **Realistic explosions** — Hopkinson–Cranz scaled impulse per face (light broad bodies fly and
+      spin), line-of-sight shielding (a wall passes ~15%), and blast breakage with Breakage on (both models).
+- [x] **Fields carried by objects** (editor 📌) — a field rides its carrier's pose (a magnet on a crane,
+      a star you can throw); the carrier ignores its own field and, in Realistic mode, takes the reaction
+      of pulling fields (momentum conserved to 1e-7).
+- [x] **Readability** — objects a field is acting on blend toward its colour (Display › Field tint);
+      flow tracers draw velocity streaks; a region standing on the floor no longer fades at the floor.
 - [x] **Field placement & editing** — picking a kind spawns a translucent **hologram** at the view
       centre that exerts **no force** until you confirm it (the commit-or-cancel pattern every 3D
       builder uses). Position it with an axis-constrained **gizmo** (three.js TransformControls,
@@ -350,6 +377,27 @@ A checklist so nothing is lost. `[x]` = in Phase 1 today · `[ ]` = planned (wit
       normal, 0 weightless, negative floats up; saved/loaded.
 - [x] **Motion trail** (2026-07-21) — a fading ribbon follows the selected object (Display "Trails"
       toggle) so you can read its path.
+
+## Dev mode & accuracy — `src/devmode.ts`, `systems/devlab.ts`, `systems/devviz.ts`
+- [x] **🧪 Dev mode window** (World › Display, or <kbd>`</kbd>) — **Live**: per-section step profiler,
+      whole-scene ledger (mass, linear + spin KE, gravity + mutual PE, momentum, angular momentum) with
+      graphs and a closed-system check (energy may only fall); **Object**: SI properties (mass, volume,
+      density, principal inertia), state, energy, a **force-by-source breakdown in N** (gravity, every
+      field, buoyancy, drag, added mass, residual = contacts/joints) and a free-flight parabola check.
+- [x] **3D overlays** — Rapier collider wireframes, velocity lines, per-source force arrows, free-flight path.
+- [x] **The Lab — 48 real-world experiments** run in a headless lab Sandbox (same code path, scene
+      untouched) and graded pass/warn/fail against the real value: free fall, projectile, pendulum
+      period & energy, spring T=2π√(m/k), rubber bounce, ice slide, ramp slide/roll, hollow-ball inertia,
+      elastic collision, momentum, floating drafts (box/ball), added mass (sinking/rising), terminal speed
+      in water and honey, float stability (ice flat / wood tilted), wave period, current drift, foam
+      terminal velocity, cube wind drag, gale on foam vs steel, Magnus, drag zone, cyclotron, charge,
+      magnet falloff, gravity-well & binary orbits, gust statistics, blast scaling/mass/shielding,
+      carried-field momentum, accretion & shatter mass conservation, deterministic replay.
+      Scriptable: `await dev.runAll()`.
+- [x] **Accuracy fixes the Lab found** — contact pairs: friction √(μ₁μ₂), restitution max (a rubber ball
+      bounced at e 0.45, ice braked 7.5× too hard); exact exponential steering/drag decay (was −3.4%/s);
+      exact magnetic rotation (explicit v×B gained 37% speed in 3 loops); field time-varying patterns
+      on the SIM clock (deterministic replay); inspector/forces window in real SI units (showed tonnes as kg).
 
 ## Effects & chemistry — `systems/effects.ts`, `systems/chemistry.ts` (Phase 5)
 - [ ] Temperature: heat sources · conduction · thermal expansion · melt→swap (Module T rule)

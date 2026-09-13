@@ -16,16 +16,27 @@ npm run dev
 
 Then open the URL Vite prints (usually http://localhost:5173).
 
-## What works now — Phase 1 (the real-time core)
+## What works now
 
-- **Hundreds of objects at 60fps.** Drawn with `InstancedMesh` (one draw call per shape), stepped by
-  Rapier at a fixed timestep with render interpolation for glassy motion.
-- **Spawn** boxes & spheres (or `+100` at once), **drag & throw** any object with the mouse,
-  **orbit/pan/zoom** camera.
-- **Gravity** slider + Earth / Moon / Zero-G presets, **reset scene**.
-- **Object inspector** — click any object to see its live speed, angular velocity, mass, energy, and
-  sleep state.
-- Live **FPS / object-count / awake-count** HUD.
+- **Real-time core** — 1000+ objects, fixed timestep + render interpolation, drag & throw, pause /
+  slow-mo, save / load, object inspector and live free-body forces window (real SI units).
+- **Shapes from equations** — solids of revolution, parametric curves & surfaces, implicit surfaces,
+  ~200-formula library, exact mass & inertia; materials (rubber, steel, ice, wood, stone, foam).
+- **Forces & fields** — attract / repel, wind (with gusts), vortex, tornado, flow paths (incl. drawn),
+  gravity well, turbulence, magnetic (Lorentz, per-object charge), **magnet** (pulls steel only),
+  drag zone, **liquid tanks** (water / sea / oil / honey / mercury, waves, currents), explosions.
+  Fields can be **carried by objects**. An **Arcade ↔ Realistic** force model: Realistic flows are
+  moving air that push by drag on each shape; blasts are TNT-scaled with shielding.
+- **Realistic media** — multi-point buoyancy (floats right themselves), added mass, the real sphere
+  drag curve, viscosity, wave-radiation damping, air resistance with Magnus lift.
+- **Joints & tools** — weld, door hinge (+motor), spring, rope; freeze, push, blow, duplicate, brush.
+- **Space** — mutual gravity (Barnes-Hut), accretion into planets with painted skins, impact
+  breakage, craters, Roche-limit tidal breakup.
+- **🧪 Dev mode** (World › Display, or the <kbd>`</kbd> key) — step profiler, whole-scene
+  energy / momentum ledger, per-source force breakdown in N, collider / velocity / force overlays, and
+  a **Lab of 48 real-world experiments** (free fall, pendulum, bounce, friction, rolling, buoyancy,
+  terminal velocity, Magnus, cyclotron, orbits, blast scaling, conservation, determinism…) that run
+  in a hidden lab world and report simulator vs. real value. Scriptable via `window.dev`.
 
 Controls: **left-drag an object** to throw it · **left-drag empty space** to orbit · **scroll** to
 zoom · **right-drag** to pan · **click** an object to inspect it.
@@ -51,10 +62,12 @@ Design docs (rich, external): the
 ```
 src/
   main.ts            boot: init Rapier, create Sandbox, wire UI, start
-  sandbox.ts         Phase 1 core — Rapier world + Three render + fixed-timestep loop + spawn/drag/select
+  sandbox.ts         the core — Rapier world + Three render + fixed-timestep loop, entities, fields, tools
   ui.ts              control panel, HUD, object inspector (DOM; reads/commands the Sandbox only)
+  devmode.ts         dev mode window: profiler, conservation ledger, force breakdown, the Lab
   style.css
-  systems/           future features, each a "system" over the entity registry (see its README)
+  systems/           each feature a "system": fields, media (liquids/air), devlab (experiments),
+                     devviz (overlays), nbody, shapes, implicit, planettex, joints, persistence…
   worlds/            Cosmos / Quantum / Subatomic — separate solvers, shared renderer (see its README)
 docs/                roadmap, feature catalog, architecture
 ```
